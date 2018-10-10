@@ -438,30 +438,6 @@ tuple_field_raw(struct tuple_format *format, const char *tuple,
 }
 
 /**
- * Get tuple field by its name.
- * @param format Tuple format.
- * @param tuple MessagePack tuple's body.
- * @param field_map Tuple field map.
- * @param name Field name.
- * @param name_len Length of @a name.
- * @param name_hash Hash of @a name.
- *
- * @retval not NULL MessagePack field.
- * @retval     NULL No field with @a name.
- */
-static inline const char *
-tuple_field_raw_by_name(struct tuple_format *format, const char *tuple,
-			const uint32_t *field_map, const char *name,
-			uint32_t name_len, uint32_t name_hash)
-{
-	uint32_t fieldno;
-	if (tuple_fieldno_by_name(format->dict, name, name_len, name_hash,
-				  &fieldno) != 0)
-		return NULL;
-	return tuple_field_raw(format, tuple, field_map, fieldno);
-}
-
-/**
  * Retrieve msgpack data by JSON path.
  * @param data Pointer to msgpack with data.
  * @param path The path to process.

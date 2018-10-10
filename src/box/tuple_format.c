@@ -1073,10 +1073,7 @@ tuple_field_raw_by_path(struct tuple_format *format, const char *tuple,
 		goto error;
 	switch(token.type) {
 	case JSON_TOKEN_NUM: {
-		int index = token.num;
-		*field = tuple_field_raw(format, tuple, field_map, index);
-		if (*field == NULL)
-			return 0;
+		fieldno = token.num;
 		break;
 	}
 	case JSON_TOKEN_STR: {
@@ -1093,10 +1090,8 @@ tuple_field_raw_by_path(struct tuple_format *format, const char *tuple,
 			 */
 			name_hash = field_name_hash(token.str, token.len);
 		}
-		*field = tuple_field_raw_by_name(format, tuple, field_map,
-						 token.str, token.len,
-						 name_hash);
-		if (*field == NULL)
+		if (tuple_fieldno_by_name(format->dict, token.str, token.len,
+					  name_hash, &fieldno) != 0)
 			return 0;
 		break;
 	}
@@ -1105,13 +1100,17 @@ tuple_field_raw_by_path(struct tuple_format *format, const char *tuple,
 		*field = NULL;
 		return 0;
 	}
-	rc = tuple_field_go_to_path(field, path + lexer.offset,
-				    path_len - lexer.offset);
+	/* Optimize indexed JSON field data access. */
+	struct key_part part;
+	part.fieldno = fieldno;
+	part.path = (char *)path + lexer.offset;
+	part.path_len = path_len - lexer.offset;
+	rc = tuple_field_by_part_raw_slowpath(format, tuple, field_map, &part,
+					      field);
 	if (rc == 0)
 		return 0;
 	/* Setup absolute error position. */
 	rc += lexer.offset;
-
 error:
 	assert(rc > 0);
 	diag_set(ClientError, ER_ILLEGAL_PARAMS,
@@ -1128,7 +1127,7 @@ tuple_field_by_part_raw_slowpath(struct tuple_format *format, const char *data,
 	struct tuple_field *field =
 		tuple_format_field_by_path(format, part->fieldno, part->path,
 					   part->path_len);
-	if (field != NULL) {
+	if (field != NULL && field->offset_slot != TUPLE_OFFSET_SLOT_NIL) {
 		int32_t offset_slot = field->offset_slot;
 		assert(-offset_slot * sizeof(uint32_t) <=
 		       format->field_map_size);
