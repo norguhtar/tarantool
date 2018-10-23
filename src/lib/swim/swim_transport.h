@@ -52,7 +52,9 @@ struct swim_transport {
 	 * are like sendto().
 	 */
 	swim_transport_send_f send_round_msg;
-
+	/** Send failure detection message. */
+	swim_transport_send_f send_ping;
+	swim_transport_send_f send_ack;
 	/**
 	 * Receive a message. Not necessary round or failure
 	 * detection. Before message is received, its type is

@@ -279,6 +279,9 @@ swim_task_create(struct swim_task *task, struct swim_scheduler *scheduler,
 	task->scheduler = scheduler;
 }
 
+struct swim_task *
+swim_task_new(struct swim_scheduler *scheduler, swim_task_f complete);
+
 static inline bool
 swim_task_is_active(struct swim_task *task)
 {
@@ -286,10 +289,23 @@ swim_task_is_active(struct swim_task *task)
 }
 
 static inline void
+swim_task_reset(struct swim_task *task)
+{
+	swim_msg_reset(&task->msg);
+}
+
+static inline void
 swim_task_destroy(struct swim_task *task)
 {
 	rlist_del_entry(task, in_queue_output);
 	swim_msg_destroy(&task->msg);
+}
+
+static inline void
+swim_task_delete(struct swim_task *task)
+{
+	swim_task_destroy(task);
+	free(task);
 }
 
 #if defined(__cplusplus)

@@ -23,6 +23,8 @@ swim_udp_recv_msg(int fd, void *buffer, size_t size, struct sockaddr *addr,
 
 struct swim_transport swim_udp_transport = {
 	/* .send_round_msg = */ swim_udp_send_msg,
+	/* .send_ping = */ swim_udp_send_msg,
+	/* .send_ack = */ swim_udp_send_msg,
 	/* .recv_msg = */ swim_udp_recv_msg,
 };
 
@@ -37,6 +39,18 @@ swim_packet_new(struct swim_msg *msg)
 	}
 	swim_packet_create(res, msg);
 	return res;
+}
+
+struct swim_task *
+swim_task_new(struct swim_scheduler *scheduler, swim_task_f complete)
+{
+	struct swim_task *task = (struct swim_task *) malloc(sizeof(*task));
+	if (task == NULL) {
+		diag_set(OutOfMemory, sizeof(*task), "malloc", "task");
+		return NULL;
+	}
+	swim_task_create(task, scheduler, complete);
+	return task;
 }
 
 void
