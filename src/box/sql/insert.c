@@ -813,51 +813,36 @@ sqlite3Insert(Parse * pParse,	/* Parser context */
 	sqlite3DbFree(db, aRegIdx);
 }
 
-/*
- * Meanings of bits in of pWalker->eCode for checkConstraintUnchanged()
- */
-#define CKCNSTRNT_COLUMN   0x01	/* CHECK constraint uses a changing column */
-
-/* This is the Walker callback from checkConstraintUnchanged().  Set
- * bit 0x01 of pWalker->eCode if
- * pWalker->eCode to 0 if this expression node references any of the
- * columns that are being modifed by an UPDATE statement.
- */
-static int
-checkConstraintExprNode(Walker * pWalker, Expr * pExpr)
+void
+vdbe_emit_checks_test(struct Parse *parser, struct ExprList *checks_ast,
+		      struct space_def *def, int new_tuple_reg,
+		      int checks_state_reg)
 {
-	if (pExpr->op == TK_COLUMN) {
-		assert(pExpr->iColumn >= 0 || pExpr->iColumn == -1);
-		if (pExpr->iColumn >= 0) {
-			if (pWalker->u.aiCol[pExpr->iColumn] >= 0) {
-				pWalker->eCode |= CKCNSTRNT_COLUMN;
-			}
-		}
+	struct Vdbe *v = sqlite3GetVdbe(parser);
+	assert(checks_ast != NULL);
+	int check_state_off = sqlite3GetTempReg(parser);
+	sqlite3VdbeAddOp2(v, OP_Integer, 0, check_state_off);
+	/*
+	 * For CHECK constraint and for INSERT/UPDATE conflict
+	 * action DEFAULT and ABORT in fact has the same meaning.
+	 */
+	parser->ckBase = new_tuple_reg;
+	for (int i = 0; i < checks_ast->nExpr; i++) {
+		struct Expr *expr = checks_ast->a[i].pExpr;
+		int all_ok = sqlite3VdbeMakeLabel(v);
+		/* Skip check when it turned off. */
+		sqlite3VdbeAddOp3(v, OP_Eq, checks_state_reg + i, all_ok,
+				  check_state_off);
+		sqlite3ExprIfTrue(parser, expr, all_ok, SQLITE_JUMPIFNULL);
+		char *name = checks_ast->a[i].zName;
+		if (name == NULL)
+			name = def->name;
+		sqlite3HaltConstraint(parser, SQLITE_CONSTRAINT_CHECK,
+				      ON_CONFLICT_ACTION_ABORT, name,
+				      P4_TRANSIENT, P5_ConstraintCheck);
+		sqlite3VdbeResolveLabel(v, all_ok);
 	}
-	return WRC_Continue;
-}
-
-/*
- * pExpr is a CHECK constraint on a row that is being UPDATE-ed.  The
- * only columns that are modified by the UPDATE are those for which
- * aiChng[i]>=0.
- *
- * Return true if CHECK constraint pExpr does not use any of the
- * changing columns.  In other words, return true if this CHECK constraint
- * can be skipped when validating the new row in the UPDATE statement.
- */
-static int
-checkConstraintUnchanged(Expr * pExpr, int *aiChng)
-{
-	Walker w;
-	memset(&w, 0, sizeof(w));
-	w.eCode = 0;
-	w.xExprCallback = checkConstraintExprNode;
-	w.u.aiCol = aiChng;
-	sqlite3WalkExpr(&w, pExpr);
-	testcase(w.eCode == 0);
-	testcase(w.eCode == CKCNSTRNT_COLUMN);
-	return !w.eCode;
+	sqlite3ReleaseTempReg(parser, check_state_off);
 }
 
 void
@@ -926,42 +911,6 @@ vdbe_emit_constraint_checks(struct Parse *parse_context, struct Table *tab,
 			break;
 		default:
 			unreachable();
-		}
-	}
-	/*
-	 * For CHECK constraint and for INSERT/UPDATE conflict
-	 * action DEFAULT and ABORT in fact has the same meaning.
-	 */
-	if (on_conflict == ON_CONFLICT_ACTION_DEFAULT)
-		on_conflict = ON_CONFLICT_ACTION_ABORT;
-	/* Test all CHECK constraints. */
-	struct ExprList *checks = space_checks_expr_list(def->id);
-	enum on_conflict_action on_conflict_check = on_conflict;
-	if (on_conflict == ON_CONFLICT_ACTION_REPLACE)
-		on_conflict_check = ON_CONFLICT_ACTION_ABORT;
-	if (checks != NULL) {
-		parse_context->ckBase = new_tuple_reg;
-		for (int i = 0; i < checks->nExpr; i++) {
-			struct Expr *expr = checks->a[i].pExpr;
-			if (is_update &&
-			    checkConstraintUnchanged(expr, upd_cols))
-				continue;
-			int all_ok = sqlite3VdbeMakeLabel(v);
-			sqlite3ExprIfTrue(parse_context, expr, all_ok,
-					  SQLITE_JUMPIFNULL);
-			if (on_conflict == ON_CONFLICT_ACTION_IGNORE) {
-				sqlite3VdbeGoto(v, ignore_label);
-			} else {
-				char *name = checks->a[i].zName;
-				if (name == NULL)
-					name = def->name;
-				sqlite3HaltConstraint(parse_context,
-						      SQLITE_CONSTRAINT_CHECK,
-						      on_conflict_check, name,
-						      P4_TRANSIENT,
-						      P5_ConstraintCheck);
-			}
-			sqlite3VdbeResolveLabel(v, all_ok);
 		}
 	}
 	sql_emit_table_affinity(v, tab->def, new_tuple_reg);

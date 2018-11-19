@@ -34,6 +34,7 @@
 #include "sql/sqliteInt.h"
 #include "sql/tarantoolInt.h"
 #include "sql/vdbeInt.h"
+#include "execute.h"
 
 #include "index.h"
 #include "info.h"
@@ -1536,5 +1537,179 @@ sql_checks_resolve_space_def_reference(ExprList *expr_list,
 		rc = -1;
 	}
 	sql_parser_destroy(&parser);
+	return rc;
+}
+
+static int
+check_is_enabled_callback(struct Walker *w, Expr *expr)
+{
+	/* CHECK constraint uses a changing column. */
+	const int marker = 0x01;
+	if (expr->op == TK_COLUMN) {
+		assert(expr->iColumn >= 0 || expr->iColumn == -1);
+		if (expr->iColumn >= 0) {
+			if (w->u.aiCol[expr->iColumn] >= 0)
+				w->eCode |= marker;
+		}
+	}
+	return WRC_Continue;
+}
+
+/**
+ * Return true if this CHECK constraint can't be skipped when
+ * validating the new row in the UPDATE statement. In other
+ * words return false if CHECK constraint check does not use any of the
+ * changing columns.
+ * @param check CHECK constraint on a row that is being UPDATE-ed.
+ *              The only columns that are modified by the UPDATE
+ *              are those for which update_mask[i] >= 0.
+ * @param update_mask Array of items that were modified.
+ *                    0 for unchanged field, -1 for modified.
+ * @retval 1 when specified check is required, 0 elsewhere.
+ */
+static bool
+sql_check_is_enabled(struct Expr *check, int *update_mask)
+{
+	struct Walker w;
+	memset(&w, 0, sizeof(w));
+	w.eCode = 0;
+	w.xExprCallback = check_is_enabled_callback;
+	w.u.aiCol = update_mask;
+	sqlite3WalkExpr(&w, check);
+	return w.eCode == 0 ? 1 : 0;
+}
+
+struct sql_checks *
+sql_checks_create(struct sqlite3 *db, struct ExprList *checks_ast,
+		  struct space_def *def)
+{
+	assert(checks_ast != NULL);
+	struct sql_checks *checks = malloc(sizeof(struct sql_checks));
+	if (unlikely(checks == NULL)) {
+		diag_set(OutOfMemory, sizeof(struct sql_checks), "malloc",
+			 "checks");
+		return NULL;
+	}
+
+	struct Parse parser;
+	sql_parser_create(&parser, db);
+	struct Vdbe *v = sqlite3GetVdbe(&parser);
+	if (unlikely(v == NULL)) {
+		diag_set(ClientError, ER_SQL_EXECUTE, sqlite3_errmsg(db));
+		free(checks);
+		return NULL;
+	}
+	/* Compile VDBE with default sql parameters. */
+	struct session *user_session = current_session();
+	uint32_t sql_flags = user_session->sql_flags;
+	user_session->sql_flags = default_sql_flags;
+
+	/* Make continuous registers allocation. */
+	uint32_t reg_count = def->field_count + checks_ast->nExpr;
+	int new_tuple_reg = sqlite3GetTempRange(&parser, reg_count);
+	int checks_state_reg = def->field_count + 1;
+	/*
+	 * Generate a prologe code to bind variables new_tuple_var
+	 * and checks_state_var to new_tuple_reg and
+	 * checks_state_reg respectively.
+	 */
+	struct Expr bind = {.op = TK_VARIABLE, .u.zToken = "?"};
+	checks->new_tuple_var = parser.nVar + 1;
+	checks->checks_state_var = checks->new_tuple_var + def->field_count;
+	for (uint32_t i = 0; i < reg_count; i++) {
+		sqlite3ExprAssignVarNumber(&parser, &bind, 1);
+		sqlite3ExprCodeTarget(&parser, &bind, new_tuple_reg + i);
+	}
+	/* Generate Checks code. */
+	vdbe_emit_checks_test(&parser, checks_ast, def, new_tuple_reg,
+			      checks_state_reg);
+	sql_finish_coding(&parser);
+	sql_parser_destroy(&parser);
+
+	user_session->sql_flags = sql_flags;
+	checks->stmt = (struct sqlite3_stmt *)v;
+	return checks;
+}
+
+void
+sql_checks_destroy(struct sql_checks *checks)
+{
+	sqlite3_finalize(checks->stmt);
+	free(checks);
+}
+
+int
+sql_checks_run(const struct sql_checks *checks,
+	       const struct ExprList *checks_ast, struct space_def *def,
+	       const char *old_tuple_raw, const char *new_tuple_raw)
+{
+	assert(new_tuple_raw != NULL);
+	uint32_t field_count = def->field_count;
+	struct sqlite3_stmt *stmt = checks->stmt;
+	struct region *region = &fiber()->gc;
+	int *update_mask = NULL;
+	if (old_tuple_raw != NULL) {
+		/* The update_mask is required only for UPDATE. */
+		uint32_t update_mask_sz = sizeof(int) * field_count;
+		update_mask = region_alloc(region, update_mask_sz);
+		if (unlikely(update_mask == NULL)) {
+			diag_set(OutOfMemory, update_mask_sz, "region_alloc",
+				 "update_mask");
+			return -1;
+		}
+	}
+	/*
+	 * Prepare parameters for checks->stmt execution:
+	 * - Unpacked new tuple fields mapped to Vdbe memory from
+	 *   variables from range:
+	 *   [new_tuple_var,new_tuple_var+field_count]
+	 * - Sequence of Checks status parameters(is Check with
+	 *   index i enabled) mapped to Vdbe memory
+	 *   [checks_state_var,checks_state_var+checks_ast->nExpr]
+	 *   Items are calculated with sql_check_is_enabled
+	 *   routine called with update_mask for UPDATE operation.
+	 *   In case of regular INSERT, REPLACE operation all
+	 *   Checks should be called so all checks_state_reg items
+	 *   are 1.
+	 */
+	mp_decode_array(&new_tuple_raw);
+	if (old_tuple_raw != NULL)
+		mp_decode_array(&old_tuple_raw);
+	/* Reset VDBE to make new bindings. */
+	sqlite3_reset(stmt);
+	for (uint32_t i = 0; i < field_count; i++) {
+		const char *new_tuple_field = new_tuple_raw;
+		struct sql_bind bind;
+		if (sql_bind_decode(&bind, checks->new_tuple_var + i,
+				    &new_tuple_raw) != 0)
+			return -1;
+		if (sql_bind_column(stmt, &bind,
+				    checks->new_tuple_var + i) != 0)
+			return -1;
+		/* Skip calculations in case of INSERT. */
+		if (update_mask == NULL)
+			continue;
+		/* Form the tuple update mask. */
+		const char *old_tuple_field = old_tuple_raw;
+		mp_next(&old_tuple_raw);
+		update_mask[i] = (old_tuple_raw - old_tuple_field !=
+				  new_tuple_raw - new_tuple_field ||
+				  memcmp(new_tuple_field, old_tuple_field,
+					 old_tuple_raw -
+					 old_tuple_field) != 0) ? -1 : 0;
+	}
+	/* Map Checks "is enabled" paremeters. */
+	for (int i = 0; i < checks_ast->nExpr; i++) {
+		struct Expr *expr = checks_ast->a[i].pExpr;
+		int val = update_mask != NULL ?
+			  sql_check_is_enabled(expr, update_mask) : 1;
+		sqlite3_bind_int64(stmt, checks->checks_state_var + i, val);
+	}
+	/* Checks VDBE can't expire, reset expired flag & Burn. */
+	struct Vdbe *v = (struct Vdbe *)stmt;
+	v->expired = 0;
+	int rc = sqlite3_step(stmt) == SQLITE_DONE ? 0 : -1;
+	if (rc != 0)
+		diag_set(ClientError, ER_SQL_EXECUTE, v->zErrMsg);
 	return rc;
 }

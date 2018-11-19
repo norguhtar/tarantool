@@ -132,23 +132,15 @@ sqlite3_finalize(sqlite3_stmt * pStmt)
 	return rc;
 }
 
-/*
- * Terminate the current execution of an SQL statement and reset it
- * back to its starting state so that it can be reused. A success code from
- * the prior execution is returned.
- *
- * This routine sets the error code and string returned by
- * sqlite3_errcode(), sqlite3_errmsg() and sqlite3_errmsg16().
- */
 int
-sqlite3_reset(sqlite3_stmt * pStmt)
+sqlite3_reset(struct sqlite3_stmt * stmt)
 {
 	int rc;
-	if (pStmt == 0) {
+	if (stmt == NULL) {
 		rc = SQLITE_OK;
 	} else {
-		Vdbe *v = (Vdbe *) pStmt;
-		sqlite3 *db = v->db;
+		struct Vdbe *v = (struct Vdbe *)stmt;
+		struct sqlite3 *db = v->db;
 		checkProfileCallback(db, v);
 		rc = sqlite3VdbeReset(v);
 		sqlite3VdbeRewind(v);

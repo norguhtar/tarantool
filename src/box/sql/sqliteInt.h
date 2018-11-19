@@ -594,6 +594,19 @@ sqlite3_column_value(sqlite3_stmt *,
 int
 sqlite3_finalize(sqlite3_stmt * pStmt);
 
+/*
+ * Terminate the current execution of an SQL statement and reset
+ * it back to its starting state so that it can be reused. A
+ * success code from the prior execution is returned.
+ *
+ * This routine sets the error code and string returned by
+ * sqlite3_errcode(), sqlite3_errmsg() and sqlite3_errmsg16().
+ * @param stmt VDBE program, may be NULL.
+ * @retval SQLITE_OK on success, sql_ret_code error code.
+ */
+int
+sqlite3_reset(struct sqlite3_stmt *stmt);
+
 int
 sqlite3_exec(sqlite3 *,	/* An open database */
 	     const char *sql,	/* SQL to be evaluated */
@@ -3857,6 +3870,25 @@ vdbe_emit_constraint_checks(struct Parse *parse_context,
 			    struct Table *tab, int new_tuple_reg,
 			    enum on_conflict_action on_conflict,
 			    int ignore_label, int *upd_cols);
+/**
+ * This routine generates code to make Check constraints
+ * validations on tuple insertion during INSERT, REPLACE or
+ * UPDATE operation.
+ *
+ * @param parser Current parsing context.
+ * @param checks_ast Checks AST Expression list.
+ * @param def Destination space definition.
+ * @param new_tuple_reg The first register of group containing
+ *                      fields of tuple to be inserted.
+ * @param checks_state_reg The first register of group contining
+ *                         enabled state of corresponding checks:
+ *                         0 for disabled check to be skipped,
+ *                         1 - for enabled.
+ */
+void
+vdbe_emit_checks_test(struct Parse *parser, struct ExprList *checks_ast,
+		      struct space_def *def, int new_tuple_reg,
+		      int checks_state_reg);
 
 /**
  * This routine generates code to finish the INSERT or UPDATE

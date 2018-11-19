@@ -39,6 +39,7 @@
 #include "coll_id_def.h"
 #include "txn.h"
 #include "tuple.h"
+#include "trigger.h"
 #include "fiber.h" /* for gc_pool */
 #include "scoped_guard.h"
 #include "third_party/base64.h"

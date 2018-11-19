@@ -68,6 +68,29 @@ struct Select;
 struct Table;
 struct sql_trigger;
 
+/** SQL Checks object. */
+struct sql_checks {
+	/**
+	 * The first in an array variables representing the
+	 * new tuple to be inserted.
+	 */
+	int new_tuple_var;
+	/**
+	 * The first in array of variables representing the state
+	 * (1 for ON and 0 for OFF) of corresponding Check. This
+	 * is the UPDATE optimization - disabled checks would be
+	 * skipped.
+	 */
+	int checks_state_var;
+	/**
+	 * Precompiled reusable VDBE program for SQL Checks
+	 * raising error on Check constraint failure. VDBE
+	 * program assumes new_tuple and checks_state actual
+	 * parameters to be placed in VDBE memory before run.
+	 */
+	struct sqlite3_stmt *stmt;
+};
+
 /**
  * Perform parsing of provided expression. This is done by
  * surrounding the expression w/ 'SELECT ' prefix and perform
@@ -403,6 +426,49 @@ sql_select_from_table_count(const struct Select *select);
  */
 const char *
 sql_select_from_table_name(const struct Select *select, int i);
+
+/**
+ * Create sql_checks object by Checks AST for specified space.
+ * @param db Database handler.
+ * @param checks_ast Checks AST expression list. Checks space def
+ *                   references may be modified during
+ *                   construction.
+ * @param def Space definition that checks_ast should refer to.
+ * @retval NULL on error.
+ * @retval not NULL SQL Checks object pointer on success.
+*/
+struct sql_checks *
+sql_checks_create(struct sqlite3 *db, struct ExprList *checks_ast,
+		  struct space_def *def);
+
+/**
+ * Destroy SQL Checks object, release related resources.
+ * @param checks SQL Checks object to destroy.
+ */
+void
+sql_checks_destroy(struct sql_checks *checks);
+
+/**
+ * Run SQL Checks VDBE with parameters constructed by Checks AST,
+ * Space definition and alter tuples. Checks AST and Space
+ * definition must match be the same that were used to create the
+ * SQL Checks object.
+ * @param checks SQL Checks object containing VDBE to execute.
+ * @param checks_ast Checks AST object to determine Checks that
+ *                   may be omitted on execution (to prepare
+ *                   checks_state parameter).
+ * @param def Space definition describing alter tuples format.
+ * @param old_tuple_raw Old tuple to be replaced in UPDATE operation.
+ *                  (NULL for INSERT)
+ * @param new_tuple_raw New tuple to be inserted.
+ * @retval 0 on all required Checks were passed.
+ * @retval -1 on system error or Check constrints failure
+ *            indicating an diag_msg to be raised.
+ */
+int
+sql_checks_run(const struct sql_checks *checks,
+	       const struct ExprList *checks_ast, struct space_def *def,
+	       const char *old_tuple_raw, const char *new_tuple_raw);
 
 #if defined(__cplusplus)
 } /* extern "C" { */

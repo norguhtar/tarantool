@@ -151,6 +151,11 @@ struct space {
 	/** SQL Trigger list. */
 	struct sql_trigger *sql_triggers;
 	/**
+	 * The SQL Checks to perform on INSERT, REPLACE and
+	 * UPDATE operations.
+	 */
+	struct sql_checks *sql_checks;
+	/**
 	 * The number of *enabled* indexes in the space.
 	 *
 	 * After all indexes are built, it is equal to the number

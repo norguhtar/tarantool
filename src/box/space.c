@@ -29,6 +29,7 @@
  * SUCH DAMAGE.
  */
 #include "space.h"
+#include "sql.h"
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
@@ -108,6 +109,33 @@ space_fill_index_map(struct space *space)
 	}
 }
 
+/**
+ * SQL-specific actions for space.
+ */
+static void
+on_space_before_replace(struct trigger *trigger, void *event)
+{
+	uint32_t space_id = (uint32_t)(uintptr_t)trigger->data;
+	struct space *space = space_cache_find(space_id);
+	assert(space != NULL);
+	struct txn *txn = (struct txn *) event;
+	struct txn_stmt *stmt = txn_current_stmt(txn);
+	if (stmt == NULL)
+		return;
+	struct tuple *new_tuple = stmt->new_tuple;
+	struct tuple *old_tuple = stmt->old_tuple;
+	if (new_tuple != NULL && space->sql_checks != NULL) {
+		const char *new_tuple_raw = tuple_data(new_tuple);
+		const char *old_tuple_raw = old_tuple != NULL ?
+					    tuple_data(old_tuple) : NULL;
+		if (sql_checks_run(space->sql_checks,
+				   space->def->opts.checks_ast, space->def,
+				   old_tuple_raw, new_tuple_raw) != 0) {
+			diag_raise();
+		}
+	}
+}
+
 int
 space_create(struct space *space, struct engine *engine,
 	     const struct space_vtab *vtab, struct space_def *def,
@@ -165,6 +193,25 @@ space_create(struct space *space, struct engine *engine,
 	space_fill_index_map(space);
 	rlist_create(&space->parent_fkey);
 	rlist_create(&space->child_fkey);
+	if (def->opts.checks_ast != NULL) {
+		struct sql_checks *checks =
+			sql_checks_create(sql_get(), def->opts.checks_ast, def);
+		if (unlikely(checks == NULL))
+			goto fail_free_indexes;
+		space->sql_checks = checks;
+
+		struct trigger *sql_actions_trigger =
+			(struct trigger *)malloc(sizeof(struct trigger));
+		if (sql_actions_trigger == NULL) {
+			diag_set(OutOfMemory, sizeof(struct trigger),
+				"calloc", "on_space_before_replace");
+			goto fail_free_indexes;
+		}
+		trigger_create(sql_actions_trigger, on_space_before_replace,
+			       (void *)(uintptr_t)space->def->id,
+			       (trigger_f0)free);
+		trigger_add(&space->before_replace, sql_actions_trigger);
+	}
 	return 0;
 
 fail_free_indexes:
@@ -216,6 +263,8 @@ space_delete(struct space *space)
 	trigger_destroy(&space->before_replace);
 	trigger_destroy(&space->on_replace);
 	trigger_destroy(&space->on_stmt_begin);
+	if (space->sql_checks != NULL)
+		sql_checks_destroy(space->sql_checks);
 	space_def_delete(space->def);
 	/*
 	 * SQL Triggers should be deleted with
