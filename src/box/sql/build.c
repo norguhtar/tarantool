@@ -276,7 +276,7 @@ table_delete(struct sqlite3 *db, struct Table *tab)
 		for (uint32_t i = 0; i < tab->space->index_count; ++i)
 			index_def_delete(tab->space->index[i]->def);
 		/* Do not delete table->def allocated on region. */
-		sql_expr_list_delete(db, tab->def->opts.checks);
+		sql_expr_list_delete(db, tab->def->opts.checks_ast);
 	} else if (tab->def->id == 0) {
 		space_def_delete(tab->def);
 	}
@@ -863,15 +863,16 @@ sql_add_check_constraint(struct Parse *parser, struct ExprSpan *span)
 					 (int)(span->zEnd - span->zStart));
 		if (expr->u.zToken == NULL)
 			goto release_expr;
-		table->def->opts.checks =
+		table->def->opts.checks_ast =
 			sql_expr_list_append(parser->db,
-					     table->def->opts.checks, expr);
-		if (table->def->opts.checks == NULL) {
+					     table->def->opts.checks_ast, expr);
+		if (table->def->opts.checks_ast == NULL) {
 			sqlite3DbFree(parser->db, expr->u.zToken);
 			goto release_expr;
 		}
 		if (parser->constraintName.n) {
-			sqlite3ExprListSetName(parser, table->def->opts.checks,
+			sqlite3ExprListSetName(parser,
+					       table->def->opts.checks_ast,
 					       &parser->constraintName, 1);
 		}
 	} else {
@@ -947,7 +948,7 @@ space_checks_expr_list(uint32_t space_id)
 	space = space_by_id(space_id);
 	assert(space != NULL);
 	assert(space->def != NULL);
-	return space->def->opts.checks;
+	return space->def->opts.checks_ast;
 }
 
 int
@@ -1610,8 +1611,8 @@ sqlite3EndTable(Parse * pParse,	/* Parse context */
 		vdbe_emit_fkey_create(pParse, fk);
 	}
 cleanup:
-	sql_expr_list_delete(db, p->def->opts.checks);
-	p->def->opts.checks = NULL;
+	sql_expr_list_delete(db, p->def->opts.checks_ast);
+	p->def->opts.checks_ast = NULL;
 }
 
 void

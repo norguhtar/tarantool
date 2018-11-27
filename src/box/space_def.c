@@ -55,7 +55,7 @@ const struct space_opts space_opts_default = {
 	/* .is_temporary = */ false,
 	/* .view = */ false,
 	/* .sql        = */ NULL,
-	/* .checks     = */ NULL,
+	/* .checks_ast     = */ NULL,
 };
 
 const struct opt_def space_opts_reg[] = {
@@ -63,7 +63,7 @@ const struct opt_def space_opts_reg[] = {
 	OPT_DEF("temporary", OPT_BOOL, struct space_opts, is_temporary),
 	OPT_DEF("view", OPT_BOOL, struct space_opts, is_view),
 	OPT_DEF("sql", OPT_STRPTR, struct space_opts, sql),
-	OPT_DEF_ARRAY("checks", struct space_opts, checks,
+	OPT_DEF_ARRAY("checks", struct space_opts, checks_ast,
 		      checks_array_decode),
 	OPT_END,
 };
@@ -112,15 +112,16 @@ space_def_dup_opts(struct space_def *def, const struct space_opts *opts)
 			return -1;
 		}
 	}
-	if (opts->checks != NULL) {
-		def->opts.checks = sql_expr_list_dup(sql_get(), opts->checks, 0);
-		if (def->opts.checks == NULL) {
+	if (opts->checks_ast != NULL) {
+		def->opts.checks_ast =
+			sql_expr_list_dup(sql_get(), opts->checks_ast, 0);
+		if (def->opts.checks_ast == NULL) {
 			free(def->opts.sql);
 			diag_set(OutOfMemory, 0, "sql_expr_list_dup",
 				 "def->opts.checks");
 			return -1;
 		}
-		sql_checks_update_space_def_reference(def->opts.checks, def);
+		sql_checks_update_space_def_reference(def->opts.checks_ast, def);
 	}
 	return 0;
 }
@@ -283,7 +284,7 @@ void
 space_opts_destroy(struct space_opts *opts)
 {
 	free(opts->sql);
-	sql_expr_list_delete(sql_get(), opts->checks);
+	sql_expr_list_delete(sql_get(), opts->checks_ast);
 	TRASH(opts);
 }
 
