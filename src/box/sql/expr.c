@@ -2864,8 +2864,8 @@ sqlite3CodeSubselect(Parse * pParse,	/* Parsing context */
 							  1, r2, &affinity, 1);
 					sqlite3ExprCacheAffinityChange(pParse,
 								       r3, 1);
-					sqlite3VdbeAddOp2(v, OP_IdxInsert, r2,
-							  reg_eph);
+					sqlite3VdbeAddOp3(v, OP_IdxInsert, r2,
+							  0, reg_eph);
 				}
 				sqlite3ReleaseTempReg(pParse, r1);
 				sqlite3ReleaseTempReg(pParse, r2);

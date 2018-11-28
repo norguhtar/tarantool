@@ -780,7 +780,8 @@ pushOntoSorter(Parse * pParse,		/* Parser context */
 		sqlite3VdbeAddOp2(v, OP_SorterInsert, pSort->iECursor,
 				  regRecord);
 	} else {
-		sqlite3VdbeAddOp2(v, OP_IdxInsert, regRecord, pSort->reg_eph);
+		sqlite3VdbeAddOp3(v, OP_IdxInsert, regRecord, 0,
+				  pSort->reg_eph);
 	}
 
 	if (iLimit) {
@@ -862,7 +863,7 @@ vdbe_insert_distinct(struct Parse *parse, int cursor, int reg_eph,
 	int r1 = sqlite3GetTempReg(parse);
 	sqlite3VdbeAddOp4Int(v, OP_Found, cursor, addr_repeat, reg_data, n);
 	sqlite3VdbeAddOp3(v, OP_MakeRecord, reg_data, n, r1);
-	sqlite3VdbeAddOp2(v, OP_IdxInsert, r1, reg_eph);
+	sqlite3VdbeAddOp3(v, OP_IdxInsert, r1, 0, reg_eph);
 	sqlite3ReleaseTempReg(parse, r1);
 }
 
@@ -1099,7 +1100,8 @@ selectInnerLoop(Parse * pParse,		/* The parser context */
 			r1 = sqlite3GetTempReg(pParse);
 			sqlite3VdbeAddOp3(v, OP_MakeRecord, regResult,
 					  nResultCol, r1);
-			sqlite3VdbeAddOp2(v, OP_IdxInsert,  r1, pDest->reg_eph);
+			sqlite3VdbeAddOp3(v, OP_IdxInsert,  r1, 0,
+					  pDest->reg_eph);
 			sqlite3ReleaseTempReg(pParse, r1);
 			break;
 		}
@@ -1142,7 +1144,7 @@ selectInnerLoop(Parse * pParse,		/* The parser context */
 				sqlite3VdbeAddOp4Int(v, OP_Found, iParm + 1,
 						     addr, r1, 0);
 				VdbeCoverage(v);
-				sqlite3VdbeAddOp2(v, OP_IdxInsert, r1,
+				sqlite3VdbeAddOp3(v, OP_IdxInsert, r1, 0,
 						  pDest->reg_eph + 1);
 				assert(pSort == 0);
 			}
@@ -1167,7 +1169,8 @@ selectInnerLoop(Parse * pParse,		/* The parser context */
 				sqlite3VdbeAddOp3(v, OP_MakeRecord, regCopy, nResultCol + 1, regRec);
 				/* Set flag to save memory allocating one by malloc. */
 				sqlite3VdbeChangeP5(v, 1);
-				sqlite3VdbeAddOp2(v, OP_IdxInsert, regRec, pDest->reg_eph);
+				sqlite3VdbeAddOp3(v, OP_IdxInsert, regRec, 0,
+						  pDest->reg_eph);
 				sqlite3ReleaseTempReg(pParse, regRec);
 				sqlite3ReleaseTempRange(pParse, regCopy, nResultCol + 1);
 			}
@@ -1197,7 +1200,8 @@ selectInnerLoop(Parse * pParse,		/* The parser context */
 				sqlite3ExprCacheAffinityChange(pParse,
 							       regResult,
 							       nResultCol);
-				sqlite3VdbeAddOp2(v, OP_IdxInsert, r1, pDest->reg_eph);
+				sqlite3VdbeAddOp3(v, OP_IdxInsert, r1, 0,
+						  pDest->reg_eph);
 				sqlite3ReleaseTempReg(pParse, r1);
 			}
 			break;
@@ -1280,7 +1284,7 @@ selectInnerLoop(Parse * pParse,		/* The parser context */
 			sqlite3VdbeAddOp3(v, OP_MakeRecord, regResult,
 					  nResultCol, r3);
 			if (eDest == SRT_DistQueue) {
-				sqlite3VdbeAddOp2(v, OP_IdxInsert, r3,
+				sqlite3VdbeAddOp3(v, OP_IdxInsert, r3, 0,
 						  pDest->reg_eph + 1);
 			}
 			for (i = 0; i < nKey; i++) {
@@ -1291,7 +1295,8 @@ selectInnerLoop(Parse * pParse,		/* The parser context */
 			}
 			sqlite3VdbeAddOp2(v, OP_Sequence, iParm, r2 + nKey);
 			sqlite3VdbeAddOp3(v, OP_MakeRecord, r2, nKey + 2, r1);
-			sqlite3VdbeAddOp2(v, OP_IdxInsert, r1, pDest->reg_eph);
+			sqlite3VdbeAddOp3(v, OP_IdxInsert, r1, 0,
+					  pDest->reg_eph);
 			if (addrTest)
 				sqlite3VdbeJumpHere(v, addrTest);
 			sqlite3ReleaseTempReg(pParse, r1);
@@ -1606,7 +1611,8 @@ generateSortTail(Parse * pParse,	/* Parsing context */
 					  regTupleid);
 			sqlite3VdbeAddOp3(v, OP_Copy, regRow, regCopy, nSortData - 1);
 			sqlite3VdbeAddOp3(v, OP_MakeRecord, regCopy, nColumn + 1, regRow);
-			sqlite3VdbeAddOp2(v, OP_IdxInsert, regRow, pDest->reg_eph);
+			sqlite3VdbeAddOp3(v, OP_IdxInsert, regRow, 0,
+					  pDest->reg_eph);
 			sqlite3ReleaseTempReg(pParse, regCopy);
 			break;
 		}
@@ -1616,7 +1622,8 @@ generateSortTail(Parse * pParse,	/* Parsing context */
 			sqlite3VdbeAddOp4(v, OP_MakeRecord, regRow, nColumn,
 					  regTupleid, pDest->zAffSdst, nColumn);
 			sqlite3ExprCacheAffinityChange(pParse, regRow, nColumn);
-			sqlite3VdbeAddOp2(v, OP_IdxInsert, regTupleid, pDest->reg_eph);
+			sqlite3VdbeAddOp3(v, OP_IdxInsert, regTupleid, 0,
+					  pDest->reg_eph);
 			break;
 		}
 	case SRT_Mem:{
@@ -3039,7 +3046,8 @@ generateOutputSubroutine(struct Parse *parse, struct Select *p,
 					  in->nSdst + 1, regRec);
 			/* Set flag to save memory allocating one by malloc. */
 			sqlite3VdbeChangeP5(v, 1);
-			sqlite3VdbeAddOp2(v, OP_IdxInsert, regRec, dest->reg_eph);
+			sqlite3VdbeAddOp3(v, OP_IdxInsert, regRec, 0,
+					  dest->reg_eph);
 			sqlite3ReleaseTempRange(parse, regCopy, in->nSdst + 1);
 			sqlite3ReleaseTempReg(parse, regRec);
 			break;
@@ -3055,7 +3063,8 @@ generateOutputSubroutine(struct Parse *parse, struct Select *p,
 					  in->nSdst);
 			sqlite3ExprCacheAffinityChange(parse, in->iSdst,
 						       in->nSdst);
-			sqlite3VdbeAddOp2(v, OP_IdxInsert, r1, dest->reg_eph);
+			sqlite3VdbeAddOp3(v, OP_IdxInsert, r1, 0,
+					  dest->reg_eph);
 			sqlite3ReleaseTempReg(parse, r1);
 			break;
 		}

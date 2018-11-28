@@ -284,7 +284,7 @@ sqlite3Update(Parse * pParse,		/* The parser context */
 		 * malloc.
 		 */
 		sqlite3VdbeChangeP5(v, 1);
-		sqlite3VdbeAddOp2(v, OP_IdxInsert, regKey, reg_eph);
+		sqlite3VdbeAddOp3(v, OP_IdxInsert, regKey, 0, reg_eph);
 	}
 	/* End the database scan loop.
 	 */

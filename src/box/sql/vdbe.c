@@ -4392,12 +4392,12 @@ case OP_SorterInsert: {      /* in2 */
 	break;
 }
 
-/* Opcode: IdxInsert P1 P2 * P4 P5
+/* Opcode: IdxInsert P1 * P3 P4 P5
  * Synopsis: key=r[P1]
  *
  * @param P1 Index of a register with MessagePack data to insert.
- * @param P2 If P4 is not set, then P2 is register containing pointer
- *           to space to insert into.
+ * @param P3 If P4 is not set, then P3 is register containing
+ *           pointer to space to insert into.
  * @param P4 Pointer to the struct space to insert to.
  * @param P5 Flags. If P5 contains OPFLAG_NCHANGE, then VDBE
  *        accounts the change in a case of successful insertion in
@@ -4405,7 +4405,7 @@ case OP_SorterInsert: {      /* in2 */
  *        we are processing INSERT OR INGORE statement. Thus, in
  *        case of conflict we don't raise an error.
  */
-/* Opcode: IdxReplace2 P1 * * P4 P5
+/* Opcode: IdxReplace2 P1 * P3 P4 P5
  * Synopsis: key=r[P1]
  *
  * This opcode works exactly as IdxInsert does, but in Tarantool
@@ -4424,7 +4424,7 @@ case OP_IdxInsert: {
 	if (pOp->p4type == P4_SPACEPTR)
 		space = pOp->p4.space;
 	else
-		space = aMem[pOp->p2].u.p;
+		space = aMem[pOp->p3].u.p;
 	assert(space != NULL);
 	if (space->def->id != 0) {
 		/* Make sure that memory has been allocated on region. */

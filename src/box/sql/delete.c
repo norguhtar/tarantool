@@ -342,7 +342,7 @@ sql_table_delete_from(struct Parse *parse, struct SrcList *tab_list,
 			 * by malloc.
 			 */
 			sqlite3VdbeChangeP5(v, 1);
-			sqlite3VdbeAddOp2(v, OP_IdxInsert, reg_key, reg_eph);
+			sqlite3VdbeAddOp3(v, OP_IdxInsert, reg_key, 0, reg_eph);
 		}
 
 		/* If this DELETE cannot use the ONEPASS strategy,
