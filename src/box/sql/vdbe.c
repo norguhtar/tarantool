@@ -945,6 +945,27 @@ case OP_EndCoroutine: {           /* in1 */
 	break;
 }
 
+/* Opcode: ErrorCtx P1 * * P4 *
+ *
+ * Save VDBE error state in dummy uninitialized Vdbe object
+ * specified with P4. Use P1 = 0 for save and P1 = 1 for raise
+ * error context.
+ * Used to manage error outside of error handler.
+ */
+case OP_ErrorCtx: {
+	struct Vdbe *v = (struct Vdbe *)pOp->p4.p;
+	if (pOp->p1 == 0) {
+		v->rc = p->rc;
+		p->rc = SQLITE_OK;
+		v->errorAction = p->errorAction;
+	} else {
+		rc = v->rc;
+		pOp->p2 = v->errorAction;
+		goto abort_due_to_error;
+	}
+	break;
+}
+
 /* Opcode:  Yield P1 P2 * * *
  *
  * Swap the program counter with the value in register P1.  This
@@ -4392,10 +4413,12 @@ case OP_SorterInsert: {      /* in2 */
 	break;
 }
 
-/* Opcode: IdxInsert P1 * P3 P4 P5
+/* Opcode: IdxInsert P1 P2 P3 P4 P5
  * Synopsis: key=r[P1]
  *
  * @param P1 Index of a register with MessagePack data to insert.
+ * @param P2 The value to jump on error when OPFLAG_OE_HANDLER
+ *           flag is set.
  * @param P3 If P4 is not set, then P3 is register containing
  *           pointer to space to insert into.
  * @param P4 Pointer to the struct space to insert to.
@@ -4405,14 +4428,14 @@ case OP_SorterInsert: {      /* in2 */
  *        we are processing INSERT OR INGORE statement. Thus, in
  *        case of conflict we don't raise an error.
  */
-/* Opcode: IdxReplace2 P1 * P3 P4 P5
+/* Opcode: IdxReplace2 P1 P2 P3 P4 P5
  * Synopsis: key=r[P1]
  *
  * This opcode works exactly as IdxInsert does, but in Tarantool
  * internals it invokes box_replace() instead of box_insert().
  */
-case OP_IdxReplace:
-case OP_IdxInsert: {
+case OP_IdxReplace:  /* jump */
+case OP_IdxInsert: { /* jump */
 	pIn2 = &aMem[pOp->p1];
 	assert((pIn2->flags & MEM_Blob) != 0);
 	if (pOp->p5 & OPFLAG_NCHANGE)
@@ -4443,7 +4466,8 @@ case OP_IdxInsert: {
 
 	if (pOp->p5 & OPFLAG_OE_IGNORE) {
 		/* Ignore any kind of failes and do not raise error message */
-		rc = SQLITE_OK;
+		if ((pOp->p5 & OPFLAG_OE_HANDLER) == 0)
+			rc = SQLITE_OK;
 		/* If we are in trigger, increment ignore raised counter */
 		if (p->pFrame)
 			p->ignoreRaised++;
@@ -4451,6 +4475,11 @@ case OP_IdxInsert: {
 		p->errorAction = ON_CONFLICT_ACTION_FAIL;
 	} else if (pOp->p5 & OPFLAG_OE_ROLLBACK) {
 		p->errorAction = ON_CONFLICT_ACTION_ROLLBACK;
+	}
+	if (pOp->p5 & OPFLAG_OE_HANDLER && rc != SQLITE_OK) {
+		p->rc = rc;
+		rc = SQLITE_OK;
+		goto jump_to_p2;
 	}
 	if (rc != 0)
 		goto abort_due_to_error;

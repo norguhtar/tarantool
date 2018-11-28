@@ -34,6 +34,7 @@
  * to handle UPDATE statements.
  */
 #include "sqliteInt.h"
+#include "vdbeInt.h"
 #include "box/session.h"
 #include "tarantoolInt.h"
 #include "box/schema.h"
@@ -94,6 +95,8 @@ sqlite3Update(Parse * pParse,		/* The parser context */
 	int hasFK;		/* True if foreign key processing is required */
 	int labelBreak;		/* Jump here to break out of UPDATE loop */
 	int labelContinue;	/* Jump here to continue next step of UPDATE loop */
+	/* Jump here to rollback record on Tarantool error. */
+	int rollback_change = 0;
 	struct session *user_session = current_session();
 
 	bool is_view;		/* True when updating a view (INSTEAD OF trigger) */
@@ -112,6 +115,9 @@ sqlite3Update(Parse * pParse,		/* The parser context */
 	int regNew = 0;		/* Content of the NEW.* table in triggers */
 	int regOld = 0;		/* Content of OLD.* table in triggers */
 	int regKey = 0;		/* composite PRIMARY KEY value */
+	/* Token to make savepoints for UPDATE step. */
+	struct Token rollback_token =
+		{.z = "UPDATE_ITEM", .n = strlen("UPDATE_ITEM")};
 
 	db = pParse->db;
 	if (pParse->nErr || db->mallocFailed) {
@@ -440,13 +446,19 @@ sqlite3Update(Parse * pParse,		/* The parser context */
 		int addr1 = sqlite3VdbeAddOp4Int(v, OP_NotFound, pk_cursor, 0,
 						 regKey, nKey);
 		assert(regNew == regNewPk + 1);
+		/* Make savepoint for rollback OP_Delete */
+		if (!box_txn()) {
+			rollback_change = sqlite3VdbeMakeLabel(v);
+			sqlite3Savepoint(pParse, SAVEPOINT_BEGIN,
+					 &rollback_token);
+		}
 		sqlite3VdbeAddOp2(v, OP_Delete, pk_cursor, 0);
 		sqlite3VdbeJumpHere(v, addr1);
 		if (hasFK)
 			fkey_emit_check(pParse, pTab, 0, regNewPk, aXRef);
 		vdbe_emit_insertion_completion(v, space, regNew,
 					       pTab->def->field_count,
-					       on_error);
+					       on_error, rollback_change);
 		/*
 		 * Do any ON CASCADE, SET NULL or SET DEFAULT
 		 * operations required to handle rows that refer
@@ -467,6 +479,23 @@ sqlite3Update(Parse * pParse,		/* The parser context */
 			      TRIGGER_AFTER, pTab, regOldPk, on_error,
 			      labelContinue);
 
+	/* OR IGNORE/REPLACE/ABORT error handler. */
+	if (rollback_change != 0) {
+		sqlite3VdbeAddOp2(v, OP_Goto, 0, labelContinue);
+		sqlite3VdbeResolveLabel(v, rollback_change);
+		struct Vdbe *temp =
+			sqlite3DbMallocRaw(db, sizeof(struct Vdbe));
+		if (unlikely(temp == NULL))
+			goto update_cleanup;
+		sqlite3VdbeAddOp4(v, OP_ErrorCtx, 0, 0, 0,
+				  (const char *)temp, P4_DYNAMIC);
+		sqlite3Savepoint(pParse, SAVEPOINT_ROLLBACK,
+				 &rollback_token);
+		if (on_error != ON_CONFLICT_ACTION_IGNORE) {
+			sqlite3VdbeAddOp4(v, OP_ErrorCtx, 1, 0, 0,
+					(const char *)temp, P4_STATIC);
+		}
+	}
 	/* Repeat the above with the next record to be updated, until
 	 * all record selected by the WHERE clause have been updated.
 	 */

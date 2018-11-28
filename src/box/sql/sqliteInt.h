@@ -2829,6 +2829,8 @@ struct Parse {
 #define OPFLAG_OE_IGNORE    0x200	/* OP_IdxInsert: Ignore flag */
 #define OPFLAG_OE_FAIL      0x400	/* OP_IdxInsert: Fail flag */
 #define OPFLAG_OE_ROLLBACK  0x800	/* OP_IdxInsert: Rollback flag. */
+/** OP_IdxInsert: Interrupt handler is set flag. */
+#define OPFLAG_OE_HANDLER   0x1000
 #define OPFLAG_LENGTHARG     0x40	/* OP_Column only used for length() */
 #define OPFLAG_TYPEOFARG     0x80	/* OP_Column only used for typeof() */
 #define OPFLAG_SEEKEQ        0x02	/* OP_Open** cursor uses EQ seek only */
@@ -3869,11 +3871,14 @@ vdbe_emit_constraint_checks(struct Parse *parse_context,
  * @param raw_data_reg Register with raw data to insert.
  * @param tuple_len Number of registers to hold the tuple.
  * @param on_conflict On conflict action.
+ * @param conflict_handler_label Label with error handler for
+ *                               on_conflict IGNORE strategy.
  */
 void
 vdbe_emit_insertion_completion(struct Vdbe *v, struct space *space,
 			       int raw_data_reg, uint32_t tuple_len,
-			       enum on_conflict_action on_conflict);
+			       enum on_conflict_action on_conflict,
+			       int conflict_handler_label);
 
 void
 sql_set_multi_write(Parse *, bool);

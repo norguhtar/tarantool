@@ -763,7 +763,7 @@ sqlite3Insert(Parse * pParse,	/* Parser context */
 		fkey_emit_check(pParse, pTab, 0, regIns, 0);
 		vdbe_emit_insertion_completion(v, space, regIns + 1,
 					       pTab->def->field_count,
-					       on_error);
+					       on_error, 0);
 	}
 
 	/* Update the count of rows that are inserted
@@ -1076,10 +1076,13 @@ process_index:  ;
 void
 vdbe_emit_insertion_completion(struct Vdbe *v, struct space *space,
 			       int raw_data_reg, uint32_t tuple_len,
-			       enum on_conflict_action on_conflict)
+			       enum on_conflict_action on_conflict,
+			       int conflict_handler_label)
 {
 	assert(v != NULL);
 	u16 pik_flags = OPFLAG_NCHANGE;
+	if (conflict_handler_label != 0)
+		pik_flags |= OPFLAG_OE_HANDLER;
 	if (on_conflict == ON_CONFLICT_ACTION_IGNORE)
 		pik_flags |= OPFLAG_OE_IGNORE;
 	else if (on_conflict == ON_CONFLICT_ACTION_FAIL)
@@ -1088,8 +1091,9 @@ vdbe_emit_insertion_completion(struct Vdbe *v, struct space *space,
 		pik_flags |= OPFLAG_OE_ROLLBACK;
 	sqlite3VdbeAddOp3(v, OP_MakeRecord, raw_data_reg, tuple_len,
 			  raw_data_reg + tuple_len);
-	sqlite3VdbeAddOp1(v, OP_IdxInsert, raw_data_reg + tuple_len);
-	sqlite3VdbeChangeP4(v, -1, (char *)space, P4_SPACEPTR);
+	sqlite3VdbeAddOp4(v, OP_IdxInsert, raw_data_reg + tuple_len,
+			  conflict_handler_label, 0, (char *)space,
+			  P4_SPACEPTR);
 	sqlite3VdbeChangeP5(v, pik_flags);
 }
 
