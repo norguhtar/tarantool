@@ -969,6 +969,72 @@ luaT_state(void)
 	return tarantool_L;
 }
 
+/* {{{ Helper functions to interact with a Lua iterator from C */
+
+struct luaL_iterator {
+	int gen;
+	int param;
+	int state;
+};
+
+struct luaL_iterator *
+luaL_iterator_new_fromtable(lua_State *L, int idx)
+{
+	struct luaL_iterator *it = (struct luaL_iterator *) malloc(
+		sizeof(struct luaL_iterator));
+
+	lua_rawgeti(L, idx, 1); /* Popped by luaL_ref(). */
+	it->gen = luaL_ref(L, LUA_REGISTRYINDEX);
+	lua_rawgeti(L, idx, 2); /* Popped by luaL_ref(). */
+	it->param = luaL_ref(L, LUA_REGISTRYINDEX);
+	lua_rawgeti(L, idx, 3); /* Popped by luaL_ref(). */
+	it->state = luaL_ref(L, LUA_REGISTRYINDEX);
+
+	return it;
+}
+
+int
+luaL_iterator_next(lua_State *L, struct luaL_iterator *it)
+{
+	int frame_start = lua_gettop(L);
+
+	/* Call gen(param, state). */
+	lua_rawgeti(L, LUA_REGISTRYINDEX, it->gen);
+	lua_rawgeti(L, LUA_REGISTRYINDEX, it->param);
+	lua_rawgeti(L, LUA_REGISTRYINDEX, it->state);
+	lua_call(L, 2, LUA_MULTRET);
+	int nresults = lua_gettop(L) - frame_start;
+	if (nresults == 0) {
+		luaL_error(L, "luaL_iterator_next: gen(param, state) must "
+			      "return at least one result");
+		unreachable();
+		return 0;
+	}
+
+	/* The call above returns nil as the first result. */
+	if (lua_isnil(L, frame_start + 1)) {
+		lua_settop(L, frame_start);
+		return 0;
+	}
+
+	/* Save the first result to it->state. */
+	luaL_unref(L, LUA_REGISTRYINDEX, it->state);
+	lua_pushvalue(L, frame_start + 1); /* Popped by luaL_ref(). */
+	it->state = luaL_ref(L, LUA_REGISTRYINDEX);
+
+	return nresults;
+}
+
+void luaL_iterator_free(lua_State *L, struct luaL_iterator *it)
+{
+	luaL_unref(L, LUA_REGISTRYINDEX, it->gen);
+	luaL_unref(L, LUA_REGISTRYINDEX, it->param);
+	luaL_unref(L, LUA_REGISTRYINDEX, it->state);
+	free(it);
+}
+
+/* }}} */
+
 int
 tarantool_lua_utils_init(struct lua_State *L)
 {
