@@ -852,12 +852,35 @@ primary_key_exit:
 	return;
 }
 
+static int
+sql_check_expr_test_callback(struct Walker *walker, struct Expr *expr)
+{
+	if (expr->op == TK_FUNCTION && strcmp(expr->u.zToken, "TYPEOF") == 0) {
+		diag_set(ClientError, ER_SQL, "TYPEOF function is forbidden "
+			 "for usage in Check constraint");
+		walker->eCode = 1;
+		return WRC_Abort;
+	}
+	return WRC_Continue;
+}
+
 void
 sql_add_check_constraint(struct Parse *parser, struct ExprSpan *span)
 {
 	struct Expr *expr = span->pExpr;
 	struct Table *table = parser->pNewTable;
 	if (table != NULL) {
+		/* Test if Check expression valid. */
+		struct Walker w;
+		memset(&w, 0, sizeof(w));
+		w.xExprCallback = sql_check_expr_test_callback;
+		sqlite3WalkExpr(&w, expr);
+		if (w.eCode != 0) {
+			parser->rc = SQL_TARANTOOL_ERROR;
+			parser->nErr++;
+			goto release_expr;
+		}
+
 		expr->u.zToken =
 			sqlite3DbStrNDup(parser->db, (char *)span->zStart,
 					 (int)(span->zEnd - span->zStart));
