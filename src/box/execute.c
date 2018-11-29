@@ -58,31 +58,6 @@ const char *sql_info_key_strs[] = {
 };
 
 /**
- * Name and value of an SQL prepared statement parameter.
- * @todo: merge with sqlite3_value.
- */
-struct sql_bind {
-	/** Bind name. NULL for ordinal binds. */
-	const char *name;
-	/** Length of the @name. */
-	uint32_t name_len;
-	/** Ordinal position of the bind, for ordinal binds. */
-	uint32_t pos;
-
-	/** Byte length of the value. */
-	uint32_t bytes;
-	/** SQL type of the value. */
-	uint8_t type;
-	/** Bind value. */
-	union {
-		double d;
-		int64_t i64;
-		/** For string or blob. */
-		const char *s;
-	};
-};
-
-/**
  * Return a string name of a parameter marker.
  * @param Bind to get name.
  * @retval Zero terminated name.
@@ -96,17 +71,7 @@ sql_bind_name(const struct sql_bind *bind)
 		return tt_sprintf("%d", (int) bind->pos);
 }
 
-/**
- * Decode a single bind column from the binary protocol packet.
- * @param[out] bind Bind to decode to.
- * @param i Ordinal bind number.
- * @param packet MessagePack encoded parameter value. Either
- *        scalar or map: {string_name: scalar_value}.
- *
- * @retval  0 Success.
- * @retval -1 Memory or client error.
- */
-static inline int
+int
 sql_bind_decode(struct sql_bind *bind, int i, const char **packet)
 {
 	bind->pos = i + 1;
@@ -432,16 +397,7 @@ error:
 	return -1;
 }
 
-/**
- * Bind SQL parameter value to its position.
- * @param stmt Prepared statement.
- * @param p Parameter value.
- * @param pos Ordinal bind position.
- *
- * @retval  0 Success.
- * @retval -1 SQL error.
- */
-static inline int
+int
 sql_bind_column(struct sqlite3_stmt *stmt, const struct sql_bind *p,
 		uint32_t pos)
 {
