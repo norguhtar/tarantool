@@ -583,12 +583,20 @@ sqlite3Pragma(Parse * pParse, Token * pId,	/* First part of [schema.]id field */
 		}
 
 	case PragTyp_DEFAULT_ENGINE: {
-		if (sql_default_engine_set(zRight) != 0) {
-			pParse->rc = SQL_TARANTOOL_ERROR;
-			pParse->nErr++;
-			goto pragma_out;
+		if (zRight == NULL) {
+			const char *engine_name =
+				sql_storage_engine_strs[current_session()->
+							sql_default_engine];
+			sqlite3VdbeLoadString(v, 1, engine_name);
+			sqlite3VdbeAddOp2(v, OP_ResultRow, 1, 1);
+		} else {
+			if (sql_default_engine_set(zRight) != 0) {
+				pParse->rc = SQL_TARANTOOL_ERROR;
+				pParse->nErr++;
+				goto pragma_out;
+			}
+			sqlite3VdbeAddOp0(v, OP_Expire);
 		}
-		sqlite3VdbeAddOp0(v, OP_Expire);
 		break;
 	}
 
