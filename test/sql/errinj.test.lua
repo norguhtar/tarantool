@@ -97,3 +97,19 @@ box.sql.execute("ALTER TABLE t3 DROP CONSTRAINT fk1;")
 box.sql.execute("INSERT INTO t3 VALUES(1, 1, 3);")
 errinj.set("ERRINJ_WAL_IO", false)
 box.sql.execute("DROP TABLE t3;")
+
+--
+-- gh-3832: Some statements do not return column type
+
+-- This test placed here because it should be skipped in release
+-- build.
+
+-- Check that "PRAGMA parser_trace" returns 0 or 1 if called
+-- without parameter.
+result = box.sql.execute('PRAGMA parser_trace')
+-- Should be TRUE.
+result[1][1] == 0 or result[1][1] == 1
+
+-- Check that "PRAGMA parser_trace" returns nothing if called
+-- with parameter.
+box.sql.execute('PRAGMA parser_trace = '.. result[1][1])

@@ -138,9 +138,9 @@ static const PragmaName aPragmaName[] = {
 #if defined(SQLITE_DEBUG)
 	{ /* zName:     */ "parser_trace",
 	 /* ePragTyp:  */ PragTyp_PARSER_TRACE,
-	 /* ePragFlg:  */ 0,
+	 /* ePragFlg:  */ PragFlg_Result0 | PragFlg_NoColumns1,
 	 /* ColNames:  */ 0, 0,
-	 /* iArg:      */ 0},
+	 /* iArg:      */ SQLITE_ParserTrace},
 #endif
 	{ /* zName:     */ "query_only",
 	 /* ePragTyp:  */ PragTyp_FLAG,

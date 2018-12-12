@@ -571,15 +571,21 @@ sqlite3Pragma(Parse * pParse, Token * pId,	/* First part of [schema.]id field */
 	}
 #ifndef NDEBUG
 	case PragTyp_PARSER_TRACE:{
-			if (zRight) {
-				if (sqlite3GetBoolean(zRight, 0)) {
-					sqlite3ParserTrace(stdout, "parser: ");
-				} else {
-					sqlite3ParserTrace(0, 0);
-				}
+		int mask = pPragma->iArg;
+		if (zRight == NULL) {
+			returnSingleInt(v,
+					(user_session->sql_flags & mask) != 0);
+		} else {
+			if (sqlite3GetBoolean(zRight, 0)) {
+				sqlite3ParserTrace(stdout, "parser: ");
+				user_session->sql_flags |= mask;
+			} else {
+				sqlite3ParserTrace(0, 0);
+				user_session->sql_flags &= ~mask;
 			}
-			break;
 		}
+		break;
+	}
 #endif
 
 		/*
