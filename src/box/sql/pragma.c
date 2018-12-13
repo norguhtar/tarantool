@@ -488,6 +488,15 @@ sqlite3Pragma(Parse * pParse, Token * pId,	/* First part of [schema.]id field */
 					sqlite3ParserTrace(0, 0);
 			}
 #endif
+			/*
+			 * Reinstall the LIKE and functions. The
+			 * variant of LIKE * used will be case
+			 * sensitive or not depending on the RHS.
+			 */
+			if (mask == LIKE_CASE_SENS_FLAG) {
+				sqlite3RegisterLikeFunctions(db,
+							     !is_value_true);
+			}
 		}
 		break;
 	}
@@ -567,20 +576,6 @@ sqlite3Pragma(Parse * pParse, Token * pId,	/* First part of [schema.]id field */
 		}
 		break;
 	}
-
-		/*
-		 * Reinstall the LIKE and functions. The variant
-		 * of LIKE * used will be case sensitive or not
-		 * depending on the RHS.
-		 */
-	case PragTyp_CASE_SENSITIVE_LIKE:{
-			if (zRight) {
-				int is_like_ci =
-					!(sqlite3GetBoolean(zRight, 0));
-				sqlite3RegisterLikeFunctions(db, is_like_ci);
-			}
-			break;
-		}
 
 	case PragTyp_DEFAULT_ENGINE: {
 		if (zRight == NULL) {
