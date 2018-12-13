@@ -898,7 +898,7 @@ expr(A) ::= expr(A) COLLATE id(C). {
 expr(A) ::= CAST(X) LP expr(E) AS typedef(T) RP(Y). {
   spanSet(&A,&X,&Y); /*A-overwrites-X*/
   A.pExpr = sqlite3ExprAlloc(pParse->db, TK_CAST, 0, 1);
-  A.pExpr->affinity = T.type;
+  A.pExpr->affinity = sql_field_type_to_affinity(T.type);
   sqlite3ExprAttachSubtrees(pParse->db, A.pExpr, E.pExpr, 0);
 }
 %endif  SQLITE_OMIT_CAST
@@ -1475,17 +1475,17 @@ wqlist(A) ::= wqlist(A) COMMA nm(X) eidlist_opt(Y) AS LP select(Z) RP. {
 }
 %endif  SQLITE_OMIT_CTE
 
-/* Primitive types. */
+////////////////////////////// TYPE DECLARATION ///////////////////////////////
 %type typedef {struct type_def}
-typedef(A) ::= TEXT . { A.type = AFFINITY_TEXT; }
-typedef(A) ::= BLOB . { A.type = AFFINITY_BLOB; }
-typedef(A) ::= DATE . { A.type = AFFINITY_REAL; }
-typedef(A) ::= TIME . { A.type = AFFINITY_REAL; }
-typedef(A) ::= DATETIME . { A.type = AFFINITY_REAL; }
+typedef(A) ::= TEXT . { A.type = FIELD_TYPE_STRING; }
+typedef(A) ::= BLOB . { A.type = FIELD_TYPE_SCALAR; }
+typedef(A) ::= DATE . { A.type = FIELD_TYPE_NUMBER; }
+typedef(A) ::= TIME . { A.type = FIELD_TYPE_NUMBER; }
+typedef(A) ::= DATETIME . { A.type = FIELD_TYPE_NUMBER; }
 
 %type char_len {int}
 typedef(A) ::= CHAR . {
-  A.type = AFFINITY_TEXT;
+  A.type = FIELD_TYPE_STRING;
 }
 
 char_len(A) ::= LP INTEGER(B) RP . {
@@ -1494,23 +1494,23 @@ char_len(A) ::= LP INTEGER(B) RP . {
 }
 
 typedef(A) ::= CHAR char_len(B) . {
-  A.type = AFFINITY_TEXT;
+  A.type = FIELD_TYPE_STRING;
   (void) B;
 }
 
 typedef(A) ::= VARCHAR char_len(B) . {
-  A.type = AFFINITY_TEXT;
+  A.type = FIELD_TYPE_STRING;
   (void) B;
 }
 
 %type number_typedef {struct type_def}
 typedef(A) ::= number_typedef(A) .
-number_typedef(A) ::= FLOAT|REAL|DOUBLE . { A.type = AFFINITY_REAL; }
-number_typedef(A) ::= INT|INTEGER . { A.type = AFFINITY_INTEGER; }
+number_typedef(A) ::= FLOAT|REAL|DOUBLE . { A.type = FIELD_TYPE_NUMBER; }
+number_typedef(A) ::= INT|INTEGER . { A.type = FIELD_TYPE_INTEGER; }
 
 %type number_len_typedef {struct type_def}
 number_typedef(A) ::= DECIMAL|NUMERIC|NUM number_len_typedef(B) . {
-  A.type = AFFINITY_REAL;
+  A.type = FIELD_TYPE_NUMBER;
   (void) B;
 }
 
