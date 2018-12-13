@@ -574,13 +574,20 @@ sqlite3Pragma(Parse * pParse, Token * pId,	/* First part of [schema.]id field */
 		 * depending on the RHS.
 		 */
 	case PragTyp_CASE_SENSITIVE_LIKE:{
-			if (zRight) {
-				int is_like_ci =
-					!(sqlite3GetBoolean(zRight, 0));
-				sqlite3RegisterLikeFunctions(db, is_like_ci);
-			}
-			break;
+		int mask = pPragma->iArg;
+		if (zRight == NULL) {
+			returnSingleInt(v,
+					(user_session->sql_flags & mask) != 0);
+		} else {
+			int is_like_ci = !(sqlite3GetBoolean(zRight, 0));
+			if (!is_like_ci)
+				user_session->sql_flags |= mask;
+			else
+				user_session->sql_flags &= ~mask;
+			sqlite3RegisterLikeFunctions(db, is_like_ci);
 		}
+		break;
+	}
 
 	case PragTyp_DEFAULT_ENGINE: {
 		if (zRight == NULL) {

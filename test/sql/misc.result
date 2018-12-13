@@ -40,3 +40,20 @@ box.sql.execute('\n\n\n\t\t\t   ')
 ---
 - error: 'syntax error: empty request'
 ...
+--
+-- gh-3832: Some statements do not return column type
+-- Check that "PRAGMA case_sensitive_like" returns 0 or 1 if
+-- called without parameter.
+result = box.sql.execute('PRAGMA case_sensitive_like')
+---
+...
+-- Should be TRUE.
+result[1][1] == 0 or result[1][1] == 1
+---
+- true
+...
+-- Check that "PRAGMA case_sensitive_like" returns nothing if
+-- called with parameter.
+box.sql.execute('PRAGMA case_sensitive_like = '.. result[1][1])
+---
+...
