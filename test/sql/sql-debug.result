@@ -30,3 +30,43 @@ box.sql.execute('PRAGMA parser_trace')
 box.sql.execute('PRAGMA parser_trace = '.. result[1][1])
 ---
 ...
+--
+-- Make PRAGMA command return the result in a more appropriate
+-- format.
+--
+result = box.sql.execute('PRAGMA')
+---
+...
+for _,v in pairs(result) do v[2] = nil end
+---
+...
+result
+---
+- - ['busy_timeout']
+  - ['case_sensitive_like']
+  - ['collation_list']
+  - ['count_changes']
+  - ['defer_foreign_keys']
+  - ['foreign_key_list']
+  - ['full_column_names']
+  - ['index_info']
+  - ['index_list']
+  - ['parser_trace']
+  - ['query_only']
+  - ['read_uncommitted']
+  - ['recursive_triggers']
+  - ['reverse_unordered_selects']
+  - ['select_trace']
+  - ['short_column_names']
+  - ['sql_compound_select_limit']
+  - ['sql_default_engine']
+  - ['sql_trace']
+  - ['stats']
+  - ['table_info']
+  - ['vdbe_addoptrace']
+  - ['vdbe_debug']
+  - ['vdbe_eqp']
+  - ['vdbe_listing']
+  - ['vdbe_trace']
+  - ['where_trace']
+...
