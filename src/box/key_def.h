@@ -96,6 +96,17 @@ struct key_part {
 	char *path;
 	/** The length of JSON path. */
 	uint32_t path_len;
+	/** Cached format epoch. */
+	uint64_t format_epoch;
+	/**
+	 * Cached value of the offset slot corresponding to
+	 * the indexed field (tuple_field::offset_slot).
+	 * Valid only if key_def::epoch equals the epoch of
+	 * the tuple format. Updated in
+	 * tuple_field_by_part_slowpath to always store the
+	 * offset corresponding to the last used tuple format.
+	 */
+	int32_t offset_slot_cache;
 };
 
 struct key_def;

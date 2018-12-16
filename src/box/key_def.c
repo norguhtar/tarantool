@@ -139,7 +139,8 @@ key_def_set_part(struct key_def *def, uint32_t part_no, uint32_t fieldno,
 		 enum field_type type, enum on_conflict_action nullable_action,
 		 struct coll *coll, uint32_t coll_id,
 		 enum sort_order sort_order, const char *path,
-		 uint32_t path_len, char **paths)
+		 uint32_t path_len, char **paths, int32_t offset_slot_cache,
+		 uint64_t format_epoch)
 {
 	assert(part_no < def->part_count);
 	assert(type < field_type_MAX);
@@ -151,6 +152,8 @@ key_def_set_part(struct key_def *def, uint32_t part_no, uint32_t fieldno,
 	def->parts[part_no].coll = coll;
 	def->parts[part_no].coll_id = coll_id;
 	def->parts[part_no].sort_order = sort_order;
+	def->parts[part_no].offset_slot_cache = offset_slot_cache;
+	def->parts[part_no].format_epoch = format_epoch;
 	if (path != NULL) {
 		assert(paths != NULL);
 		def->parts[part_no].path = *paths;
@@ -198,7 +201,8 @@ key_def_new(const struct key_part_def *parts, uint32_t part_count)
 		uint32_t path_len = part->path != NULL ? strlen(part->path) : 0;
 		key_def_set_part(def, i, part->fieldno, part->type,
 				 part->nullable_action, coll, part->coll_id,
-				 part->sort_order, part->path, path_len, &paths);
+				 part->sort_order, part->path, path_len, &paths,
+				 TUPLE_OFFSET_SLOT_NIL, 0);
 	}
 	key_def_set_cmp(def);
 	return def;
@@ -251,7 +255,7 @@ box_key_def_new(uint32_t *fields, uint32_t *types, uint32_t part_count)
 				 (enum field_type)types[item],
 				 ON_CONFLICT_ACTION_DEFAULT,
 				 NULL, COLL_NONE, SORT_ORDER_ASC, NULL, 0,
-				 NULL);
+				 NULL, TUPLE_OFFSET_SLOT_NIL, 0);
 	}
 	key_def_set_cmp(key_def);
 	return key_def;
@@ -676,7 +680,8 @@ key_def_merge(const struct key_def *first, const struct key_def *second)
 		key_def_set_part(new_def, pos++, part->fieldno, part->type,
 				 part->nullable_action, part->coll,
 				 part->coll_id, part->sort_order, part->path,
-				 part->path_len, &paths);
+				 part->path_len, &paths, part->offset_slot_cache,
+				 part->format_epoch);
 	}
 
 	/* Set-append second key def's part to the new key def. */
@@ -688,7 +693,8 @@ key_def_merge(const struct key_def *first, const struct key_def *second)
 		key_def_set_part(new_def, pos++, part->fieldno, part->type,
 				 part->nullable_action, part->coll,
 				 part->coll_id, part->sort_order, part->path,
-				 part->path_len, &paths);
+				 part->path_len, &paths, part->offset_slot_cache,
+				 part->format_epoch);
 	}
 	key_def_set_cmp(new_def);
 	return new_def;

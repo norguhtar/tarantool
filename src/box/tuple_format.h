@@ -138,6 +138,12 @@ tuple_field_is_nullable(struct tuple_field *tuple_field)
  * Tuple format describes how tuple is stored and information about its fields
  */
 struct tuple_format {
+	/**
+	 * Counter that grows incrementally on space rebuild
+	 * used for caching offset slot in key_part, for more
+	 * details see key_part::offset_slot_cache.
+	 */
+	uint64_t epoch;
 	/** Virtual function table */
 	struct tuple_format_vtab vtab;
 	/** Pointer to engine-specific data. */
@@ -488,6 +494,12 @@ tuple_field_by_part_raw(struct tuple_format *format, const char *data,
 {
 	if (likely(part->path == NULL)) {
 		return tuple_field_raw(format, data, field_map, part->fieldno);
+	} else if (part->format_epoch == format->epoch) {
+		int32_t offset_slot = part->offset_slot_cache;
+		assert(-offset_slot * sizeof(uint32_t) <=
+		       format->field_map_size);
+		return field_map[offset_slot] != 0 ?
+		       data + field_map[offset_slot] : NULL;
 	} else {
 		const char *raw;
 		MAYBE_UNUSED int rc =

@@ -40,6 +40,7 @@ struct tuple_format **tuple_formats;
 static intptr_t recycled_format_ids = FORMAT_ID_NIL;
 
 static uint32_t formats_size = 0, formats_capacity = 0;
+static uint64_t formats_epoch = 0;
 
 static struct tuple_field *
 tuple_field_new(void)
@@ -599,6 +600,7 @@ tuple_format_new(struct tuple_format_vtab *vtab, struct key_def * const *keys,
 	format->vtab = *vtab;
 	format->engine = NULL;
 	format->is_temporary = false;
+	format->epoch = ++formats_epoch;
 	if (tuple_format_register(format) < 0) {
 		tuple_format_destroy(format);
 		free(format);
@@ -1105,6 +1107,7 @@ tuple_field_raw_by_path(struct tuple_format *format, const char *tuple,
 	part.fieldno = fieldno;
 	part.path = (char *)path + lexer.offset;
 	part.path_len = path_len - lexer.offset;
+	part.format_epoch = 0;
 	rc = tuple_field_by_part_raw_slowpath(format, tuple, field_map, &part,
 					      field);
 	if (rc == 0)
@@ -1131,6 +1134,13 @@ tuple_field_by_part_raw_slowpath(struct tuple_format *format, const char *data,
 		int32_t offset_slot = field->offset_slot;
 		assert(-offset_slot * sizeof(uint32_t) <=
 		       format->field_map_size);
+
+		/* Update format epoch cache. */
+		assert(part->format_epoch != format->epoch);
+		assert(format->epoch != 0);
+		part->offset_slot_cache = offset_slot;
+		part->format_epoch = format->epoch;
+
 		*raw = field_map[offset_slot] == 0 ?
 		       NULL : data + field_map[offset_slot];
 		return 0;
