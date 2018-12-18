@@ -602,8 +602,7 @@ sqlite3VdbeMemCast(Mem * pMem, u8 aff)
 {
 	if (pMem->flags & MEM_Null)
 		return SQLITE_OK;
-	if ((pMem->flags & MEM_Blob) != 0 &&
-	    (aff == AFFINITY_REAL || aff == AFFINITY_NUMERIC)) {
+	if ((pMem->flags & MEM_Blob) != 0 && aff == AFFINITY_REAL) {
 		if (sql_atoi64(pMem->z, (int64_t *) &pMem->u.i, pMem->n) == 0) {
 			MemSetTypeFlag(pMem, MEM_Real);
 			pMem->u.r = pMem->u.i;
@@ -626,8 +625,6 @@ sqlite3VdbeMemCast(Mem * pMem, u8 aff)
 			return 0;
 		}
 		return SQLITE_ERROR;
-	case AFFINITY_NUMERIC:
-		return sqlite3VdbeMemNumerify(pMem);
 	case AFFINITY_INTEGER:
 		if ((pMem->flags & MEM_Blob) != 0) {
 			if (sql_atoi64(pMem->z, (int64_t *) &pMem->u.i,
@@ -1319,7 +1316,7 @@ valueFromExpr(sqlite3 * db,	/* The database connection */
 		}
 		if ((op == TK_INTEGER || op == TK_FLOAT)
 		    && affinity == AFFINITY_BLOB) {
-			sqlite3ValueApplyAffinity(pVal, AFFINITY_NUMERIC);
+			sqlite3ValueApplyAffinity(pVal, AFFINITY_REAL);
 		} else {
 			sqlite3ValueApplyAffinity(pVal, affinity);
 		}

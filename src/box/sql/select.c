@@ -1427,6 +1427,8 @@ sql_expr_list_to_key_info(struct Parse *parse, struct ExprList *list, int start)
 		sql_expr_coll(parse, item->pExpr, &unused, &id);
 		part->coll_id = id;
 		part->sort_order = item->sort_order;
+		enum affinity_type aff = sqlite3ExprAffinity(item->pExpr);
+		part->type =sql_affinity_to_field_type(aff);
 	}
 	return key_info;
 }
@@ -1723,7 +1725,6 @@ generateColumnNames(Parse * pParse,	/* Parser context */
 					      SQLITE_TRANSIENT);
 			break;
 		case AFFINITY_REAL:
-		case AFFINITY_NUMERIC:
 			sqlite3VdbeSetColName(v, i, COLNAME_DECLTYPE, "NUMERIC",
 					      SQLITE_TRANSIENT);
 			break;
@@ -5789,8 +5790,11 @@ sqlite3Select(Parse * pParse,		/* The parser context */
 	/* If the output is destined for a temporary table, open that table.
 	 */
 	if (pDest->eDest == SRT_EphemTab) {
-		sqlite3VdbeAddOp2(v, OP_OpenTEphemeral, pDest->reg_eph,
-				  pEList->nExpr + 1);
+		struct sql_key_info *key_info =
+			sql_expr_list_to_key_info(pParse, pEList, 0);
+		sqlite3VdbeAddOp4(v, OP_OpenTEphemeral, pDest->reg_eph,
+				  pEList->nExpr + 1, 0, (char *)key_info,
+				  P4_KEYINFO);
 		sqlite3VdbeAddOp3(v, OP_IteratorOpen, pDest->iSDParm, 0,
 				  pDest->reg_eph);
 

@@ -3561,17 +3561,30 @@ sqlite3VdbeMsgpackRecordPut(u8 * pBuf, Mem * pRec, u32 n)
 	assert(n != 0);
 	do {
 		assert(memIsValid(pRec));
+		int64_t i;
 		if (pRec->flags & MEM_Null) {
 			zNewRecord = mp_encode_nil(zNewRecord);
 		} else if (pRec->flags & MEM_Real) {
+			/*
+			 * We can't pass to INT iterator float
+			 * value. Hence, if floating point value
+			 * lacks fractional component, we can
+			 * encode it as INT and successfully
+			 * pass to INT iterator.
+			 */
+			i = pRec->u.r;
+			if (i == pRec->u.r)
+				goto encode_int;
 			zNewRecord = mp_encode_double(zNewRecord, pRec->u.r);
 		} else if (pRec->flags & MEM_Int) {
-			if (pRec->u.i >= 0) {
+			i = pRec->u.i;
+encode_int:
+			if (i >= 0) {
 				zNewRecord =
-				    mp_encode_uint(zNewRecord, pRec->u.i);
+				    mp_encode_uint(zNewRecord, i);
 			} else {
 				zNewRecord =
-				    mp_encode_int(zNewRecord, pRec->u.i);
+				    mp_encode_int(zNewRecord, i);
 			}
 		} else if (pRec->flags & MEM_Str) {
 			zNewRecord =
