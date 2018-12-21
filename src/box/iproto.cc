@@ -1634,7 +1634,7 @@ tx_process_sql(struct cmsg *m)
 	sql = msg->sql.sql_text;
 	sql = mp_decode_str(&sql, &len);
 	if (sql_prepare_and_execute(sql, len, bind, bind_count, &port,
-				    &fiber()->gc) != 0)
+				    &fiber()->gc, ER_SQL_EXECUTE) != 0)
 		goto error;
 	/*
 	 * Take an obuf only after execute(). Else the buffer can

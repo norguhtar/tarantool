@@ -2456,3 +2456,26 @@ box.feedback.save = function(file_name)
 end
 
 box.NULL = msgpack.NULL
+
+box.sql.execute = function(sql)
+    local result = box.sql.new_execute(sql)
+    if result == nil then return end
+    local ret = nil
+    if result.rows ~= nil then
+        ret = {}
+        for key, row in pairs(result.rows) do
+            if type(row) == 'cdata' then
+                table.insert(ret, row:totable())
+            end
+        end
+    end
+    if result.metadata ~= nil then
+        if ret == nil then ret = {} end
+        ret[0] = {}
+        for key, row in pairs(result.metadata) do
+            table.insert(ret[0], row['name'])
+        end
+        setmetatable(ret, {__serialize = 'sequence'})
+    end
+    if ret ~= nil then return ret end
+end
