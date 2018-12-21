@@ -44,6 +44,7 @@
 #include "tuple.h"
 #include "sql/vdbe.h"
 #include "lua/utils.h"
+#include "lua/msgpack.h"
 
 const char *sql_type_strs[] = {
 	NULL,
@@ -253,6 +254,196 @@ sql_bind_list_decode(const char *data, struct sql_bind **out_bind)
 	}
 	for (uint32_t i = 0; i < bind_count; ++i) {
 		if (sql_bind_decode(&bind[i], i, &data) != 0) {
+			region_truncate(region, used);
+			return -1;
+		}
+	}
+	*out_bind = bind;
+	return bind_count;
+}
+
+
+/**
+ * Decode a single bind column from Lua stack.
+ *
+ * @param L Lua stack.
+ * @param[out] bind Bind to decode to.
+ * @param idx Position of table with bind columns on Lua stack.
+ * @param i Ordinal bind number.
+ *
+ * @retval  0 Success.
+ * @retval -1 Memory or client error.
+ */
+static inline int
+lua_sql_bind_decode(struct lua_State *L, struct sql_bind *bind, int idx, int i)
+{
+	struct luaL_field field;
+	struct region *region = &fiber()->gc;
+	char *buf;
+	lua_rawgeti(L, idx, i + 1);
+	luaL_tofield(L, luaL_msgpack_default, -1, &field);
+	bind->pos = i + 1;
+	if (field.type == MP_MAP) {
+		/*
+		 * A named parameter is a single-row table that
+		 * contains one value associated with a key. The
+		 * key must be a string. This key is the name of
+		 * the parameter, and the value associated with
+		 * the key is the value of the parameter.
+		 */
+		if (field.size != 1) {
+			diag_set(ClientError, ER_ILLEGAL_PARAMS, "SQL bind "\
+				 "named parameter should be a single-row "\
+				 "table with one key-value pair");
+			return -1;
+		}
+		/*
+		 * Get key and value of the only table element to
+		 * lua stack.
+		 */
+		lua_pushnil(L);
+		lua_next(L, lua_gettop(L) - 1);
+		if (lua_type(L, -2) != LUA_TSTRING) {
+			diag_set(ClientError, ER_ILLEGAL_PARAMS, "name of the "\
+				 "parameter should be a string.");
+			return -1;
+		}
+		size_t name_len;
+		bind->name = lua_tolstring(L, -2, &name_len);
+		/*
+		 * Name should be saved in allocated memory as it
+		 * will be poped from Lua stack.
+		 */
+		buf = region_alloc(region, name_len + 1);
+		if (buf == NULL) {
+			diag_set(OutOfMemory, name_len + 1, "region_alloc",
+				 "buf");
+			return -1;
+		}
+		memcpy(buf, bind->name, name_len + 1);
+		bind->name = buf;
+		bind->name_len = name_len;
+		luaL_tofield(L, luaL_msgpack_default, -1, &field);
+	} else {
+		bind->name = NULL;
+		bind->name_len = 0;
+	}
+	switch (field.type) {
+	case MP_UINT: {
+		if (field.ival < 0) {
+			diag_set(ClientError, ER_SQL_BIND_VALUE,
+				 sql_bind_name(bind), "INTEGER");
+			return -1;
+		}
+		bind->i64 = field.ival;
+		bind->type = SQLITE_INTEGER;
+		bind->bytes = sizeof(bind->i64);
+		break;
+	}
+	case MP_INT:
+		bind->i64 = field.ival;
+		bind->type = SQLITE_INTEGER;
+		bind->bytes = sizeof(bind->i64);
+		break;
+	case MP_STR:
+		/*
+		 * Data should be saved in allocated memory as it
+		 * will be poped from Lua stack.
+		 */
+		buf = region_alloc(region, field.sval.len + 1);
+		if (buf == NULL) {
+			diag_set(OutOfMemory, field.sval.len + 1,
+				 "region_alloc", "buf");
+			return -1;
+		}
+		memcpy(buf, field.sval.data, field.sval.len + 1);
+		bind->s = buf;
+		bind->type = SQLITE_TEXT;
+		bind->bytes = field.sval.len;
+		break;
+	case MP_DOUBLE:
+		bind->d = field.dval;
+		bind->type = SQLITE_FLOAT;
+		bind->bytes = sizeof(bind->d);
+		break;
+	case MP_FLOAT:
+		bind->d = field.dval;
+		bind->type = SQLITE_FLOAT;
+		bind->bytes = sizeof(bind->d);
+		break;
+	case MP_NIL:
+		bind->type = SQLITE_NULL;
+		bind->bytes = 1;
+		break;
+	case MP_BOOL:
+		/* SQLite doesn't support boolean. Use int instead. */
+		bind->i64 = field.bval ? 1 : 0;
+		bind->type = SQLITE_INTEGER;
+		bind->bytes = sizeof(bind->i64);
+		break;
+	case MP_BIN:
+		bind->s = mp_decode_bin(&field.sval.data, &bind->bytes);
+		bind->type = SQLITE_BLOB;
+		break;
+	case MP_EXT:
+		/*
+		 * Data should be saved in allocated memory as it
+		 * will be poped from Lua stack.
+		 */
+		buf = region_alloc(region, sizeof(field));
+		if (buf == NULL) {
+			diag_set(OutOfMemory, sizeof(field), "region_alloc",
+				 "buf");
+			return -1;
+		}
+		memcpy(buf, &field, sizeof(field));
+		bind->s = buf;
+		bind->bytes = sizeof(field);
+		bind->type = SQLITE_BLOB;
+		break;
+	case MP_ARRAY:
+		diag_set(ClientError, ER_SQL_BIND_TYPE, "ARRAY",
+			 sql_bind_name(bind));
+		return -1;
+	case MP_MAP:
+		diag_set(ClientError, ER_SQL_BIND_TYPE, "MAP",
+			 sql_bind_name(bind));
+		return -1;
+	default:
+		unreachable();
+	}
+	lua_pop(L, lua_gettop(L) - idx);
+	return 0;
+}
+
+int
+lua_sql_bind_list_decode(struct lua_State *L, struct sql_bind **out_bind,
+			 int idx)
+{
+	assert(out_bind != NULL);
+	uint32_t bind_count = lua_objlen(L, idx);
+	if (bind_count == 0)
+		return 0;
+	if (bind_count > SQL_BIND_PARAMETER_MAX) {
+		diag_set(ClientError, ER_SQL_BIND_PARAMETER_MAX,
+			 (int) bind_count);
+		return -1;
+	}
+	struct region *region = &fiber()->gc;
+	uint32_t used = region_used(region);
+	size_t size = sizeof(struct sql_bind) * bind_count;
+	/*
+	 * Memory allocated here will be freed in
+	 * sqlite3_finalize() or in txn_commit()/txn_rollback() if
+	 * there is an active transaction.
+	 */
+	struct sql_bind *bind = (struct sql_bind *) region_alloc(region, size);
+	if (bind == NULL) {
+		diag_set(OutOfMemory, size, "region_alloc", "bind");
+		return -1;
+	}
+	for (uint32_t i = 0; i < bind_count; ++i) {
+		if (lua_sql_bind_decode(L, &bind[i], idx, i) != 0) {
 			region_truncate(region, used);
 			return -1;
 		}

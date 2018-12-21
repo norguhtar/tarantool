@@ -69,6 +69,27 @@ int
 sql_bind_list_decode(const char *data, struct sql_bind **out_bind);
 
 /**
+ * Parse Lua table of SQL parameters.
+ *
+ * @param L Lua stack contains table with parameters. Each
+ *        parameter either must have scalar type, or must be a
+ *        single-row table with the following format:
+ *        table[name] = value. Name - string name of the named
+ *        parameter, value - scalar value of the parameter.
+ *        Named and positioned parameters can be mixed.
+ *        For more details
+ *        @sa https://www.sqlite.org/lang_expr.html#varparam.
+ * @param[out] out_bind Pointer to save decoded parameters.
+ * @param idx Position of table with parameters on Lua stack.
+ *
+ * @retval  >= 0 Number of decoded parameters.
+ * @retval -1 Client or memory error.
+ */
+int
+lua_sql_bind_list_decode(struct lua_State *L, struct sql_bind **out_bind,
+			 int idx);
+
+/**
  * Prepare and execute an SQL statement.
  * @param sql SQL statement.
  * @param len Length of @a sql.
