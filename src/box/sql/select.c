@@ -1202,9 +1202,12 @@ selectInnerLoop(Parse * pParse,		/* The parser context */
 				int r1 = sqlite3GetTempReg(pParse);
 				assert(sqlite3Strlen30(pDest->zAffSdst) ==
 				       (unsigned int)nResultCol);
+				char *type_str =
+					sql_affinity_str_to_field_type_str(
+						pDest->zAffSdst);
 				sqlite3VdbeAddOp4(v, OP_MakeRecord, regResult,
-						  nResultCol, r1,
-						  pDest->zAffSdst, nResultCol);
+						  nResultCol, r1, type_str,
+						  P4_DYNAMIC);
 				sqlite3ExprCacheAffinityChange(pParse,
 							       regResult,
 							       nResultCol);
@@ -1626,8 +1629,11 @@ generateSortTail(Parse * pParse,	/* Parsing context */
 	case SRT_Set:{
 			assert((unsigned int)nColumn ==
 			       sqlite3Strlen30(pDest->zAffSdst));
+
+			const char *type_str =
+				sql_affinity_str_to_field_type_str(pDest->zAffSdst);
 			sqlite3VdbeAddOp4(v, OP_MakeRecord, regRow, nColumn,
-					  regTupleid, pDest->zAffSdst, nColumn);
+					  regTupleid, type_str, P4_DYNAMIC);
 			sqlite3ExprCacheAffinityChange(pParse, regRow, nColumn);
 			sqlite3VdbeAddOp2(v, OP_IdxInsert, regTupleid, pDest->reg_eph);
 			break;
@@ -3062,9 +3068,10 @@ generateOutputSubroutine(struct Parse *parse, struct Select *p,
 			int r1;
 			testcase(in->nSdst > 1);
 			r1 = sqlite3GetTempReg(parse);
+			const char *type_str =
+				sql_affinity_str_to_field_type_str(dest->zAffSdst);
 			sqlite3VdbeAddOp4(v, OP_MakeRecord, in->iSdst,
-					  in->nSdst, r1, dest->zAffSdst,
-					  in->nSdst);
+					  in->nSdst, r1, type_str, P4_DYNAMIC);
 			sqlite3ExprCacheAffinityChange(parse, in->iSdst,
 						       in->nSdst);
 			sqlite3VdbeAddOp2(v, OP_IdxInsert, r1, dest->reg_eph);

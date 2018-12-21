@@ -68,17 +68,30 @@ sql_space_index_affinity_str(struct sqlite3 *db, struct space_def *space_def,
 	return aff;
 }
 
+char *
+sql_index_type_str(struct sqlite3 *db, const struct index_def *idx_def)
+{
+	uint32_t column_count = idx_def->key_def->part_count;
+	char *types = (char *) sqlite3DbMallocRaw(db, column_count + 1);
+	if (types == NULL)
+		return NULL;
+	for (uint32_t i = 0; i < column_count; i++)
+		types[i] = idx_def->key_def->parts[i].type;
+	types[column_count] = '\0';
+	return types;
+}
+
 void
-sql_emit_table_affinity(struct Vdbe *v, struct space_def *def, int reg)
+sql_emit_table_types(struct Vdbe *v, struct space_def *def, int reg)
 {
 	assert(reg > 0);
 	struct sqlite3 *db = sqlite3VdbeDb(v);
 	uint32_t field_count = def->field_count;
-	char *colls_aff = (char *) sqlite3DbMallocZero(db, field_count + 1);
-	if (colls_aff == NULL)
+	char *colls_type = (char *) sqlite3DbMallocZero(db, field_count + 1);
+	if (colls_type == NULL)
 		return;
 	for (uint32_t i = 0; i < field_count; ++i) {
-		colls_aff[i] = def->fields[i].affinity;
+		colls_type[i] = def->fields[i].type;
 		/*
 		 * Force INTEGER type to handle queries like:
 		 * CREATE TABLE t1 (id INT PRIMARY KEY);
@@ -86,12 +99,12 @@ sql_emit_table_affinity(struct Vdbe *v, struct space_def *def, int reg)
 		 *
 		 * In this case 1.123 should be truncated to 1.
 		 */
-		if (colls_aff[i] == AFFINITY_INTEGER) {
+		if (colls_type[i] == FIELD_TYPE_INTEGER) {
 			sqlite3VdbeAddOp2(v, OP_Cast, reg + i,
-					  AFFINITY_INTEGER);
+					  FIELD_TYPE_INTEGER);
 		}
 	}
-	sqlite3VdbeAddOp4(v, OP_Affinity, reg, field_count, 0, colls_aff,
+	sqlite3VdbeAddOp4(v, OP_ApplyType, reg, field_count, 0, colls_type,
 			  P4_DYNAMIC);
 }
 
@@ -616,7 +629,7 @@ sqlite3Insert(Parse * pParse,	/* Parser context */
 		 * table column affinities.
 		 */
 		if (!is_view)
-			sql_emit_table_affinity(v, pTab->def, regCols + 1);
+			sql_emit_table_types(v, pTab->def, regCols + 1);
 
 		/* Fire BEFORE or INSTEAD OF triggers */
 		vdbe_code_row_trigger(pParse, trigger, TK_INSERT, 0,
@@ -964,7 +977,7 @@ vdbe_emit_constraint_checks(struct Parse *parse_context, struct Table *tab,
 			sqlite3VdbeResolveLabel(v, all_ok);
 		}
 	}
-	sql_emit_table_affinity(v, tab->def, new_tuple_reg);
+	sql_emit_table_types(v, tab->def, new_tuple_reg);
 	/*
 	 * If PK is marked as INTEGER, use it as strict type,
 	 * not as affinity. Emit code for type checking.

@@ -44,7 +44,7 @@ sqlite3ColumnDefault(Vdbe *v, struct space_def *def, int i, int ireg)
 	assert(def != 0);
 	if (!def->opts.is_view) {
 		sqlite3_value *pValue = 0;
-		char affinity = def->fields[i].affinity;
+		enum field_type type = def->fields[i].type;
 		VdbeComment((v, "%s.%s", def->name, def->fields[i].name));
 		assert(i < (int)def->field_count);
 
@@ -52,14 +52,14 @@ sqlite3ColumnDefault(Vdbe *v, struct space_def *def, int i, int ireg)
 		assert(def->fields != NULL && i < (int)def->field_count);
 		if (def->fields != NULL)
 			expr = def->fields[i].default_value_expr;
-		sqlite3ValueFromExpr(sqlite3VdbeDb(v), expr, affinity,
+		sqlite3ValueFromExpr(sqlite3VdbeDb(v), expr, type,
 				     &pValue);
 		if (pValue) {
 			sqlite3VdbeAppendP4(v, pValue, P4_MEM);
 		}
 #ifndef SQLITE_OMIT_FLOATING_POINT
-		if (affinity == AFFINITY_REAL) {
-			sqlite3VdbeAddOp1(v, OP_RealAffinity, ireg);
+		if (type == FIELD_TYPE_NUMBER) {
+			sqlite3VdbeAddOp1(v, OP_Realify, ireg);
 		}
 #endif
 	}
@@ -274,11 +274,10 @@ sqlite3Update(Parse * pParse,		/* The parser context */
 		nKey = pk_part_count;
 		regKey = iPk;
 	} else {
-		const char *zAff = is_view ? 0 :
-				   sql_space_index_affinity_str(pParse->db, def,
-								pPk->def);
+		char *type_str = is_view ? NULL :
+				 sql_index_type_str(pParse->db, pPk->def);
 		sqlite3VdbeAddOp4(v, OP_MakeRecord, iPk, pk_part_count,
-				  regKey, zAff, pk_part_count);
+				  regKey, type_str, is_view ? 0 : P4_DYNAMIC);
 		/*
 		 * Set flag to save memory allocating one by
 		 * malloc.
@@ -390,7 +389,7 @@ sqlite3Update(Parse * pParse,		/* The parser context */
 	 * verified. One could argue that this is wrong.
 	 */
 	if (tmask & TRIGGER_BEFORE) {
-		sql_emit_table_affinity(v, pTab->def, regNew);
+		sql_emit_table_types(v, pTab->def, regNew);
 		vdbe_code_row_trigger(pParse, trigger, TK_UPDATE, pChanges,
 				      TRIGGER_BEFORE, pTab, regOldPk,
 				      on_error, labelContinue);

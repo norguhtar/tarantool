@@ -598,11 +598,12 @@ sqlite3VdbeMemNumerify(Mem * pMem)
  * used (for example) to implement the SQL "cast()" operator.
  */
 int
-sqlite3VdbeMemCast(Mem * pMem, u8 aff)
+sqlite3VdbeMemCast(Mem * pMem, enum field_type type)
 {
+	assert(type < field_type_MAX);
 	if (pMem->flags & MEM_Null)
 		return SQLITE_OK;
-	if ((pMem->flags & MEM_Blob) != 0 && aff == AFFINITY_REAL) {
+	if ((pMem->flags & MEM_Blob) != 0 && type == FIELD_TYPE_NUMBER) {
 		if (sql_atoi64(pMem->z, (int64_t *) &pMem->u.i, pMem->n) == 0) {
 			MemSetTypeFlag(pMem, MEM_Real);
 			pMem->u.r = pMem->u.i;
@@ -610,8 +611,8 @@ sqlite3VdbeMemCast(Mem * pMem, u8 aff)
 		}
 		return ! sqlite3AtoF(pMem->z, &pMem->u.r, pMem->n);
 	}
-	switch (aff) {
-	case AFFINITY_BLOB:
+	switch (type) {
+	case FIELD_TYPE_SCALAR:
 		if (pMem->flags & MEM_Blob)
 			return SQLITE_OK;
 		if (pMem->flags & MEM_Str) {
@@ -625,7 +626,7 @@ sqlite3VdbeMemCast(Mem * pMem, u8 aff)
 			return 0;
 		}
 		return SQLITE_ERROR;
-	case AFFINITY_INTEGER:
+	case FIELD_TYPE_INTEGER:
 		if ((pMem->flags & MEM_Blob) != 0) {
 			if (sql_atoi64(pMem->z, (int64_t *) &pMem->u.i,
 				       pMem->n) != 0)
@@ -634,13 +635,13 @@ sqlite3VdbeMemCast(Mem * pMem, u8 aff)
 			return 0;
 		}
 		return sqlite3VdbeMemIntegerify(pMem, true);
-	case AFFINITY_REAL:
+	case FIELD_TYPE_NUMBER:
 		return sqlite3VdbeMemRealify(pMem);
 	default:
-		assert(aff == AFFINITY_TEXT);
+		assert(type == FIELD_TYPE_STRING);
 		assert(MEM_Str == (MEM_Blob >> 3));
 		pMem->flags |= (pMem->flags & MEM_Blob) >> 3;
-		sqlite3ValueApplyAffinity(pMem, AFFINITY_TEXT);
+		sqlite3ValueApplyAffinity(pMem, FIELD_TYPE_STRING);
 		assert(pMem->flags & MEM_Str || pMem->db->mallocFailed);
 		pMem->flags &= ~(MEM_Int | MEM_Real | MEM_Blob | MEM_Zero);
 		return SQLITE_OK;
@@ -1579,6 +1580,7 @@ sqlite3Stat4ProbeSetValue(Parse * pParse,	/* Parse context */
 			u8 aff = sql_space_index_part_affinity(space->def, idx,
 							       iVal + i);
 			alloc.iVal = iVal + i;
+			aff = sql_affinity_to_field_type(aff);
 			rc = stat4ValueFromExpr(pParse, pElem, aff, &alloc,
 						&pVal);
 			if (!pVal)

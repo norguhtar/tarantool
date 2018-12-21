@@ -306,32 +306,35 @@ applyNumericAffinity(Mem *pRec, int bTryForInt)
 }
 
 /**
- * Processing is determine by the affinity parameter:
+ * Processing is determine by the field type parameter:
  *
- * AFFINITY_INTEGER:
- * AFFINITY_REAL:
- *    Try to convert mem to an integer representation or a
- *    floating-point representation if an integer representation
- *    is not possible.  Note that the integer representation is
- *    always preferred, even if the affinity is REAL, because
- *    an integer representation is more space efficient on disk.
+ * INTEGER:
+ *    If memory holds floating point value and it can be
+ *    converted without loss (2.0 - > 2), it's type is
+ *    changed to INT. Otherwise, simply return success status.
  *
- * AFFINITY_TEXT:
- *    Convert mem to a text representation.
+ * NUMBER:
+ *    If memory holds INT or floating point value,
+ *    no actions take place.
  *
- * AFFINITY_BLOB:
- *    No-op. mem is unchanged.
+ * STRING:
+ *    Convert mem to a string representation.
  *
- * @param record The value to apply affinity to.
- * @param affinity The affinity to be applied.
+ * SCALAR:
+ *    Mem is unchanged, but flat is set to BLOB.
+ *
+ * @param record The value to apply type to.
+ * @param type_t The type to be applied.
  */
 static int
-mem_apply_affinity(struct Mem *record, enum affinity_type affinity)
+mem_apply_type(struct Mem *record, enum field_type f_type)
 {
 	if ((record->flags & MEM_Null) != 0)
 		return 0;
-	switch (affinity) {
-	case AFFINITY_INTEGER:
+	assert(f_type  < field_type_MAX);
+	switch (f_type) {
+	case FIELD_TYPE_INTEGER:
+	case FIELD_TYPE_UNSIGNED:
 		if ((record->flags & MEM_Int) == MEM_Int)
 			return 0;
 		if ((record->flags & MEM_Real) == MEM_Real) {
@@ -343,11 +346,11 @@ mem_apply_affinity(struct Mem *record, enum affinity_type affinity)
 			return 0;
 		}
 		return sqlite3VdbeMemIntegerify(record, false);
-	case AFFINITY_REAL:
+	case FIELD_TYPE_NUMBER:
 		if ((record->flags & (MEM_Real | MEM_Int)) != 0)
 			return 0;
 		return sqlite3VdbeMemRealify(record);
-	case AFFINITY_TEXT:
+	case FIELD_TYPE_STRING:
 		/*
 		 * Only attempt the conversion to TEXT if there is
 		 * an integer or real representation (BLOB and
@@ -359,7 +362,7 @@ mem_apply_affinity(struct Mem *record, enum affinity_type affinity)
 		}
 		record->flags &= ~(MEM_Real | MEM_Int);
 		return 0;
-	case AFFINITY_BLOB:
+	case FIELD_TYPE_SCALAR:
 		if (record->flags & (MEM_Str | MEM_Blob))
 			record->flags |= MEM_Blob;
 		return 0;
@@ -385,7 +388,7 @@ int sqlite3_value_numeric_type(sqlite3_value *pVal) {
 }
 
 /*
- * Exported version of mem_apply_affinity(). This one works on sqlite3_value*,
+ * Exported version of mem_apply_type(). This one works on sqlite3_value*,
  * not the internal Mem* type.
  */
 void
@@ -393,7 +396,7 @@ sqlite3ValueApplyAffinity(
 	sqlite3_value *pVal,
 	u8 affinity)
 {
-	mem_apply_affinity((Mem *) pVal, affinity);
+	mem_apply_type((Mem *) pVal, affinity);
 }
 
 /*
@@ -1946,7 +1949,7 @@ case OP_AddImm: {            /* in1 */
 case OP_MustBeInt: {            /* jump, in1 */
 	pIn1 = &aMem[pOp->p1];
 	if ((pIn1->flags & MEM_Int)==0) {
-		mem_apply_affinity(pIn1, AFFINITY_INTEGER);
+		mem_apply_type(pIn1, FIELD_TYPE_INTEGER);
 		VdbeBranchTaken((pIn1->flags&MEM_Int)==0, 2);
 		if ((pIn1->flags & MEM_Int)==0) {
 			if (pOp->p2==0) {
@@ -1962,16 +1965,16 @@ case OP_MustBeInt: {            /* jump, in1 */
 }
 
 #ifndef SQLITE_OMIT_FLOATING_POINT
-/* Opcode: RealAffinity P1 * * * *
+/* Opcode: Realify P1 * * * *
  *
  * If register P1 holds an integer convert it to a real value.
  *
  * This opcode is used when extracting information from a column that
- * has REAL affinity.  Such column values may still be stored as
+ * has float type.  Such column values may still be stored as
  * integers, for space efficiency, but after extraction we want them
  * to have only a real value.
  */
-case OP_RealAffinity: {                  /* in1 */
+case OP_Realify: {                  /* in1 */
 	pIn1 = &aMem[pOp->p1];
 	if (pIn1->flags & MEM_Int) {
 		sqlite3VdbeMemRealify(pIn1);
@@ -1982,7 +1985,7 @@ case OP_RealAffinity: {                  /* in1 */
 
 #ifndef SQLITE_OMIT_CAST
 /* Opcode: Cast P1 P2 * * *
- * Synopsis: affinity(r[P1])
+ * Synopsis: type(r[P1])
  *
  * Force the value in register P1 to be the type defined by P2.
  *
@@ -1997,11 +2000,6 @@ case OP_RealAffinity: {                  /* in1 */
  * A NULL value is not changed by this routine.  It remains NULL.
  */
 case OP_Cast: {                  /* in1 */
-	assert(pOp->p2>=AFFINITY_BLOB && pOp->p2<=AFFINITY_REAL);
-	testcase( pOp->p2==AFFINITY_TEXT);
-	testcase( pOp->p2==AFFINITY_BLOB);
-	testcase( pOp->p2==AFFINITY_INTEGER);
-	testcase( pOp->p2==AFFINITY_REAL);
 	pIn1 = &aMem[pOp->p1];
 	rc = ExpandBlob(pIn1);
 	if (rc != 0)
@@ -2011,7 +2009,7 @@ case OP_Cast: {                  /* in1 */
 	if (rc == 0)
 		break;
 	diag_set(ClientError, ER_SQL_TYPE_MISMATCH, sqlite3_value_text(pIn1),
-		 affinity_type_str(pOp->p2));
+		 field_type_strs[pOp->p2]);
 	rc = SQL_TARANTOOL_ERROR;
 	goto abort_due_to_error;
 }
@@ -2225,7 +2223,7 @@ case OP_Ge: {             /* same as TK_GE, jump, in1, in3 */
 	default:       res2 = res>=0;     break;
 	}
 
-	/* Undo any changes made by mem_apply_affinity() to the input registers. */
+	/* Undo any changes made by mem_apply_type() to the input registers. */
 	assert((pIn1->flags & MEM_Dyn) == (flags1 & MEM_Dyn));
 	pIn1->flags = flags1;
 	assert((pIn3->flags & MEM_Dyn) == (flags3 & MEM_Dyn));
@@ -2814,21 +2812,19 @@ case OP_Column: {
  * string indicates the column affinity that should be used for the nth
  * memory cell in the range.
  */
-case OP_Affinity: {
-	const char *zAffinity;   /* The affinity to be applied */
-	char cAff;               /* A single character of affinity */
-
-	zAffinity = pOp->p4.z;
-	assert(zAffinity!=0);
-	assert(zAffinity[pOp->p2]==0);
+case OP_ApplyType: {
+	const char *type_str = pOp->p4.z;
+	assert(type_str != NULL);
+	assert(type_str[pOp->p2] == '\0');
 	pIn1 = &aMem[pOp->p1];
-	while( (cAff = *(zAffinity++))!=0) {
+	char type;
+	while((type = *(type_str++)) != '\0') {
 		assert(pIn1 <= &p->aMem[(p->nMem+1 - p->nCursor)]);
 		assert(memIsValid(pIn1));
-		if (mem_apply_affinity(pIn1, cAff) != 0) {
+		if (mem_apply_type(pIn1, type) != 0) {
 			diag_set(ClientError, ER_SQL_TYPE_MISMATCH,
 				 sqlite3_value_text(pIn1),
-				 affinity_type_str(cAff));
+				 field_type_strs[type]);
 			rc = SQL_TARANTOOL_ERROR;
 			goto abort_due_to_error;
 		}
@@ -2848,10 +2844,7 @@ case OP_Affinity: {
  * string indicates the column affinity that should be used for the nth
  * field of the index key.
  *
- * The mapping from character to affinity is given by the AFFINITY_
- * macros defined in sqliteInt.h.
- *
- * If P4 is NULL then all index fields have the affinity BLOB.
+ * If P4 is NULL then all index fields have type SCALAR.
  *
  * If P5 is not NULL then record under construction is intended to be inserted
  * into ephemeral space. Thus, sort of memory optimization can be performed.
@@ -2899,8 +2892,7 @@ case OP_MakeRecord: {
 	if (zAffinity) {
 		pRec = pData0;
 		do{
-			mem_apply_affinity(pRec++, *(zAffinity++));
-			assert(zAffinity[0]==0 || pRec<=pLast);
+			mem_apply_type(pRec++, *(zAffinity++));
 		}while( zAffinity[0]);
 	}
 

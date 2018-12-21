@@ -3439,6 +3439,9 @@ sql_affinity_to_field_type(enum affinity_type affinity);
 enum affinity_type
 sql_field_type_to_affinity(enum field_type field_type);
 
+char *
+sql_affinity_str_to_field_type_str(const char *affinity_str);
+
 /**
  * Compile view, i.e. create struct Select from
  * 'CREATE VIEW...' string, and assign cursors to each table from
@@ -4235,16 +4238,20 @@ char *
 sql_space_index_affinity_str(struct sqlite3 *db, struct space_def *space_def,
 			     struct index_def *idx_def);
 
+/** Return string consisting of fields types of given index. */
+char *
+sql_index_type_str(struct sqlite3 *db, const struct index_def *idx_def);
+
 /**
- * Code an OP_Affinity opcode that will set affinities
+ * Code an OP_ApplyType opcode that will force types
  * for given range of register starting from @reg.
  *
  * @param v VDBE.
  * @param def Definition of table to be used.
- * @param reg Register where affinities will be placed.
+ * @param reg Register where types will be placed.
  */
 void
-sql_emit_table_affinity(struct Vdbe *v, struct space_def *def, int reg);
+sql_emit_table_types(struct Vdbe *v, struct space_def *def, int reg);
 
 /**
  * Return superposition of two affinities.
