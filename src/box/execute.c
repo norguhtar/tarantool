@@ -530,7 +530,7 @@ sql_execute(sqlite3 *db, struct sqlite3_stmt *stmt, struct port *port,
 
 int
 sql_prepare_and_execute(const char *sql, int len, const struct sql_bind *bind,
-			uint32_t bind_count, struct sql_response *response,
+			uint32_t bind_count, struct port *port,
 			struct region *region)
 {
 	struct sqlite3_stmt *stmt;
@@ -544,22 +544,56 @@ sql_prepare_and_execute(const char *sql, int len, const struct sql_bind *bind,
 		return -1;
 	}
 	assert(stmt != NULL);
-	port_tuple_create(&response->port);
-	response->prep_stmt = stmt;
+	port_tuple_create(port);
 	if (sql_bind(stmt, bind, bind_count) == 0 &&
-	    sql_execute(db, stmt, &response->port, region) == 0)
+	    sql_execute(db, stmt, port, region) == 0) {
+		port_tuple_to_port_sql(port, stmt);
 		return 0;
-	port_destroy(&response->port);
+	}
+	port_destroy(port);
 	sqlite3_finalize(stmt);
 	return -1;
 }
 
-int
-sql_response_dump(struct sql_response *response, struct obuf *out)
+/**
+ * Dump a built response into @an out buffer. The response is
+ * destroyed.
+ * Response structure:
+ * +----------------------------------------------+
+ * | IPROTO_OK, sync, schema_version   ...        | iproto_header
+ * +----------------------------------------------+---------------
+ * | Body - a map with one or two keys.           |
+ * |                                              |
+ * | IPROTO_BODY: {                               |
+ * |     IPROTO_METADATA: [                       |
+ * |         {IPROTO_FIELD_NAME: column name1},   |
+ * |         {IPROTO_FIELD_NAME: column name2},   | iproto_body
+ * |         ...                                  |
+ * |     ],                                       |
+ * |                                              |
+ * |     IPROTO_DATA: [                           |
+ * |         tuple, tuple, tuple, ...             |
+ * |     ]                                        |
+ * | }                                            |
+ * +-------------------- OR ----------------------+
+ * | IPROTO_BODY: {                               |
+ * |     IPROTO_SQL_INFO: {                       |
+ * |         SQL_INFO_ROW_COUNT: number           |
+ * |     }                                        |
+ * | }                                            |
+ * +----------------------------------------------+
+ * @param port port with EXECUTE response.
+ * @param out Output buffer.
+ *
+ * @retval  0 Success.
+ * @retval -1 Memory error.
+ */
+static int
+port_sql_dump_msgpack(struct port *port, struct obuf *out)
 {
+	assert(port->vtab == &port_sql_vtab);
 	sqlite3 *db = sql_get();
-	struct sqlite3_stmt *stmt = (struct sqlite3_stmt *) response->prep_stmt;
-	struct port_tuple *port_tuple = (struct port_tuple *) &response->port;
+	struct sqlite3_stmt *stmt = ((struct port_sql *)port)->stmt;
 	int rc = 0, column_count = sqlite3_column_count(stmt);
 	if (column_count > 0) {
 		int keys = 2;
@@ -575,26 +609,18 @@ err:
 			rc = -1;
 			goto finish;
 		}
-		size = mp_sizeof_uint(IPROTO_DATA) +
-		       mp_sizeof_array(port_tuple->size);
+		size = mp_sizeof_uint(IPROTO_DATA);
 		pos = (char *) obuf_alloc(out, size);
 		if (pos == NULL) {
 			diag_set(OutOfMemory, size, "obuf_alloc", "pos");
 			goto err;
 		}
 		pos = mp_encode_uint(pos, IPROTO_DATA);
-		pos = mp_encode_array(pos, port_tuple->size);
-		/*
-		 * Just like SELECT, SQL uses output format compatible
-		 * with Tarantool 1.6
-		 */
-		if (port_dump_msgpack_16(&response->port, out) < 0) {
-			/* Failed port dump destroyes the port. */
+		if (port_tuple_vtab.dump_msgpack(port, out) < 0)
 			goto err;
-		}
 	} else {
 		int keys = 1;
-		assert(port_tuple->size == 0);
+		assert(((struct port_tuple *)port)->size == 0);
 		struct stailq *autoinc_id_list =
 			vdbe_autoinc_id_list((struct Vdbe *)stmt);
 		uint32_t map_size = stailq_empty(autoinc_id_list) ? 1 : 2;
@@ -643,7 +669,29 @@ err:
 		}
 	}
 finish:
-	port_destroy(&response->port);
+	port_destroy(port);
 	sqlite3_finalize(stmt);
 	return rc;
 }
+
+static void
+port_sql_destroy(struct port *base)
+{
+	port_tuple_vtab.destroy(base);
+}
+
+void
+port_tuple_to_port_sql(struct port *port, struct sqlite3_stmt *stmt)
+{
+	assert(port->vtab == &port_tuple_vtab);
+	((struct port_sql *)port)->stmt = stmt;
+	port->vtab = &port_sql_vtab;
+}
+
+const struct port_vtab port_sql_vtab = {
+	.dump_msgpack = port_sql_dump_msgpack,
+	.dump_msgpack_16 = NULL,
+	.dump_lua = NULL,
+	.dump_plain = NULL,
+	.destroy = port_sql_destroy,
+};
