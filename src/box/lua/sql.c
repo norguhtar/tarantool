@@ -6,6 +6,7 @@
 #include <info.h>
 #include "lua/info.h"
 #include "lua/utils.h"
+#include "box/execute.h"
 
 static void
 lua_push_column_names(struct lua_State *L, struct sqlite3_stmt *stmt)
@@ -111,6 +112,29 @@ sqlerror:
 }
 
 static int
+lbox_execute(struct lua_State *L)
+{
+	struct sql_bind *bind = NULL;
+	int bind_count = 0;
+	size_t length;
+	struct port port;
+
+	struct sqlite3 *db = sql_get();
+	if (db == NULL)
+		return luaL_error(L, "not ready");
+
+	const char *sql = lua_tolstring(L, 1, &length);
+	if (sql == NULL)
+		return luaL_error(L, "usage: box.execute(sqlstring)");
+
+	if (sql_prepare_and_execute(sql, length, bind, bind_count, &port,
+				    &fiber()->gc) != 0)
+		return luaT_error(L);
+	port_dump_lua(&port, L);
+	return 1;
+}
+
+static int
 lua_sql_debug(struct lua_State *L)
 {
 	struct info_handler info;
@@ -124,6 +148,7 @@ box_lua_sqlite_init(struct lua_State *L)
 {
 	static const struct luaL_Reg module_funcs [] = {
 		{"execute", lua_sql_execute},
+		{"new_execute", lbox_execute},
 		{"debug", lua_sql_debug},
 		{NULL, NULL}
 	};

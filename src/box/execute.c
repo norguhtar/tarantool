@@ -43,6 +43,7 @@
 #include "port.h"
 #include "tuple.h"
 #include "sql/vdbe.h"
+#include "lua/utils.h"
 
 const char *sql_type_strs[] = {
 	NULL,
@@ -674,6 +675,87 @@ finish:
 	return rc;
 }
 
+/**
+ * Push a metadata of the prepared statement to Lua stack.
+ *
+ * @param stmt Prepared statement.
+ * @param L Lua stack.
+ * @param column_count Statement's column count.
+ */
+static inline void
+lua_sql_get_description(struct sqlite3_stmt *stmt, struct lua_State *L,
+			int column_count)
+{
+	assert(column_count > 0);
+	lua_createtable(L, column_count, 0);
+	for (int i = 0; i < column_count; ++i) {
+		lua_createtable(L, 2, 0);
+		const char *name = sqlite3_column_name(stmt, i);
+		const char *type = sqlite3_column_datatype(stmt, i);
+		/*
+		 * Can not fail, since all column names are
+		 * preallocated during prepare phase and the
+		 * column_name simply returns them.
+		 */
+		assert(name != NULL);
+		lua_pushlstring(L, name, strlen(name));
+		lua_setfield(L, -2, "name");
+		lua_pushlstring(L, type, strlen(type));
+		lua_setfield(L, -2, "type");
+		lua_rawseti(L, -2, i + 1);
+	}
+	lua_setfield(L, -2, "metadata");
+}
+
+/**
+ * Dump a built response into Lua stack. The response is
+ * destroyed.
+ *
+ * @param port port with EXECUTE response.
+ * @param L Lua stack.
+ */
+static void
+port_sql_dump_lua(struct port *port, struct lua_State *L)
+{
+	assert(port->vtab == &port_sql_vtab);
+	sqlite3 *db = sql_get();
+	struct sqlite3_stmt *stmt = ((struct port_sql *)port)->stmt;
+	int column_count = sqlite3_column_count(stmt);
+	if (column_count > 0) {
+		int keys = 2;
+		lua_createtable(L, 0, keys);
+		lua_sql_get_description(stmt, L, column_count);
+		port_tuple_vtab.dump_lua(port, L);
+		lua_setfield(L, -2, "rows");
+	} else {
+		assert(((struct port_tuple *)port)->size == 0);
+		struct stailq *autoinc_id_list =
+			vdbe_autoinc_id_list((struct Vdbe *)stmt);
+
+		int dynamic_keys = stailq_empty(autoinc_id_list) ? 0 : 1;
+		lua_createtable(L, 1, dynamic_keys);
+
+		luaL_pushuint64(L, db->nChange);
+		lua_setfield(L, -2, "rowcount");
+
+		if (!stailq_empty(autoinc_id_list)) {
+			lua_newtable(L);
+			int i = 1;
+			struct autoinc_id_entry *id_entry;
+			stailq_foreach_entry(id_entry, autoinc_id_list, link) {
+				if (id_entry->id >= 0)
+					luaL_pushuint64(L, id_entry->id);
+				else
+					luaL_pushint64(L, id_entry->id);
+				lua_rawseti(L, -2, i++);
+			}
+			lua_setfield(L, -2, "autoincrement_ids");
+		}
+	}
+	port_destroy(port);
+	sqlite3_finalize(stmt);
+}
+
 static void
 port_sql_destroy(struct port *base)
 {
@@ -691,7 +773,7 @@ port_tuple_to_port_sql(struct port *port, struct sqlite3_stmt *stmt)
 const struct port_vtab port_sql_vtab = {
 	.dump_msgpack = port_sql_dump_msgpack,
 	.dump_msgpack_16 = NULL,
-	.dump_lua = NULL,
+	.dump_lua = port_sql_dump_lua,
 	.dump_plain = NULL,
 	.destroy = port_sql_destroy,
 };
