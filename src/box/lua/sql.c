@@ -127,6 +127,10 @@ lbox_execute(struct lua_State *L)
 	if (sql == NULL)
 		return luaL_error(L, "usage: box.execute(sqlstring)");
 
+	if (lua_gettop(L) == 2 &&
+	    (bind_count = lua_sql_bind_list_decode(L, &bind, 2)) < 0)
+		return luaT_error(L);
+
 	if (sql_prepare_and_execute(sql, length, bind, bind_count, &port,
 				    &fiber()->gc) != 0)
 		return luaT_error(L);

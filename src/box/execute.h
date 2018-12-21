@@ -95,6 +95,21 @@ int
 sql_bind_list_decode(const char *data, struct sql_bind **out_bind);
 
 /**
+ * Parse Lua table of SQL parameters and store a result
+ * into the @request->bind, bind_count.
+ *
+ * @param L Lua stack to get data from.
+ * @param[out] out_bind Pointer to save decoded parameters.
+ * @param idx Position of table with parameters on Lua stack.
+ *
+ * @retval  >= 0 Number of decoded parameters.
+ * @retval -1 Client or memory error.
+ */
+int
+lua_sql_bind_list_decode(struct lua_State *L, struct sql_bind **out_bind,
+			 int idx);
+
+/**
  * Prepare and execute an SQL statement.
  * @param sql SQL statement.
  * @param len Length of @a sql.
