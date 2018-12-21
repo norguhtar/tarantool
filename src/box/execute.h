@@ -125,7 +125,7 @@ lua_sql_bind_list_decode(struct lua_State *L, struct sql_bind **out_bind,
 int
 sql_prepare_and_execute(const char *sql, int len, const struct sql_bind *bind,
 			uint32_t bind_count, struct port *port,
-			struct region *region);
+			struct region *region, int error_id);
 
 #if defined(__cplusplus)
 } /* extern "C" { */

@@ -678,6 +678,8 @@ sql_get_description(struct sqlite3_stmt *stmt, struct obuf *out,
 		 * column_name simply returns them.
 		 */
 		assert(name != NULL);
+		if (type == NULL)
+			type = "UNKNOWN";
 		size += mp_sizeof_str(strlen(name));
 		size += mp_sizeof_str(strlen(type));
 		char *pos = (char *) obuf_alloc(out, size);
@@ -696,7 +698,7 @@ sql_get_description(struct sqlite3_stmt *stmt, struct obuf *out,
 
 static inline int
 sql_execute(sqlite3 *db, struct sqlite3_stmt *stmt, struct port *port,
-	    struct region *region)
+	    struct region *region, int error_id)
 {
 	int rc, column_count = sqlite3_column_count(stmt);
 	if (column_count > 0) {
@@ -713,7 +715,7 @@ sql_execute(sqlite3 *db, struct sqlite3_stmt *stmt, struct port *port,
 		assert(rc != SQLITE_ROW && rc != SQLITE_OK);
 	}
 	if (rc != SQLITE_DONE) {
-		diag_set(ClientError, ER_SQL_EXECUTE, sqlite3_errmsg(db));
+		diag_set(ClientError, error_id, sqlite3_errmsg(db));
 		return -1;
 	}
 	return 0;
@@ -722,7 +724,7 @@ sql_execute(sqlite3 *db, struct sqlite3_stmt *stmt, struct port *port,
 int
 sql_prepare_and_execute(const char *sql, int len, const struct sql_bind *bind,
 			uint32_t bind_count, struct port *port,
-			struct region *region)
+			struct region *region, int error_id)
 {
 	struct sqlite3_stmt *stmt;
 	sqlite3 *db = sql_get();
@@ -731,13 +733,13 @@ sql_prepare_and_execute(const char *sql, int len, const struct sql_bind *bind,
 		return -1;
 	}
 	if (sqlite3_prepare_v2(db, sql, len, &stmt, NULL) != SQLITE_OK) {
-		diag_set(ClientError, ER_SQL_EXECUTE, sqlite3_errmsg(db));
+		diag_set(ClientError, error_id, sqlite3_errmsg(db));
 		return -1;
 	}
 	assert(stmt != NULL);
 	port_tuple_create(port);
 	if (sql_bind(stmt, bind, bind_count) == 0 &&
-	    sql_execute(db, stmt, port, region) == 0) {
+	    sql_execute(db, stmt, port, region, error_id) == 0) {
 		port_tuple_to_port_sql(port, stmt);
 		return 0;
 	}
@@ -888,6 +890,8 @@ lua_sql_get_description(struct sqlite3_stmt *stmt, struct lua_State *L,
 		 * column_name simply returns them.
 		 */
 		assert(name != NULL);
+		if (type == NULL)
+			type = "UNKNOWN";
 		lua_pushlstring(L, name, strlen(name));
 		lua_setfield(L, -2, "name");
 		lua_pushlstring(L, type, strlen(type));

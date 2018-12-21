@@ -129,13 +129,17 @@ lbox_execute(struct lua_State *L)
 
 	if (lua_gettop(L) == 2 &&
 	    (bind_count = lua_sql_bind_list_decode(L, &bind, 2)) < 0)
-		return luaT_error(L);
+		goto sqlerror;
 
 	if (sql_prepare_and_execute(sql, length, bind, bind_count, &port,
-				    &fiber()->gc) != 0)
-		return luaT_error(L);
+				    &fiber()->gc, ER_SYSTEM) != 0)
+		goto sqlerror;
 	port_dump_lua(&port, L);
 	return 1;
+
+sqlerror:
+	lua_pushstring(L, sqlite3_errmsg(db));
+	return lua_error(L);
 }
 
 static int
@@ -151,7 +155,7 @@ void
 box_lua_sqlite_init(struct lua_State *L)
 {
 	static const struct luaL_Reg module_funcs [] = {
-		{"execute", lua_sql_execute},
+		{"old_execute", lua_sql_execute},
 		{"new_execute", lbox_execute},
 		{"debug", lua_sql_debug},
 		{NULL, NULL}
