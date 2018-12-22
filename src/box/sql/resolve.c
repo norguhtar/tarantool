@@ -339,8 +339,8 @@ lookupName(Parse * pParse,	/* The parsing context */
 				if (iCol < (int)pTab->def->field_count) {
 					cnt++;
 					if (iCol < 0) {
-						pExpr->affinity =
-							AFFINITY_INTEGER;
+						pExpr->type =
+							FIELD_TYPE_INTEGER;
 					} else if (pExpr->iTable == 0) {
 						testcase(iCol == 31);
 						testcase(iCol == 32);

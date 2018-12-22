@@ -1788,7 +1788,9 @@ struct Savepoint {
 #define SAVEPOINT_RELEASE    1
 #define SAVEPOINT_ROLLBACK   2
 
-#define sqlite3IsNumericAffinity(X)  ((X)>=AFFINITY_INTEGER)
+#define sql_type_is_numeric(X)  ((X) == FIELD_TYPE_INTEGER || \
+				 (X) == FIELD_TYPE_NUMBER || \
+				 (X) == FIELD_TYPE_UNSIGNED)
 
 /*
  * The AFFINITY_MASK values masks off the significant bits of an
@@ -2092,7 +2094,7 @@ struct Expr {
 	u8 op;			/* Operation performed by this node */
 	union {
 		/** The affinity of the column. */
-		enum affinity_type affinity;
+		enum field_type type;
 		/** Conflict action for RAISE() function. */
 		enum on_conflict_action on_conflict_action;
 	};
@@ -3707,7 +3709,9 @@ int sqlite3ExprIsConstantOrFunction(Expr *, u8);
 int sqlite3ExprIsTableConstant(Expr *, int);
 int sqlite3ExprIsInteger(Expr *, int *);
 int sqlite3ExprCanBeNull(const Expr *);
-int sqlite3ExprNeedsNoAffinityChange(const Expr *, char);
+
+int
+sql_expr_needs_type_change(const Expr *epr, enum field_type type);
 
 /**
  * This routine generates VDBE code that causes a single row of a
@@ -4253,26 +4257,30 @@ sql_index_type_str(struct sqlite3 *db, const struct index_def *idx_def);
 void
 sql_emit_table_types(struct Vdbe *v, struct space_def *def, int reg);
 
-/**
- * Return superposition of two affinities.
- * This may be required for determining resulting
- * affinity of expressions like a + '2'.
- */
-enum affinity_type
-sql_affinity_result(enum affinity_type aff1, enum affinity_type aff2);
+enum field_type
+sql_type_result(enum field_type lhs, enum field_type rhs);
 
-int sqlite3IndexAffinityOk(Expr * pExpr, char idx_affinity);
+enum field_type
+sql_index_type_is_ok(struct Expr *expr, enum field_type idx_type);
 
 /**
- * Return the affinity character for a single column of a table.
- * @param def space definition.
- * @param idx column index.
- * @retval AFFINITY
+ * Return the type of the expression pExpr.
+ *
+ * If pExpr is a column, a reference to a column via an 'AS' alias,
+ * or a sub-select with a column as the return value, then the
+ * type of that column is returned. Otherwise, type ANY is returned,
+ * indicating that the expression can feature any type.
+ *
+ * The WHERE clause expressions in the following statements all
+ * have an type:
+ *
+ * CREATE TABLE t1(a);
+ * SELECT * FROM t1 WHERE a;
+ * SELECT a AS b FROM t1 WHERE b;
+ * SELECT * FROM t1 WHERE (select a from t1);
  */
-char
-sqlite3TableColumnAffinity(struct space_def *def, int idx);
-
-char sqlite3ExprAffinity(Expr * pExpr);
+enum field_type
+sql_expr_type(Expr *pExpr);
 
 
 /**

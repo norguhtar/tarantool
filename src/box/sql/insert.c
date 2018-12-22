@@ -989,7 +989,7 @@ vdbe_emit_constraint_checks(struct Parse *parse_context, struct Table *tab,
 	if (part_count == 1) {
 		uint32_t fieldno = pk->def->key_def->parts[0].fieldno;
 		int reg_pk = new_tuple_reg + fieldno;
-		if (def->fields[fieldno].affinity == AFFINITY_INTEGER) {
+		if (def->fields[fieldno].type == FIELD_TYPE_INTEGER) {
 			int skip_if_null = sqlite3VdbeMakeLabel(v);
 			if (autoinc_fieldno != UINT32_MAX) {
 				sqlite3VdbeAddOp2(v, OP_IsNull, reg_pk,
