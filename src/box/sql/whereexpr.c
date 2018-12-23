@@ -284,7 +284,8 @@ like_optimization_is_valid(Parse *pParse, Expr *pExpr, Expr **ppPrefix,
 		Vdbe *pReprepare = pParse->pReprepare;
 		int iCol = pRight->iColumn;
 		pVal =
-		    sqlite3VdbeGetBoundValue(pReprepare, iCol, AFFINITY_BLOB);
+		    sqlite3VdbeGetBoundValue(pReprepare, iCol,
+					     FIELD_TYPE_SCALAR);
 		if (pVal && sqlite3_value_type(pVal) == SQLITE_TEXT) {
 			z = (char *)sqlite3_value_text(pVal);
 		}

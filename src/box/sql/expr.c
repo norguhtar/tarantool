@@ -311,8 +311,7 @@ binaryCompareP5(Expr * pExpr1, Expr * pExpr2, int jumpIfNull)
 {
 	enum field_type lhs = sql_expr_type(pExpr2);
 	enum field_type rhs = sql_expr_type(pExpr1);
-	u8 type_mask = sql_field_type_to_affinity(sql_type_result(rhs, lhs)) |
-		       (u8) jumpIfNull;
+	u8 type_mask = sql_type_result(rhs, lhs) | (u8) jumpIfNull;
 	return type_mask;
 }
 
@@ -2606,9 +2605,9 @@ exprINAffinity(Parse * pParse, Expr * pExpr)
 			if (pSelect) {
 				struct Expr *e = pSelect->pEList->a[i].pExpr;
 				enum field_type rhs = sql_expr_type(e);
-				zRet[i] = sql_field_type_to_affinity(sql_type_result(rhs, lhs));
+				zRet[i] = sql_type_result(rhs, lhs);
 			} else {
-				zRet[i] = sql_field_type_to_affinity(lhs);
+				zRet[i] = lhs;
 			}
 		}
 		zRet[nVal] = '\0';
@@ -2826,6 +2825,7 @@ sqlite3CodeSubselect(Parse * pParse,	/* Parsing context */
 						jmpIfDynamic = -1;
 					}
 					r3 = sqlite3ExprCodeTarget(pParse, pE2, r1);
+					assert(lhs_type < field_type_MAX);
 	 				sqlite3VdbeAddOp4(v, OP_MakeRecord, r3,
 							  1, r2,
 							  (char *) &lhs_type,
@@ -3142,8 +3142,7 @@ sqlite3ExprCodeIN(Parse * pParse,	/* Parsing and code generating context */
 	 * of the RHS using the LHS as a probe.  If found, the result is
 	 * true.
 	 */
-	char *type_str = sql_affinity_str_to_field_type_str(zAff);
-	sqlite3VdbeAddOp4(v, OP_ApplyType, rLhs, nVector, 0, type_str, nVector);
+	sqlite3VdbeAddOp4(v, OP_ApplyType, rLhs, nVector, 0, zAff, nVector);
 	if (destIfFalse == destIfNull) {
 		/* Combine Step 3 and Step 5 into a single opcode */
 		sqlite3VdbeAddOp4Int(v, OP_NotFound, pExpr->iTable,

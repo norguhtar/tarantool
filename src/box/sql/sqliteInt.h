@@ -3432,19 +3432,6 @@ sql_create_view(struct Parse *parse_context, struct Token *begin,
 		struct Select *select, bool if_exists);
 
 /**
- * Helper to convert SQLite affinity to corresponding
- * Tarantool field type.
- **/
-enum field_type
-sql_affinity_to_field_type(enum affinity_type affinity);
-
-enum affinity_type
-sql_field_type_to_affinity(enum field_type field_type);
-
-char *
-sql_affinity_str_to_field_type_str(const char *affinity_str);
-
-/**
  * Compile view, i.e. create struct Select from
  * 'CREATE VIEW...' string, and assign cursors to each table from
  * 'FROM' clause.
@@ -4215,33 +4202,6 @@ int sqlite3VarintLen(u64 v);
 #define getVarint    sqlite3GetVarint
 #define putVarint    sqlite3PutVarint
 
-/**
- * Return a pointer to the column affinity string associated with
- * given index. A column affinity string has one character for
- * each column in the table, according to the affinity of the
- * column:
- *
- *  Character      Column affinity
- *  ------------------------------
- *  'A'            BLOB
- *  'B'            TEXT
- *  'C'            NUMERIC
- *  'D'            INTEGER
- *  'F'            REAL
- *
- * Memory for the buffer containing the column index affinity string
- * is allocated on heap.
- *
- * @param db Database handle.
- * @param space_def Definition of space index belongs to.
- * @param idx_def Definition of index from which affinity
- *                to be extracted.
- * @retval Allocated affinity string, or NULL on OOM.
- */
-char *
-sql_space_index_affinity_str(struct sqlite3 *db, struct space_def *space_def,
-			     struct index_def *idx_def);
-
 /** Return string consisting of fields types of given index. */
 char *
 sql_index_type_str(struct sqlite3 *db, const struct index_def *idx_def);
@@ -4630,19 +4590,6 @@ void sqlite3Stat4ProbeFree(UnpackedRecord *);
 int
 sql_stat4_column(struct sqlite3 *db, const char *record, uint32_t col_num,
 		 sqlite3_value **res);
-
-/**
- * Return the affinity for a single column of an index.
- *
- * @param def Definition of space @idx belongs to.
- * @param idx Index to be investigated.
- * @param partno Affinity of this part to be returned.
- *
- * @retval Affinity of @partno index part.
- */
-enum affinity_type
-sql_space_index_part_affinity(struct space_def *def, struct index_def *idx,
-			      uint32_t partno);
 
 /*
  * The interface to the LEMON-generated parser

@@ -387,19 +387,18 @@ codeApplyAffinity(Parse * pParse, int base, int n, char *zAff)
 	/* Adjust base and n to skip over AFFINITY_BLOB entries at the beginning
 	 * and end of the affinity string.
 	 */
-	while (n > 0 && zAff[0] == AFFINITY_BLOB) {
+	while (n > 0 && zAff[0] == FIELD_TYPE_SCALAR) {
 		n--;
 		base++;
 		zAff++;
 	}
 
-	while (n > 1 && zAff[n - 1] == AFFINITY_BLOB) {
+	while (n > 1 && zAff[n - 1] == FIELD_TYPE_SCALAR) {
 		n--;
 	}
 
 	if (n > 0) {
-		const char *type_str = sql_affinity_str_to_field_type_str(zAff);
-		sqlite3VdbeAddOp4(v, OP_ApplyType, base, n, 0, type_str, n);
+		sqlite3VdbeAddOp4(v, OP_ApplyType, base, n, 0, zAff, n);
 		sqlite3ExprCacheAffinityChange(pParse, base, n);
 	}
 }
@@ -421,12 +420,11 @@ updateRangeAffinityStr(Expr * pRight,	/* RHS of comparison */
 {
 	int i;
 	for (i = 0; i < n; i++) {
-		enum field_type type = sql_affinity_to_field_type(zAff[i]);
 		Expr *p = sqlite3VectorFieldSubexpr(pRight, i);
 		enum field_type expr_type = sql_expr_type(p);
-		if (sql_type_result(expr_type, type) == FIELD_TYPE_SCALAR ||
-		    sql_expr_needs_type_change(p, type)) {
-			zAff[i] = AFFINITY_BLOB;
+		if (sql_type_result(expr_type, zAff[i]) == FIELD_TYPE_SCALAR ||
+		    sql_expr_needs_type_change(p, zAff[i])) {
+			zAff[i] = FIELD_TYPE_SCALAR;
 		}
 	}
 }
@@ -709,11 +707,7 @@ codeAllEqualityTerms(Parse * pParse,	/* Parsing context */
 	nReg = pLoop->nEq + nExtraReg;
 	pParse->nMem += nReg;
 
-
-	struct space *space = space_by_id(idx_def->space_id);
-	assert(space != NULL);
-	char *zAff = sql_space_index_affinity_str(pParse->db, space->def,
-						  idx_def);
+	char *zAff = sql_index_type_str(pParse->db, idx_def);
 	assert(zAff != 0 || pParse->db->mallocFailed);
 
 	if (nSkip) {
@@ -767,7 +761,7 @@ codeAllEqualityTerms(Parse * pParse,	/* Parsing context */
 				 * affinity of the comparison has been applied to the value.
 				 */
 				if (zAff)
-					zAff[j] = AFFINITY_BLOB;
+					zAff[j] = FIELD_TYPE_SCALAR;
 			}
 		} else if ((pTerm->eOperator & WO_ISNULL) == 0) {
 			Expr *pRight = pTerm->pExpr->pRight;
@@ -779,14 +773,13 @@ codeAllEqualityTerms(Parse * pParse,	/* Parsing context */
 			if (zAff) {
 				enum field_type type =
 					sql_expr_type(pRight);
-				enum field_type idx_type =
-					sql_affinity_to_field_type(zAff[j]);
+				enum field_type idx_type = zAff[j];
 				if (sql_type_result(type, idx_type) ==
 				    FIELD_TYPE_SCALAR) {
-					zAff[j] = AFFINITY_BLOB;
+					zAff[j] = FIELD_TYPE_SCALAR;
 				}
 				if (sql_expr_needs_type_change(pRight, idx_type))
-					zAff[j] = AFFINITY_BLOB;
+					zAff[j] = FIELD_TYPE_SCALAR;
 			}
 		}
 	}

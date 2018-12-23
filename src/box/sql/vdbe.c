@@ -2165,7 +2165,7 @@ case OP_Ge: {             /* same as TK_GE, jump, in1, in3 */
 	} else {
 		/* Neither operand is NULL.  Do a comparison. */
 		affinity = pOp->p5 & AFFINITY_MASK;
-		if (affinity>=AFFINITY_INTEGER) {
+		if (sql_type_is_numeric(affinity)) {
 			if ((flags1 | flags3)&MEM_Str) {
 				if ((flags1 & (MEM_Int|MEM_Real|MEM_Str))==MEM_Str) {
 					applyNumericAffinity(pIn1,0);
@@ -2193,7 +2193,7 @@ case OP_Ge: {             /* same as TK_GE, jump, in1, in3 */
 				res = 0;
 				goto compare_op;
 			}
-		} else if (affinity==AFFINITY_TEXT) {
+		} else if (affinity == FIELD_TYPE_STRING) {
 			if ((flags1 & MEM_Str)==0 && (flags1 & (MEM_Int|MEM_Real))!=0) {
 				testcase( pIn1->flags & MEM_Int);
 				testcase( pIn1->flags & MEM_Real);
