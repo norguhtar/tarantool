@@ -24,8 +24,3 @@ box.sql.execute('PRAGMA case_sensitive_like = 1')
 box.sql.execute('PRAGMA case_sensitive_like')
 -- Should be nothing.
 box.sql.execute('PRAGMA case_sensitive_like = '.. result[1][1])
-
--- Make command "PRAGMA" return result in Tarantool format.
-res = box.sql.execute('PRAGMA')
-#res > 0
-res[1][1]

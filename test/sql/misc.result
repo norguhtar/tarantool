@@ -60,15 +60,3 @@ box.sql.execute('PRAGMA case_sensitive_like')
 box.sql.execute('PRAGMA case_sensitive_like = '.. result[1][1])
 ---
 ...
--- Make command "PRAGMA" return result in Tarantool format.
-res = box.sql.execute('PRAGMA')
----
-...
-#res > 0
----
-- true
-...
-res[1][1]
----
-- busy_timeout
-...

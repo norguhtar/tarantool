@@ -169,7 +169,7 @@ pragmaLocate(const char *zName)
 }
 
 static void
-sql_pragma_active_pragmas(struct Parse *parse)
+vdbe_emit_pragma_status(struct Parse *parse)
 {
 	struct Vdbe *v = sqlite3GetVdbe(parse);
 	struct session *user_session = current_session();
@@ -186,8 +186,6 @@ sql_pragma_active_pragmas(struct Parse *parse)
 		sqlite3VdbeAddOp4(v, OP_String8, 0, 1, 0, aPragmaName[i].zName,
 				  0);
 		switch (aPragmaName[i].ePragTyp) {
-			case PragTyp_PARSER_TRACE:
-			case PragTyp_CASE_SENSITIVE_LIKE:
 			case PragTyp_FLAG: {
 				const char *value;
 				if ((user_session->sql_flags &
@@ -219,8 +217,11 @@ sql_pragma_active_pragmas(struct Parse *parse)
 				sqlite3VdbeAddOp2(v, OP_Cast, 2, AFFINITY_TEXT);
 				break;
 			}
-			default:
-				sqlite3VdbeAddOp2(v, OP_Null, 0, 2);
+			default: {
+				const char *value = "No value";
+				sqlite3VdbeAddOp4(v, OP_String8, 0, 2, 0, value,
+						  0);
+			}
 		}
 		sqlite3VdbeAddOp2(v, OP_ResultRow, 1, 2);
 	}
@@ -451,7 +452,7 @@ sqlite3Pragma(Parse * pParse, Token * pId,	/* First part of [schema.]id field */
 
 	zLeft = sqlite3NameFromToken(db, pId);
 	if (!zLeft) {
-		sql_pragma_active_pragmas(pParse);
+		vdbe_emit_pragma_status(pParse);
 		return;
 	}
 
