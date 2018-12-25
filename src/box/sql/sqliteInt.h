@@ -1564,7 +1564,7 @@ struct sqlite3 {
  */
 #define SQLITE_VdbeTrace      0x00000001	/* True to trace VDBE execution */
 /* Debug print info about SQL query as it parsed */
-#define SQLITE_ParserTrace    0x00000002
+#define PARSER_TRACE_FLAG     0x00000002
 #define SQLITE_FullColNames   0x00000004	/* Show full column names on SELECT */
 #define SQLITE_ShortColNames  0x00000040	/* Show short columns names */
 #define SQLITE_CountRows      0x00000080	/* Count rows changed by INSERT, */
