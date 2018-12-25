@@ -256,6 +256,7 @@ struct swim_task {
 	swim_task_f complete;
 	/** Message to send. */
 	struct swim_msg msg;
+	struct swim_packet *pos;
 	/** Destination address. */
 	struct sockaddr_in dst;
 	/** Place in a queue of tasks. */

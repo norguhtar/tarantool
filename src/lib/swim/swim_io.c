@@ -60,6 +60,7 @@ swim_task_schedule(struct swim_task *task, swim_transport_send_f send,
 	assert(! swim_task_is_active(task));
 	task->send = send;
 	task->dst = *dst;
+	task->pos = swim_msg_first_packet(&task->msg);
 	rlist_add_tail_entry(&task->scheduler->queue_output, task,
 			     in_queue_output);
 	ev_io_start(loop(), &task->scheduler->output);
@@ -133,19 +134,21 @@ swim_scheduler_on_output(struct ev_loop *loop, struct ev_io *io, int events)
 		return;
 	}
 	struct swim_task *task =
-		rlist_shift_entry(&scheduler->queue_output, struct swim_task,
+		rlist_first_entry(&scheduler->queue_output, struct swim_task,
 				  in_queue_output);
 	say_verbose("SWIM: send to %s",
 		    sio_strfaddr((struct sockaddr *) &task->dst,
 				 sizeof(task->dst)));
-	for (struct swim_packet *packet = swim_msg_first_packet(&task->msg);
-	     packet != NULL; packet = swim_packet_next(packet)) {
-		if (task->send(io->fd, packet->body, packet->pos - packet->body,
-			       (struct sockaddr *) &task->dst,
-			       sizeof(task->dst)) == -1)
-			diag_log();
+	struct swim_packet *packet = task->pos;
+	if (task->send(io->fd, packet->body, packet->pos - packet->body,
+		       (struct sockaddr *) &task->dst,
+		       sizeof(task->dst)) == -1)
+		diag_log();
+	task->pos = swim_packet_next(packet);
+	if (task->pos == NULL) {
+		task->complete(task);
+		rlist_del_entry(task, in_queue_output);
 	}
-	task->complete(task);
 }
 
 static void
