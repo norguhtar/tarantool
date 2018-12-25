@@ -47,13 +47,16 @@ box.sql.execute('\n\n\n\t\t\t   ')
 result = box.sql.execute('PRAGMA case_sensitive_like')
 ---
 ...
--- Should be TRUE.
-result[1][1] == 0 or result[1][1] == 1
+-- Should be nothing.
+box.sql.execute('PRAGMA case_sensitive_like = 1')
 ---
-- true
 ...
--- Check that "PRAGMA case_sensitive_like" returns nothing if
--- called with parameter.
+-- Should be 1.
+box.sql.execute('PRAGMA case_sensitive_like')
+---
+- - [1]
+...
+-- Should be nothing.
 box.sql.execute('PRAGMA case_sensitive_like = '.. result[1][1])
 ---
 ...

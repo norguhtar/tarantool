@@ -1565,9 +1565,9 @@ struct sqlite3 {
 #define SQLITE_VdbeTrace      0x00000001	/* True to trace VDBE execution */
 /* Debug print info about SQL query as it parsed */
 #define PARSER_TRACE_FLAG     0x00000002
-/* True if LIKE is case sensitive. */
-#define SQLITE_LikeIsCaseSens 0x00000008
 #define SQLITE_FullColNames   0x00000004	/* Show full column names on SELECT */
+/* True if LIKE is case sensitive. */
+#define LIKE_CASE_SENS_FLAG   0x00000008
 #define SQLITE_ShortColNames  0x00000040	/* Show short columns names */
 #define SQLITE_CountRows      0x00000080	/* Count rows changed by INSERT, */
 					  /*   DELETE, or UPDATE and return */

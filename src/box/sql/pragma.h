@@ -6,7 +6,6 @@
 
 /* The various pragma types */
 #define PragTyp_BUSY_TIMEOUT                   1
-#define PragTyp_CASE_SENSITIVE_LIKE            2
 #define PragTyp_COLLATION_LIST                 3
 #define PragTyp_FLAG                           5
 #define PragTyp_FOREIGN_KEY_LIST               9
@@ -92,10 +91,10 @@ static const PragmaName aPragmaName[] = {
 	 /* ColNames:  */ 31, 1,
 	 /* iArg:      */ 0},
 	{ /* zName:     */ "case_sensitive_like",
-	 /* ePragTyp:  */ PragTyp_CASE_SENSITIVE_LIKE,
+	 /* ePragTyp:  */ PragTyp_FLAG,
 	 /* ePragFlg:  */ PragFlg_Result0 | PragFlg_NoColumns1,
 	 /* ColNames:  */ 0, 0,
-	 /* iArg:      */ SQLITE_LikeIsCaseSens},
+	 /* iArg:      */ LIKE_CASE_SENS_FLAG},
 	{ /* zName:     */ "collation_list",
 	 /* ePragTyp:  */ PragTyp_COLLATION_LIST,
 	 /* ePragFlg:  */ PragFlg_Result0,
