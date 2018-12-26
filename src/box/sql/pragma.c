@@ -120,10 +120,8 @@ vdbe_set_pragma_result_columns(struct Vdbe *v, const struct PragmaName *pragma)
 	assert(n > 0);
 	sqlite3VdbeSetNumCols(v, n);
 	for (int i = 0, j = pragma->iPragCName; i < n; ++i) {
-		/* Value of j is index of column name in array */
 		sqlite3VdbeSetColName(v, i, COLNAME_NAME, pragCName[j++],
 				      SQLITE_STATIC);
-		/* Value of j is index of column type in array */
 		sqlite3VdbeSetColName(v, i, COLNAME_DECLTYPE, pragCName[j++],
 				      SQLITE_STATIC);
 	}
@@ -466,8 +464,8 @@ sqlite3Pragma(Parse * pParse, Token * pId,	/* First part of [schema.]id field */
 		goto pragma_out;
 	}
 	/* Register the result column names for pragmas that return results */
-	if ((pPragma->mPragFlg & PragFlg_NoColumns) == 0
-	    && ((pPragma->mPragFlg & PragFlg_NoColumns1) == 0 || zRight == 0))
+	if ((pPragma->mPragFlg & PragFlg_NoColumns) == 0 &&
+	    ((pPragma->mPragFlg & PragFlg_NoColumns1) == 0 || zRight == 0))
 		vdbe_set_pragma_result_columns(v, pPragma);
 	/* Jump to the appropriate pragma handler */
 	switch (pPragma->ePragTyp) {

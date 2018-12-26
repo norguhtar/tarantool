@@ -848,7 +848,7 @@ res.metadata
     type: INTEGER
 ...
 -- EXPLAIN
-res = cn:execute("EXPLAIN select 1")
+res = cn:execute("EXPLAIN SELECT 1")
 ---
 ...
 res.metadata
@@ -870,7 +870,7 @@ res.metadata
   - name: comment
     type: TEXT
 ...
-res = cn:execute("EXPLAIN QUERY PLAN select count(*) from t1")
+res = cn:execute("EXPLAIN QUERY PLAN SELECT COUNT(*) FROM t1")
 ---
 ...
 res.metadata

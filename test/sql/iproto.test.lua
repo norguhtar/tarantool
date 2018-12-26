@@ -272,9 +272,9 @@ res = cn:execute("PRAGMA table_info(t1)")
 res.metadata
 
 -- EXPLAIN
-res = cn:execute("EXPLAIN select 1")
+res = cn:execute("EXPLAIN SELECT 1")
 res.metadata
-res = cn:execute("EXPLAIN QUERY PLAN select count(*) from t1")
+res = cn:execute("EXPLAIN QUERY PLAN SELECT COUNT(*) FROM t1")
 res.metadata
 
 cn:close()
