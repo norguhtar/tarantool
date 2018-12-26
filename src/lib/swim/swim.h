@@ -65,6 +65,10 @@ int
 swim_cfg(struct swim *swim, const char *uri, double heartbeat_rate,
 	 const struct swim_transport *new_transport);
 
+/** Set payload to disseminate over the cluster. */
+int
+swim_set_payload(struct swim *swim, const char *payload, int payload_size);
+
 /**
  * Stop listening and broadcasting messages, cleanup all internal
  * structures, free memory.
