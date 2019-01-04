@@ -2167,7 +2167,7 @@ i:stat().disk.compact.queue -- 30 statements
 - bytes_compressed: <bytes_compressed>
   pages: 3
   rows: 30
-  bytes: 471
+  bytes: 537
 ...
 i:stat().disk.compact.queue.bytes == box.stat.vinyl().disk.compact.queue
 ---
@@ -2181,7 +2181,7 @@ i:stat().disk.compact.queue -- 40 statements
 - bytes_compressed: <bytes_compressed>
   pages: 4
   rows: 40
-  bytes: 628
+  bytes: 716
 ...
 i:stat().disk.compact.queue.bytes == box.stat.vinyl().disk.compact.queue
 ---
@@ -2195,7 +2195,7 @@ i:stat().disk.compact.queue -- 50 statements
 - bytes_compressed: <bytes_compressed>
   pages: 5
   rows: 50
-  bytes: 785
+  bytes: 895
 ...
 i:stat().disk.compact.queue.bytes == box.stat.vinyl().disk.compact.queue
 ---
@@ -2209,7 +2209,7 @@ i:stat().disk.compact.queue -- 50 statements
 - bytes_compressed: <bytes_compressed>
   pages: 5
   rows: 50
-  bytes: 785
+  bytes: 895
 ...
 i:stat().disk.compact.queue.bytes == box.stat.vinyl().disk.compact.queue
 ---

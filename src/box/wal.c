@@ -901,9 +901,10 @@ wal_writer_begin_rollback(struct wal_writer *writer)
 }
 
 static void
-wal_assign_lsn(struct wal_writer *writer, struct xrow_header **row,
+wal_assign_lsn(struct wal_writer *writer, struct xrow_header **begin,
 	       struct xrow_header **end)
 {
+	struct xrow_header **row = begin;
 	/** Assign LSN to all local rows. */
 	for ( ; row < end; row++) {
 		if ((*row)->replica_id == 0) {
@@ -913,6 +914,27 @@ wal_assign_lsn(struct wal_writer *writer, struct xrow_header **row,
 			vclock_follow_xrow(&writer->vclock, *row);
 		}
 	}
+	/*
+	 * Assume that first row is transaction initiator row and any row
+	 * produced by replication trigger has at least second position.
+	 */
+	int64_t txn_id = (*begin)->txn_id;
+	uint32_t txn_replica_id = (*begin)->txn_replica_id;
+	if (txn_id == 0) {
+		/*
+		 * Local transaction, the first row lsn + replica_id
+		 * identitifies whole transaction.
+		 */
+		txn_id = (*begin)->lsn;
+		txn_replica_id = (*begin)->replica_id;
+	}
+	row = begin;
+	for ( ; row < end; row++) {
+		(*row)->txn_id = txn_id;
+		(*row)->txn_replica_id = txn_replica_id;
+	}
+	/* Mark last row in transaction. */
+	(*(end - 1))->txn_last = 1;
 }
 
 static void

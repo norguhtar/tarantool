@@ -133,12 +133,32 @@ error:
 		case IPROTO_SCHEMA_VERSION:
 			header->schema_version = mp_decode_uint(pos);
 			break;
+		case IPROTO_TXN_ID:
+			header->txn_id = mp_decode_uint(pos);
+			break;
+		case IPROTO_TXN_REPLICA_ID:
+			header->txn_replica_id = mp_decode_uint(pos);
+			break;
+		case IPROTO_TXN_LAST:
+			header->txn_last = mp_decode_uint(pos);
+			break;
 		default:
 			/* unknown header */
 			mp_next(pos);
 		}
 	}
 	assert(*pos <= end);
+	if (header->txn_id == 0) {
+		/*
+		 * Transaction id is not set so it is a single statement
+		 * transaction.
+		 */
+		header->txn_id = header->lsn;
+		header->txn_last = true;
+	}
+	if (header->txn_replica_id == 0)
+		header->txn_replica_id = header->replica_id;
+
 	/* Nop requests aren't supposed to have a body. */
 	if (*pos < end && header->type != IPROTO_NOP) {
 		const char *body = *pos;
@@ -221,6 +241,24 @@ xrow_header_encode(const struct xrow_header *header, uint64_t sync,
 	if (header->tm) {
 		d = mp_encode_uint(d, IPROTO_TIMESTAMP);
 		d = mp_encode_double(d, header->tm);
+		map_size++;
+	}
+	if (header->txn_id != header->lsn || header->txn_last == 0) {
+		/* Encode txn id for multi row transaction members. */
+		d = mp_encode_uint(d, IPROTO_TXN_ID);
+		d = mp_encode_uint(d, header->txn_id);
+		map_size++;
+	}
+	if (header->txn_replica_id != header->replica_id) {
+		d = mp_encode_uint(d, IPROTO_TXN_REPLICA_ID);
+		d = mp_encode_uint(d, header->txn_replica_id);
+		map_size++;
+	}
+	if (header->txn_last && !(header->txn_id == header->lsn &&
+				  header->txn_replica_id == header->replica_id)) {
+		/* Set last row for multi row transaction. */
+		d = mp_encode_uint(d, IPROTO_TXN_LAST);
+		d = mp_encode_uint(d, header->txn_last);
 		map_size++;
 	}
 	assert(d <= data + XROW_HEADER_LEN_MAX);
