@@ -36,13 +36,27 @@
 
 #include "diag.h"
 
+void
+vclock_set(struct vclock *vclock, uint32_t replica_id, int64_t lsn)
+{
+	assert(lsn >= 0);
+	assert(replica_id < VCLOCK_MAX);
+	int64_t prev_lsn = vclock->lsn[replica_id];
+	if (lsn > 0)
+		vclock->map |= 1 << replica_id;
+	else
+		vclock->map &= ~(1 << replica_id);
+	vclock->lsn[replica_id] = lsn;
+	vclock->signature += lsn - prev_lsn;
+}
+
 int64_t
 vclock_follow(struct vclock *vclock, uint32_t replica_id, int64_t lsn)
 {
 	assert(lsn >= 0);
 	assert(replica_id < VCLOCK_MAX);
 	int64_t prev_lsn = vclock->lsn[replica_id];
-	assert(lsn > prev_lsn);
+	assert(lsn == prev_lsn + 1);
 	/* Easier add each time than check. */
 	vclock->map |= 1 << replica_id;
 	vclock->lsn[replica_id] = lsn;

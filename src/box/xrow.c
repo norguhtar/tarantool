@@ -83,7 +83,7 @@ mp_decode_vclock(const char **data, struct vclock *vclock)
 			return -1;
 		int64_t lsn = mp_decode_uint(data);
 		if (lsn > 0)
-			vclock_follow(vclock, id, lsn);
+			vclock_set(vclock, id, lsn);
 	}
 	return 0;
 }

@@ -292,6 +292,7 @@ recovery_journal_write(struct journal *base,
 		       struct journal_entry * /* entry */)
 {
 	struct recovery_journal *journal = (struct recovery_journal *) base;
+	vclock_copy(&replicaset.vclock, journal->vclock);
 	return vclock_sum(journal->vclock);
 }
 
@@ -1809,7 +1810,7 @@ bootstrap_from_master(struct replica *master)
 	 */
 	engine_begin_final_recovery_xc();
 	struct recovery_journal journal;
-	recovery_journal_create(&journal, &replicaset.vclock);
+	recovery_journal_create(&journal, &replicaset.applier.vclock);
 	journal_set(&journal.base);
 
 	applier_resume_to_state(applier, APPLIER_JOINED, TIMEOUT_INFINITY);

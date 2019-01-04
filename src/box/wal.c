@@ -171,6 +171,8 @@ struct wal_msg {
 	 * be rolled back.
 	 */
 	struct stailq rollback;
+	/** vclock after the batch processed. */
+	struct vclock vclock;
 };
 
 /**
@@ -209,6 +211,7 @@ wal_msg_create(struct wal_msg *batch)
 	batch->approx_len = 0;
 	stailq_create(&batch->commit);
 	stailq_create(&batch->rollback);
+	vclock_create(&batch->vclock);
 }
 
 static struct wal_msg *
@@ -280,6 +283,7 @@ tx_schedule_commit(struct cmsg *msg)
 	 * wal_msg memory disappears after the first
 	 * iteration of tx_schedule_queue loop.
 	 */
+	vclock_copy(&replicaset.vclock, &batch->vclock);
 	if (! stailq_empty(&batch->rollback)) {
 		/* Closes the input valve. */
 		stailq_concat(&writer->rollback, &batch->rollback);
@@ -901,16 +905,16 @@ wal_writer_begin_rollback(struct wal_writer *writer)
 }
 
 static void
-wal_assign_lsn(struct wal_writer *writer, struct xrow_header **row,
+wal_assign_lsn(struct vclock *vclock, struct xrow_header **row,
 	       struct xrow_header **end)
 {
 	/** Assign LSN to all local rows. */
 	for ( ; row < end; row++) {
 		if ((*row)->replica_id == 0) {
-			(*row)->lsn = vclock_inc(&writer->vclock, instance_id);
+			(*row)->lsn = vclock_inc(vclock, instance_id);
 			(*row)->replica_id = instance_id;
 		} else {
-			vclock_follow_xrow(&writer->vclock, *row);
+			vclock_follow_xrow(vclock, *row);
 		}
 	}
 }
@@ -921,6 +925,11 @@ wal_write_to_disk(struct cmsg *msg)
 	struct wal_writer *writer = &wal_writer_singleton;
 	struct wal_msg *wal_msg = (struct wal_msg *) msg;
 	struct error *error;
+
+	/* Local vclock copy. */
+	struct vclock vclock;
+	vclock_create(&vclock);
+	vclock_copy(&vclock, &writer->vclock);
 
 	struct errinj *inj = errinj(ERRINJ_WAL_DELAY, ERRINJ_BOOL);
 	while (inj != NULL && inj->bparam)
@@ -974,14 +983,15 @@ wal_write_to_disk(struct cmsg *msg)
 	struct journal_entry *entry;
 	struct stailq_entry *last_committed = NULL;
 	stailq_foreach_entry(entry, &wal_msg->commit, fifo) {
-		wal_assign_lsn(writer, entry->rows, entry->rows + entry->n_rows);
-		entry->res = vclock_sum(&writer->vclock);
+		wal_assign_lsn(&vclock, entry->rows, entry->rows + entry->n_rows);
+		entry->res = vclock_sum(&vclock);
 		rc = xlog_write_entry(l, entry);
 		if (rc < 0)
 			goto done;
 		if (rc > 0) {
 			writer->checkpoint_wal_size += rc;
 			last_committed = &entry->fifo;
+			vclock_copy(&writer->vclock, &vclock);
 		}
 		/* rc == 0: the write is buffered in xlog_tx */
 	}
@@ -991,6 +1001,7 @@ wal_write_to_disk(struct cmsg *msg)
 
 	writer->checkpoint_wal_size += rc;
 	last_committed = stailq_last(&wal_msg->commit);
+	vclock_copy(&writer->vclock, &vclock);
 
 	/*
 	 * Notify TX if the checkpoint threshold has been exceeded.
@@ -1021,6 +1032,8 @@ done:
 		error_log(error);
 		diag_clear(diag_get());
 	}
+	/* Set resulting vclock. */
+	vclock_copy(&wal_msg->vclock, &writer->vclock);
 	/*
 	 * We need to start rollback from the first request
 	 * following the last committed request. If
@@ -1152,31 +1165,6 @@ wal_write(struct journal *journal, struct journal_entry *entry)
 	bool cancellable = fiber_set_cancellable(false);
 	fiber_yield(); /* Request was inserted. */
 	fiber_set_cancellable(cancellable);
-	if (entry->res > 0) {
-		struct xrow_header **last = entry->rows + entry->n_rows - 1;
-		while (last >= entry->rows) {
-			/*
-			 * Find last row from local instance id
-			 * and promote vclock.
-			 */
-			if ((*last)->replica_id == instance_id) {
-				/*
-				 * In master-master configuration, during sudden
-				 * power-loss, if the data have not been written
-				 * to WAL but have already been sent to others,
-				 * they will send the data back. In this case
-				 * vclock has already been promoted by applier.
-				 */
-				if (vclock_get(&replicaset.vclock,
-					       instance_id) < (*last)->lsn) {
-					vclock_follow_xrow(&replicaset.vclock,
-							   *last);
-				}
-				break;
-			}
-			--last;
-		}
-	}
 	return entry->res;
 }
 
@@ -1185,13 +1173,8 @@ wal_write_in_wal_mode_none(struct journal *journal,
 			   struct journal_entry *entry)
 {
 	struct wal_writer *writer = (struct wal_writer *) journal;
-	wal_assign_lsn(writer, entry->rows, entry->rows + entry->n_rows);
-	int64_t old_lsn = vclock_get(&replicaset.vclock, instance_id);
-	int64_t new_lsn = vclock_get(&writer->vclock, instance_id);
-	if (new_lsn > old_lsn) {
-		/* There were local writes, promote vclock. */
-		vclock_follow(&replicaset.vclock, instance_id, new_lsn);
-	}
+	wal_assign_lsn(&writer->vclock, entry->rows, entry->rows + entry->n_rows);
+	vclock_copy(&replicaset.vclock, &writer->vclock);
 	return vclock_sum(&writer->vclock);
 }
 

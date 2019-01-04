@@ -50,11 +50,11 @@ test_compare_one(uint32_t a_count, const int64_t *lsns_a,
 	vclock_create(&b);
 	for (uint32_t node_id = 0; node_id < a_count; node_id++) {
 		if (lsns_a[node_id] > 0)
-			vclock_follow(&a, node_id, lsns_a[node_id]);
+			vclock_set(&a, node_id, lsns_a[node_id]);
 	}
 	for (uint32_t node_id = 0; node_id < b_count; node_id++) {
 		if (lsns_b[node_id] > 0)
-			vclock_follow(&b, node_id, lsns_b[node_id]);
+			vclock_set(&b, node_id, lsns_b[node_id]);
 	}
 
 	return vclock_compare(&a, &b);
@@ -119,7 +119,7 @@ testset_create(vclockset_t *set, int64_t *files, int files_n, int node_n)
 			signature += lsn;
 
 			/* Update cluster hash */
-			vclock_follow(vclock, node_id, lsn);
+			vclock_set(vclock, node_id, lsn);
 		}
 		vclockset_insert(set, vclock);
 	}
@@ -225,7 +225,7 @@ test_isearch()
 			if (lsn <= 0)
 				continue;
 
-			vclock_follow(&vclock, node_id, lsn);
+			vclock_set(&vclock, node_id, lsn);
 		}
 
 		int64_t check = *(query + NODE_N);
@@ -247,7 +247,7 @@ test_tostring_one(uint32_t count, const int64_t *lsns, const char *res)
 	vclock_create(&vclock);
 	for (uint32_t node_id = 0; node_id < count; node_id++) {
 		if (lsns[node_id] > 0)
-			vclock_follow(&vclock, node_id, lsns[node_id]);
+			vclock_set(&vclock, node_id, lsns[node_id]);
 	}
 	char *str = vclock_to_string(&vclock);
 	int result = strcmp(str, res);
