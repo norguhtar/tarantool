@@ -905,9 +905,10 @@ wal_writer_begin_rollback(struct wal_writer *writer)
 }
 
 static void
-wal_assign_lsn(struct vclock *vclock, struct xrow_header **row,
+wal_assign_lsn(struct vclock *vclock, struct xrow_header **begin,
 	       struct xrow_header **end)
 {
+	struct xrow_header **row = begin;
 	/** Assign LSN to all local rows. */
 	for ( ; row < end; row++) {
 		if ((*row)->replica_id == 0) {
@@ -916,6 +917,39 @@ wal_assign_lsn(struct vclock *vclock, struct xrow_header **row,
 		} else {
 			vclock_follow_xrow(vclock, *row);
 		}
+	}
+	if ((*begin)->replica_id != instance_id) {
+		/*
+		 * Move all local changes to the end of rows array and
+		 * a fake local transaction (like an autonomous transaction)
+		 * because we could not replicate the transaction back.
+		 */
+		struct xrow_header **row = end - 1;
+		while (row >= begin) {
+			if (row[0]->replica_id != instance_id) {
+				--row;
+				continue;
+			}
+			/* Local row, move it back. */
+			struct xrow_header **local_row = row;
+			while (local_row < end - 1 &&
+			       local_row[1]->replica_id != instance_id) {
+				struct xrow_header *tmp = local_row[0];
+				local_row[0] = local_row[1];
+				local_row[1] = tmp;
+			}
+			--row;
+		}
+		while (begin < end && begin[0]->replica_id != instance_id)
+			++begin;
+	}
+	/* Setup txn_id and tnx_replica_id for localy generated rows. */
+	row = begin;
+	while (row < end) {
+		row[0]->txn_id = begin[0]->lsn;
+		row[0]->txn_replica_id = instance_id;
+		row[0]->txn_last = row == end - 1 ? 1 : 0;
+		++row;
 	}
 }
 
