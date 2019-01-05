@@ -48,6 +48,7 @@
 #include "error.h"
 #include "session.h"
 #include "cfg.h"
+#include "txn.h"
 
 STRS(applier_state, applier_STATE);
 
@@ -381,6 +382,102 @@ applier_join(struct applier *applier)
 }
 
 /**
+ * Read one transaction from network.
+ * Transaction rows are placed into row_buf as an array, row's bodies are
+ * placed into obuf because it is not allowed to relocate row's bodies.
+ * Also we could not use applier input buffer because rpos adjusted after xrow
+ * decoding and corresponding space going to reuse.
+ *
+ * Note: current implementation grants that transaction could not be mixed, so
+ * we read each transaction from first xrow until xrow with txn_last = true.
+ */
+static int64_t
+applier_read_tx(struct applier *applier, struct ibuf *row_buf,
+		struct obuf *data_buf)
+{
+	struct xrow_header *row;
+	struct ev_io *coio = &applier->io;
+	struct ibuf *ibuf = &applier->ibuf;
+	int64_t txn_id = 0;
+	uint32_t txn_replica_id = 0;
+
+	do {
+		row = (struct xrow_header *)ibuf_alloc(row_buf,
+						       sizeof(struct xrow_header));
+		if (row == NULL) {
+			diag_set(OutOfMemory, sizeof(struct xrow_header),
+				 "slab", "struct xrow_header");
+			goto error;
+		}
+
+		double timeout = replication_disconnect_timeout();
+		try {
+			/* TODO: we should have a C version of this function. */
+			coio_read_xrow_timeout_xc(coio, ibuf, row, timeout);
+		} catch (...) {
+			goto error;
+		}
+
+		if (iproto_type_is_error(row->type)) {
+			xrow_decode_error(row);
+			goto error;
+		}
+
+		/* Replication request. */
+		if (row->replica_id == REPLICA_ID_NIL ||
+		    row->replica_id >= VCLOCK_MAX) {
+			/*
+			 * A safety net, this can only occur
+			 * if we're fed a strangely broken xlog.
+			 */
+			diag_set(ClientError, ER_UNKNOWN_REPLICA,
+				 int2str(row->replica_id),
+				 tt_uuid_str(&REPLICASET_UUID));
+			goto error;
+		}
+		if (ibuf_used(row_buf) == sizeof(struct xrow_header)) {
+			/*
+			 * First row in a transaction. In order to enforce
+			 * consistency check that first row lsn and replica id
+			 * match with transaction.
+			 */
+			txn_id = row->lsn;
+			txn_replica_id = row->replica_id;
+		}
+		if (txn_id != row->txn_id ||
+			   txn_replica_id != row->txn_replica_id) {
+			/* We are not able to handle interleaving transactions. */
+			diag_set(ClientError, ER_UNSUPPORTED,
+				 "replications",
+				 "interleaving transactions");
+			goto error;
+		}
+
+
+		applier->lag = ev_now(loop()) - row->tm;
+		applier->last_row_time = ev_monotonic_now(loop());
+
+		if (row->body->iov_base != NULL) {
+			void *new_base = obuf_alloc(data_buf, row->body->iov_len);
+			if (new_base == NULL) {
+				diag_set(OutOfMemory, row->body->iov_len,
+					 "slab", "xrow_data");
+				goto error;
+			}
+			memcpy(new_base, row->body->iov_base, row->body->iov_len);
+			row->body->iov_base = new_base;
+		}
+
+	} while (row->txn_last == 0);
+
+	return 0;
+error:
+	ibuf_reset(row_buf);
+	obuf_reset(data_buf);
+	return -1;
+}
+
+/**
  * Execute and process SUBSCRIBE request (follow updates from a master).
  */
 static void
@@ -396,6 +493,10 @@ applier_subscribe(struct applier *applier)
 	struct ibuf *ibuf = &applier->ibuf;
 	struct xrow_header row;
 	struct vclock remote_vclock_at_subscribe;
+	struct ibuf row_buf;
+	struct obuf data_buf;
+	ibuf_create(&row_buf, &cord()->slabc, 32 * sizeof(struct xrow_header));
+	obuf_create(&data_buf, &cord()->slabc, 0x10000);
 
 	xrow_encode_subscribe_xc(&row, &REPLICASET_UUID, &INSTANCE_UUID,
 				 &replicaset.vclock);
@@ -475,80 +576,67 @@ applier_subscribe(struct applier *applier)
 			applier_set_state(applier, APPLIER_FOLLOW);
 		}
 
-		/*
-		 * Tarantool < 1.7.7 does not send periodic heartbeat
-		 * messages so we can't assume that if we haven't heard
-		 * from the master for quite a while the connection is
-		 * broken - the master might just be idle.
-		 */
-		if (applier->version_id < version_id(1, 7, 7)) {
-			coio_read_xrow(coio, ibuf, &row);
-		} else {
-			double timeout = replication_disconnect_timeout();
-			coio_read_xrow_timeout_xc(coio, ibuf, &row, timeout);
-		}
+		if (applier_read_tx(applier, &row_buf, &data_buf) != 0)
+			diag_raise();
 
-		if (iproto_type_is_error(row.type))
-			xrow_decode_error_xc(&row);  /* error */
-		/* Replication request. */
-		if (row.replica_id == REPLICA_ID_NIL ||
-		    row.replica_id >= VCLOCK_MAX) {
-			/*
-			 * A safety net, this can only occur
-			 * if we're fed a strangely broken xlog.
-			 */
-			tnt_raise(ClientError, ER_UNKNOWN_REPLICA,
-				  int2str(row.replica_id),
-				  tt_uuid_str(&REPLICASET_UUID));
-		}
+		struct txn *txn = NULL;
+		struct xrow_header *first_row = (struct xrow_header *)row_buf.rpos;
+		struct xrow_header *last_row = (struct xrow_header *)row_buf.wpos - 1;
 
-		applier->lag = ev_now(loop()) - row.tm;
+		applier->lag = ev_now(loop()) - last_row->tm;
 		applier->last_row_time = ev_monotonic_now(loop());
-		struct replica *replica = replica_by_id(row.replica_id);
+		struct replica *replica = replica_by_id(first_row->txn_replica_id);
 		struct latch *latch = (replica ? &replica->order_latch :
 				       &replicaset.applier.order_latch);
-		/*
-		 * In a full mesh topology, the same set
-		 * of changes may arrive via two
-		 * concurrently running appliers. Thanks
-		 * to vclock_follow() above, the first row
-		 * in the set will be skipped - but the
-		 * remaining may execute out of order,
-		 * when the following xstream_write()
-		 * yields on WAL. Hence we need a latch to
-		 * strictly order all changes which belong
-		 * to the same server id.
-		 */
 		latch_lock(latch);
+		/* First row identifies a transaction. */
+		assert(first_row->lsn == first_row->txn_id);
+		assert(first_row->replica_id == first_row->txn_replica_id);
 		if (vclock_get(&replicaset.applier.vclock,
-			       row.replica_id) < row.lsn) {
+			       first_row->replica_id) < first_row->lsn) {
 			/* Preserve old lsn value. */
 			int64_t old_lsn = vclock_get(&replicaset.applier.vclock,
-						     row.replica_id);
-			vclock_follow_xrow(&replicaset.applier.vclock, &row);
-			int res = xstream_write(applier->subscribe_stream, &row);
-			struct error *e = diag_last_error(diag_get());
-			if (res != 0 && e->type == &type_ClientError &&
-			    box_error_code(e) == ER_TUPLE_FOUND &&
-			    replication_skip_conflict) {
-				/**
-				 * Silently skip ER_TUPLE_FOUND error if such
-				 * option is set in config.
-				 */
-				diag_clear(diag_get());
-				row.type = IPROTO_NOP;
-				row.bodycnt = 0;
-				res = xstream_write(applier->subscribe_stream,
-						    &row);
+						     first_row->replica_id);
+
+			struct xrow_header *row = first_row;
+			if (first_row != last_row)
+				txn = txn_begin(false);
+			int res = 0;
+			while (row <= last_row && res == 0) {
+				vclock_follow_xrow(&replicaset.applier.vclock, row);
+				res = xstream_write(applier->subscribe_stream, row);
+				struct error *e;
+				if (res != 0 &&
+				    (e = diag_last_error(diag_get()))->type ==
+				    &type_ClientError &&
+				    box_error_code(e) == ER_TUPLE_FOUND &&
+				    replication_skip_conflict) {
+					/**
+					 * Silently skip ER_TUPLE_FOUND error
+					 * if such option is set in config.
+					 */
+					diag_clear(diag_get());
+					row->type = IPROTO_NOP;
+					row->bodycnt = 0;
+					res = xstream_write(applier->subscribe_stream,
+							    row);
+				}
+				++row;
 			}
+			if (res == 0 && txn != NULL)
+				res = txn_commit(txn);
 			if (res != 0) {
 				/* Rollback lsn to have a chance for a retry. */
 				vclock_set(&replicaset.applier.vclock,
-					   row.replica_id, old_lsn);
+					   first_row->replica_id, old_lsn);
+				obuf_reset(&data_buf);
+				ibuf_reset(&row_buf);
 				latch_unlock(latch);
 				diag_raise();
 			}
 		}
+		obuf_reset(&data_buf);
+		ibuf_reset(&row_buf);
 		latch_unlock(latch);
 		/*
 		 * Stay 'orphan' until appliers catch up with
