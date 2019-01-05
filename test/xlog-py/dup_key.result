@@ -16,7 +16,16 @@ box.space.test:insert{2, 'second tuple'}
 ---
 - [2, 'second tuple']
 ...
-.xlog exists
+.xlog#1 exists
+box.space.test:insert{3, 'third tuple'}
+---
+- [3, 'third tuple']
+...
+box.space.test:insert{4, 'fourth tuple'}
+---
+- [4, 'fourth tuple']
+...
+.xlog#2 exists
 box.space.test:insert{1, 'third tuple'}
 ---
 - [1, 'third tuple']
@@ -25,7 +34,6 @@ box.space.test:insert{2, 'fourth tuple'}
 ---
 - [2, 'fourth tuple']
 ...
-.xlog does not exist
 check log line for 'Duplicate key'
 
 'Duplicate key' exists in server log

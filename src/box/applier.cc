@@ -139,7 +139,7 @@ applier_writer_f(va_list ap)
 			continue;
 		try {
 			struct xrow_header xrow;
-			xrow_encode_vclock(&xrow, &replicaset.vclock);
+			xrow_encode_vclock(&xrow, &replicaset.applier.vclock);
 			coio_write_xrow(&io, &xrow);
 		} catch (SocketError *e) {
 			/*
@@ -300,7 +300,7 @@ applier_join(struct applier *applier)
 		 * Used to initialize the replica's initial
 		 * vclock in bootstrap_from_master()
 		 */
-		xrow_decode_vclock_xc(&row, &replicaset.vclock);
+		xrow_decode_vclock_xc(&row, &replicaset.applier.vclock);
 	}
 
 	applier_set_state(applier, APPLIER_INITIAL_JOIN);
@@ -326,7 +326,8 @@ applier_join(struct applier *applier)
 				 * vclock yet, do it now. In 1.7+
 				 * this vclock is not used.
 				 */
-				xrow_decode_vclock_xc(&row, &replicaset.vclock);
+				xrow_decode_vclock_xc(&row,
+						      &replicaset.applier.vclock);
 			}
 			break; /* end of stream */
 		} else if (iproto_type_is_error(row.type)) {
@@ -336,6 +337,7 @@ applier_join(struct applier *applier)
 				  (uint32_t) row.type);
 		}
 	}
+	vclock_copy(&replicaset.vclock, &replicaset.applier.vclock);
 	say_info("initial data received");
 
 	applier_set_state(applier, APPLIER_FINAL_JOIN);
@@ -355,7 +357,7 @@ applier_join(struct applier *applier)
 		coio_read_xrow(coio, ibuf, &row);
 		applier->last_row_time = ev_monotonic_now(loop());
 		if (iproto_type_is_dml(row.type)) {
-			vclock_follow_xrow(&replicaset.vclock, &row);
+			vclock_follow_xrow(&replicaset.applier.vclock, &row);
 			xstream_write_xc(applier->subscribe_stream, &row);
 			if (++row_count % 100000 == 0)
 				say_info("%.1fM rows received", row_count / 1e6);
@@ -385,6 +387,9 @@ static void
 applier_subscribe(struct applier *applier)
 {
 	assert(applier->subscribe_stream != NULL);
+
+	if (!vclock_is_set(&replicaset.applier.vclock))
+		vclock_copy(&replicaset.applier.vclock, &replicaset.vclock);
 
 	/* Send SUBSCRIBE request */
 	struct ev_io *coio = &applier->io;
@@ -471,19 +476,6 @@ applier_subscribe(struct applier *applier)
 		}
 
 		/*
-		 * Stay 'orphan' until appliers catch up with
-		 * the remote vclock at the time of SUBSCRIBE
-		 * and the lag is less than configured.
-		 */
-		if (applier->state == APPLIER_SYNC &&
-		    applier->lag <= replication_sync_lag &&
-		    vclock_compare(&remote_vclock_at_subscribe,
-				   &replicaset.vclock) <= 0) {
-			/* Applier is synced, switch to "follow". */
-			applier_set_state(applier, APPLIER_FOLLOW);
-		}
-
-		/*
 		 * Tarantool < 1.7.7 does not send periodic heartbeat
 		 * messages so we can't assume that if we haven't heard
 		 * from the master for quite a while the connection is
@@ -512,48 +504,65 @@ applier_subscribe(struct applier *applier)
 
 		applier->lag = ev_now(loop()) - row.tm;
 		applier->last_row_time = ev_monotonic_now(loop());
-
-		if (vclock_get(&replicaset.vclock, row.replica_id) < row.lsn) {
-			/**
-			 * Promote the replica set vclock before
-			 * applying the row. If there is an
-			 * exception (conflict) applying the row,
-			 * the row is skipped when the replication
-			 * is resumed.
-			 */
-			vclock_follow_xrow(&replicaset.vclock, &row);
-			struct replica *replica = replica_by_id(row.replica_id);
-			struct latch *latch = (replica ? &replica->order_latch :
-					       &replicaset.applier.order_latch);
-			/*
-			 * In a full mesh topology, the same set
-			 * of changes may arrive via two
-			 * concurrently running appliers. Thanks
-			 * to vclock_follow() above, the first row
-			 * in the set will be skipped - but the
-			 * remaining may execute out of order,
-			 * when the following xstream_write()
-			 * yields on WAL. Hence we need a latch to
-			 * strictly order all changes which belong
-			 * to the same server id.
-			 */
-			latch_lock(latch);
+		struct replica *replica = replica_by_id(row.replica_id);
+		struct latch *latch = (replica ? &replica->order_latch :
+				       &replicaset.applier.order_latch);
+		/*
+		 * In a full mesh topology, the same set
+		 * of changes may arrive via two
+		 * concurrently running appliers. Thanks
+		 * to vclock_follow() above, the first row
+		 * in the set will be skipped - but the
+		 * remaining may execute out of order,
+		 * when the following xstream_write()
+		 * yields on WAL. Hence we need a latch to
+		 * strictly order all changes which belong
+		 * to the same server id.
+		 */
+		latch_lock(latch);
+		if (vclock_get(&replicaset.applier.vclock,
+			       row.replica_id) < row.lsn) {
+			/* Preserve old lsn value. */
+			int64_t old_lsn = vclock_get(&replicaset.applier.vclock,
+						     row.replica_id);
+			vclock_follow_xrow(&replicaset.applier.vclock, &row);
 			int res = xstream_write(applier->subscribe_stream, &row);
-			latch_unlock(latch);
-			if (res != 0) {
-				struct error *e = diag_last_error(diag_get());
+			struct error *e = diag_last_error(diag_get());
+			if (res != 0 && e->type == &type_ClientError &&
+			    box_error_code(e) == ER_TUPLE_FOUND &&
+			    replication_skip_conflict) {
 				/**
 				 * Silently skip ER_TUPLE_FOUND error if such
 				 * option is set in config.
 				 */
-				if (e->type == &type_ClientError &&
-				    box_error_code(e) == ER_TUPLE_FOUND &&
-				    replication_skip_conflict)
-					diag_clear(diag_get());
-				else
-					diag_raise();
+				diag_clear(diag_get());
+				row.type = IPROTO_NOP;
+				row.bodycnt = 0;
+				res = xstream_write(applier->subscribe_stream,
+						    &row);
+			}
+			if (res != 0) {
+				/* Rollback lsn to have a chance for a retry. */
+				vclock_set(&replicaset.applier.vclock,
+					   row.replica_id, old_lsn);
+				latch_unlock(latch);
+				diag_raise();
 			}
 		}
+		latch_unlock(latch);
+		/*
+		 * Stay 'orphan' until appliers catch up with
+		 * the remote vclock at the time of SUBSCRIBE
+		 * and the lag is less than configured.
+		 */
+		if (applier->state == APPLIER_SYNC &&
+		    applier->lag <= replication_sync_lag &&
+		    vclock_compare(&remote_vclock_at_subscribe,
+				   &replicaset.vclock) <= 0) {
+			/* Applier is synced, switch to "follow". */
+			applier_set_state(applier, APPLIER_FOLLOW);
+		}
+
 		if (applier->state == APPLIER_SYNC ||
 		    applier->state == APPLIER_FOLLOW)
 			fiber_cond_signal(&applier->writer_cond);

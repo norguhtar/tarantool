@@ -161,6 +161,9 @@ vclock_get(const struct vclock *vclock, uint32_t replica_id)
 	return vclock->lsn[replica_id];
 }
 
+void
+vclock_set(struct vclock *vclock, uint32_t replica_id, int64_t lsn);
+
 static inline int64_t
 vclock_inc(struct vclock *vclock, uint32_t replica_id)
 {

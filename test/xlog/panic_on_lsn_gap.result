@@ -105,7 +105,7 @@ test_run:cmd("restart server panic")
 --
 box.info.vclock
 ---
-- {1: 11}
+- {1: 1}
 ...
 box.space._schema:select{'key'}
 ---
@@ -153,7 +153,7 @@ t
 ...
 box.info.vclock
 ---
-- {1: 11}
+- {1: 1}
 ...
 box.error.injection.set("ERRINJ_WAL_WRITE", false)
 ---
@@ -176,12 +176,12 @@ s:replace{'key', 'test 2'}
 --
 box.info.vclock
 ---
-- {1: 22}
+- {1: 2}
 ...
 test_run:cmd("restart server panic")
 box.info.vclock
 ---
-- {1: 22}
+- {1: 2}
 ...
 box.space._schema:select{'key'}
 ---
@@ -194,8 +194,8 @@ name = string.match(arg[0], "([^,]+)%.lua")
 require('fio').glob(name .. "/*.xlog")
 ---
 - - panic/00000000000000000000.xlog
-  - panic/00000000000000000011.xlog
-  - panic/00000000000000000022.xlog
+  - panic/00000000000000000001.xlog
+  - panic/00000000000000000002.xlog
 ...
 -- now insert 10 rows - so that the next
 -- row will need to switch the WAL
@@ -217,8 +217,8 @@ test_run:cmd("setopt delimiter ''");
 require('fio').glob(name .. "/*.xlog")
 ---
 - - panic/00000000000000000000.xlog
-  - panic/00000000000000000011.xlog
-  - panic/00000000000000000022.xlog
+  - panic/00000000000000000001.xlog
+  - panic/00000000000000000002.xlog
 ...
 box.error.injection.set("ERRINJ_WAL_WRITE", true)
 ---
@@ -230,14 +230,14 @@ box.space._schema:replace{"key", 'test 3'}
 ...
 box.info.vclock
 ---
-- {1: 32}
+- {1: 12}
 ...
 require('fio').glob(name .. "/*.xlog")
 ---
 - - panic/00000000000000000000.xlog
-  - panic/00000000000000000011.xlog
-  - panic/00000000000000000022.xlog
-  - panic/00000000000000000032.xlog
+  - panic/00000000000000000001.xlog
+  - panic/00000000000000000002.xlog
+  - panic/00000000000000000012.xlog
 ...
 -- and the next one (just to be sure
 box.space._schema:replace{"key", 'test 3'}
@@ -246,14 +246,14 @@ box.space._schema:replace{"key", 'test 3'}
 ...
 box.info.vclock
 ---
-- {1: 32}
+- {1: 12}
 ...
 require('fio').glob(name .. "/*.xlog")
 ---
 - - panic/00000000000000000000.xlog
-  - panic/00000000000000000011.xlog
-  - panic/00000000000000000022.xlog
-  - panic/00000000000000000032.xlog
+  - panic/00000000000000000001.xlog
+  - panic/00000000000000000002.xlog
+  - panic/00000000000000000012.xlog
 ...
 box.error.injection.set("ERRINJ_WAL_WRITE", false)
 ---
@@ -266,14 +266,14 @@ box.space._schema:replace{"key", 'test 4'}
 ...
 box.info.vclock
 ---
-- {1: 35}
+- {1: 13}
 ...
 require('fio').glob(name .. "/*.xlog")
 ---
 - - panic/00000000000000000000.xlog
-  - panic/00000000000000000011.xlog
-  - panic/00000000000000000022.xlog
-  - panic/00000000000000000032.xlog
+  - panic/00000000000000000001.xlog
+  - panic/00000000000000000002.xlog
+  - panic/00000000000000000012.xlog
 ...
 -- restart is ok
 test_run:cmd("restart server panic")
@@ -332,12 +332,12 @@ name = string.match(arg[0], "([^,]+)%.lua")
 require('fio').glob(name .. "/*.xlog")
 ---
 - - panic/00000000000000000000.xlog
-  - panic/00000000000000000011.xlog
-  - panic/00000000000000000022.xlog
-  - panic/00000000000000000032.xlog
-  - panic/00000000000000000035.xlog
-  - panic/00000000000000000037.xlog
-  - panic/00000000000000000039.xlog
+  - panic/00000000000000000001.xlog
+  - panic/00000000000000000002.xlog
+  - panic/00000000000000000012.xlog
+  - panic/00000000000000000013.xlog
+  - panic/00000000000000000014.xlog
+  - panic/00000000000000000015.xlog
 ...
 test_run:cmd("restart server panic")
 box.space._schema:select{'key'}
@@ -355,13 +355,12 @@ name = string.match(arg[0], "([^,]+)%.lua")
 require('fio').glob(name .. "/*.xlog")
 ---
 - - panic/00000000000000000000.xlog
-  - panic/00000000000000000011.xlog
-  - panic/00000000000000000022.xlog
-  - panic/00000000000000000032.xlog
-  - panic/00000000000000000035.xlog
-  - panic/00000000000000000037.xlog
-  - panic/00000000000000000039.xlog
-  - panic/00000000000000000040.xlog
+  - panic/00000000000000000001.xlog
+  - panic/00000000000000000002.xlog
+  - panic/00000000000000000012.xlog
+  - panic/00000000000000000013.xlog
+  - panic/00000000000000000014.xlog
+  - panic/00000000000000000015.xlog
 ...
 test_run:cmd('switch default')
 ---

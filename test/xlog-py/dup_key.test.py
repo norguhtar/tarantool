@@ -26,19 +26,27 @@ server.stop()
 
 # Save wal#1
 if os.access(wal, os.F_OK):
-    print ".xlog exists"
+    print ".xlog#1 exists"
     os.rename(wal, wal_old)
 
-# Write wal#2
+# Write wal#2 to bump lsn
+server.start()
+server.admin("box.space.test:insert{3, 'third tuple'}")
+server.admin("box.space.test:insert{4, 'fourth tuple'}")
+server.stop()
+
+if os.access(wal, os.F_OK):
+    print ".xlog#2 exists"
+
+# Write wal#3 - confliction with wal#1
 server.start()
 server.admin("box.space.test:insert{1, 'third tuple'}")
 server.admin("box.space.test:insert{2, 'fourth tuple'}")
 server.stop()
 
 # Restore wal#1
-if not os.access(wal, os.F_OK):
-    print ".xlog does not exist"
-    os.rename(wal_old, wal)
+os.unlink(wal)
+os.rename(wal_old, wal)
 
 server.start()
 line = 'Duplicate key'

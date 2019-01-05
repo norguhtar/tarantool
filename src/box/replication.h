@@ -195,6 +195,9 @@ struct replicaset {
 	/** Applier state. */
 	struct {
 		/**
+		 * Vclock sent to process from appliers. */
+		struct vclock vclock;
+		/**
 		 * Total number of replicas with attached
 		 * appliers.
 		 */
