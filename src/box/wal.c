@@ -918,27 +918,36 @@ wal_assign_lsn(struct vclock *vclock, struct xrow_header **begin,
 			vclock_follow_xrow(vclock, *row);
 		}
 	}
-	/*
-	 * Assume that first row is transaction initiator row and any row
-	 * produced by replication trigger has at least second position.
-	 */
-	int64_t txn_id = (*begin)->txn_id;
-	uint32_t txn_replica_id = (*begin)->txn_replica_id;
-	if (txn_id == 0) {
+	if ((*begin)->replica_id != instance_id) {
 		/*
-		 * Local transaction, the first row lsn + replica_id
-		 * identitifies whole transaction.
+		 * Move all local changes to the end of rows array and
+		 * a fake local transaction (like an autonomous transaction)
+		 * because we could not replicate the transaction back.
 		 */
-		txn_id = (*begin)->lsn;
-		txn_replica_id = (*begin)->replica_id;
+		row = begin;
+		while (row < end - 1) {
+			if (row[0]->replica_id == instance_id &&
+			    row[1]->replica_id != instance_id) {
+				struct xrow_header *tmp = row[0];
+				row[0] = row[1];
+				row[1] = tmp;
+			}
+			++row;
+		}
+		/* Search begin of local rows tail. */
+		row = end;
+		while (row > begin && row[-1]->replica_id == instance_id)
+			--row;
+		begin = row;
 	}
+	/* Setup txn_id and tnx_replica_id for localy generated rows. */
 	row = begin;
-	for ( ; row < end; row++) {
-		(*row)->txn_id = txn_id;
-		(*row)->txn_replica_id = txn_replica_id;
+	while (row < end) {
+		row[0]->txn_id = begin[0]->lsn;
+		row[0]->txn_replica_id = instance_id;
+		row[0]->txn_last = row == end - 1 ? 1 : 0;
+		++row;
 	}
-	/* Mark last row in transaction. */
-	(*(end - 1))->txn_last = 1;
 }
 
 static void
