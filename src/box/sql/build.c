@@ -727,7 +727,7 @@ sqlite3AddPrimaryKey(Parse * pParse,	/* Parsing context */
 							     &token, 0));
 		if (list == NULL)
 			goto primary_key_exit;
-		sql_create_index(pParse, 0, 0, list, 0, SORT_ORDER_ASC,
+		sql_create_index(pParse, 0, 0, list, SORT_ORDER_ASC,
 				 false, SQL_INDEX_TYPE_CONSTRAINT_PK);
 		if (db->mallocFailed)
 			goto primary_key_exit;
@@ -736,7 +736,7 @@ sqlite3AddPrimaryKey(Parse * pParse,	/* Parsing context */
 				"INTEGER PRIMARY KEY or INT PRIMARY KEY");
 		goto primary_key_exit;
 	} else {
-		sql_create_index(pParse, 0, 0, pList, 0, sortOrder, false,
+		sql_create_index(pParse, 0, 0, pList, sortOrder, false,
 				 SQL_INDEX_TYPE_CONSTRAINT_PK);
 		pList = 0;
 		if (pParse->nErr > 0)
@@ -2227,8 +2227,8 @@ constraint_is_named(const char *name)
 void
 sql_create_index(struct Parse *parse, struct Token *token,
 		 struct SrcList *tbl_name, struct ExprList *col_list,
-		 MAYBE_UNUSED struct Token *start, enum sort_order sort_order,
-		 bool if_not_exist, enum sql_index_type idx_type) {
+		 enum sort_order sort_order, bool if_not_exist,
+		 enum sql_index_type idx_type) {
 	/* The index to be created. */
 	struct index *index = NULL;
 	/* Name of the index. */
@@ -2269,7 +2269,6 @@ sql_create_index(struct Parse *parse, struct Token *token,
 		if (parse->pNewTable == NULL)
 			goto exit_create_index;
 		assert(token == NULL);
-		assert(start == NULL);
 		space = parse->pNewTable->space;
 		def = parse->pNewTable->def;
 	}
@@ -2524,7 +2523,6 @@ sql_create_index(struct Parse *parse, struct Token *token,
 				  P4_SPACEPTR);
 		sqlite3VdbeChangeP5(vdbe, OPFLAG_SEEKEQ);
 
-		assert(start != NULL);
 		int index_id = getNewIid(parse, def->id, cursor);
 		sqlite3VdbeAddOp1(vdbe, OP_Close, cursor);
 		vdbe_emit_create_index(parse, def, index->def,

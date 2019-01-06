@@ -262,7 +262,7 @@ ccons ::= NULL onconf(R).        {
 ccons ::= NOT NULL onconf(R).    {sql_column_add_nullable_action(pParse, R);}
 ccons ::= PRIMARY KEY sortorder(Z) autoinc(I).
                                  {sqlite3AddPrimaryKey(pParse,0,I,Z);}
-ccons ::= UNIQUE.                {sql_create_index(pParse,0,0,0,0,
+ccons ::= UNIQUE.                {sql_create_index(pParse,0,0,0,
                                                    SORT_ORDER_ASC, false,
                                                    SQL_INDEX_TYPE_CONSTRAINT_UNIQUE);}
 ccons ::= CHECK LP expr(X) RP.   {sql_add_check_constraint(pParse,&X);}
@@ -313,7 +313,7 @@ tconsname ::= .                      {pParse->constraint->name.n = 0;}
 tcons ::= PRIMARY KEY LP sortlist(X) autoinc(I) RP.
                                  {sqlite3AddPrimaryKey(pParse,X,I,0);}
 tcons ::= UNIQUE LP sortlist(X) RP.
-                                 {sql_create_index(pParse,0,0,X,0,
+                                 {sql_create_index(pParse,0,0,X,
                                                    SORT_ORDER_ASC,false,
                                                    SQL_INDEX_TYPE_CONSTRAINT_UNIQUE);}
 tcons ::= CHECK LP expr(E) RP onconf.
@@ -1207,9 +1207,10 @@ paren_exprlist(A) ::= LP exprlist(X) RP.  {A = X;}
 
 ///////////////////////////// The CREATE INDEX command ///////////////////////
 //
-cmd ::= createkw(S) uniqueflag(U) INDEX ifnotexists(NE) nm(X)
+cmd ::= createkw uniqueflag(U) INDEX ifnotexists(NE) nm(X)
         ON nm(Y) LP sortlist(Z) RP. {
-  sql_create_index(pParse, &X, sqlite3SrcListAppend(pParse->db,0,&Y), Z, &S,
+
+  sql_create_index(pParse, &X, sqlite3SrcListAppend(pParse->db,0,&Y), Z,
                    SORT_ORDER_ASC, NE, U);
 }
 

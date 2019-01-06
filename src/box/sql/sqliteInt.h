@@ -3510,7 +3510,6 @@ void sqlite3IdListDelete(sqlite3 *, IdList *);
  * @param token Index name. May be NULL.
  * @param tbl_name Table to index. Use pParse->pNewTable ifNULL.
  * @param col_list A list of columns to be indexed.
- * @param start The CREATE token that begins this statement.
  * @param sort_order Sort order of primary key when pList==NULL.
  * @param if_not_exist Omit error if index already exists.
  * @param idx_type The index type.
@@ -3518,8 +3517,8 @@ void sqlite3IdListDelete(sqlite3 *, IdList *);
 void
 sql_create_index(struct Parse *parse, struct Token *token,
 		 struct SrcList *tbl_name, struct ExprList *col_list,
-		 struct Token *start, enum sort_order sort_order,
-		 bool if_not_exist, enum sql_index_type idx_type);
+		 enum sort_order sort_order, bool if_not_exist,
+		 enum sql_index_type idx_type);
 
 /**
  * This routine will drop an existing named index.  This routine
