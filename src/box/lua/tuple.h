@@ -41,6 +41,8 @@ typedef struct tuple box_tuple_t;
 struct lua_State;
 struct mpstream;
 struct luaL_serializer;
+struct tuple_format;
+typedef struct tuple_format box_tuple_format_t;
 
 /** \cond public */
 
@@ -65,6 +67,19 @@ box_tuple_t *
 luaT_istuple(struct lua_State *L, int idx);
 
 /** \endcond public */
+
+/**
+ * Create the new tuple with specific format from a Lua table, a
+ * tuple or objects on the lua stack.
+ *
+ * Set idx to zero to create the new tuple from objects on the lua
+ * stack.
+ *
+ * In case of an error push the error message to the Lua stack and
+ * return NULL.
+ */
+struct tuple *
+luaT_newtuple(struct lua_State *L, int idx, box_tuple_format_t *format);
 
 int
 lbox_tuple_new(struct lua_State *L);
