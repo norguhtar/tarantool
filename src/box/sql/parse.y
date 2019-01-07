@@ -1466,6 +1466,7 @@ add_constraint_start ::= ADD CONSTRAINT nm(Z). {
 }
 
 constraint_def ::= foreign_key_def.
+constraint_def ::= unique_def.
 
 foreign_key_def ::= FOREIGN KEY LP eidlist(FA) RP REFERENCES nm(T)
                     eidlist_opt(TA) refargs(R) defer_subclause_opt(D). {
@@ -1473,6 +1474,20 @@ foreign_key_def ::= FOREIGN KEY LP eidlist(FA) RP REFERENCES nm(T)
 }
 
 
+unique_def ::= unique_spec(U) LP sortlist(X) RP. {
+  sql_create_index(pParse, &pParse->constraint->name,
+                   pParse->constraint->table_name, X, SORT_ORDER_ASC, false, U);
+ }
+
+%type unique_spec {int}
+unique_spec(U) ::= UNIQUE.      { U = SQL_INDEX_TYPE_CONSTRAINT_UNIQUE; }
+unique_spec(U) ::= PRIMARY KEY. { U = SQL_INDEX_TYPE_CONSTRAINT_PK; }
+
+/**
+ * Currently, to drop unique constraint it is required
+ * to use drop index (since fk and unique constraints don't
+ * share name space).
+ */
 drop_constraint_def ::= DROP CONSTRAINT nm(Z). {
   sql_drop_foreign_key(pParse, &Z);
 }

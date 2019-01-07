@@ -2083,6 +2083,19 @@ generate_index_id(struct Parse *parse, uint32_t space_id, int cursor)
 	return iid_reg;
 }
 
+static void
+pk_check_existence(struct Parse *parse, uint32_t space_id, int cursor)
+{
+	struct Vdbe *v = sqlite3GetVdbe(parse);
+	int tmp_reg = ++parse->nMem;
+	sqlite3VdbeAddOp2(v, OP_Integer, space_id, tmp_reg);
+	int found_addr = sqlite3VdbeAddOp4Int(v, OP_NotFound, cursor, 0,
+					     tmp_reg, 1);
+	sqlite3VdbeAddOp4(v, OP_Halt, SQLITE_ERROR, ON_CONFLICT_ACTION_FAIL, 0,
+			  "multiple primary keys are not allowed", P4_STATIC);
+	sqlite3VdbeJumpHere(v, found_addr);
+}
+
 /**
  * Add new index to table's indexes list.
  * We follow convention that PK comes first in list.
@@ -2520,8 +2533,20 @@ sql_create_index(struct Parse *parse, struct Token *token,
 				  (void *)space_by_id(BOX_INDEX_ID),
 				  P4_SPACEPTR);
 		sqlite3VdbeChangeP5(vdbe, OPFLAG_SEEKEQ);
-
-		int index_id = generate_index_id(parse, def->id, cursor);
+		int index_id;
+		/*
+		 * In case we are creating PRIMARY KEY constraint
+		 * (via ALTER TABLE) we must ensure that table
+		 * doesn't feature any indexes. Otherwise,
+		 * we can immediately halt execution of VDBE.
+		 */
+		if (idx_type == SQL_INDEX_TYPE_CONSTRAINT_PK) {
+			pk_check_existence(parse, def->id, cursor);
+			index_id = parse->nMem++;
+			sqlite3VdbeAddOp2(vdbe, OP_Integer, 0, index_id);
+		} else {
+			index_id = generate_index_id(parse, def->id, cursor);
+		}
 		sqlite3VdbeAddOp1(vdbe, OP_Close, cursor);
 		vdbe_emit_create_index(parse, def, index->def,
 				       def->id, index_id);
