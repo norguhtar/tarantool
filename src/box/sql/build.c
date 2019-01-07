@@ -2044,45 +2044,43 @@ sql_drop_foreign_key(struct Parse *parse_context, struct Token *constraint)
 	sqlite3VdbeChangeP5(sqlite3GetVdbe(parse_context), OPFLAG_NCHANGE);
 }
 
-/*
- * Generate code to determine next free Iid in the space identified by
- * the iSpaceId. Return register number holding the result.
+/**
+ * Generate code to determine next free index id in
+ * the space identified by the @space_id.
+ * Return register holding the result.
+ *
+ * Overall VDBE program logic is following:
+ *
+ * 1 Seek for space id in _index, goto l1 if seeks fails.
+ * 2 Goto l2.
+ * 3 l1: Halt.
+ * 4 l2: Fetch index id from _index record.
  */
 static int
-getNewIid(Parse * pParse, int iSpaceId, int iCursor)
+generate_index_id(struct Parse *parse, uint32_t space_id, int cursor)
 {
-	Vdbe *v = sqlite3GetVdbe(pParse);
-	int iRes = ++pParse->nMem;
-	int iKey = ++pParse->nMem;
-	int iSeekInst, iGotoInst;
+	struct Vdbe *v = sqlite3GetVdbe(parse);
+	int key_reg = ++parse->nMem;
 
-	sqlite3VdbeAddOp2(v, OP_Integer, iSpaceId, iKey);
-	iSeekInst = sqlite3VdbeAddOp4Int(v, OP_SeekLE, iCursor, 0, iKey, 1);
-	sqlite3VdbeAddOp4Int(v, OP_IdxLT, iCursor, 0, iKey, 1);
+	sqlite3VdbeAddOp2(v, OP_Integer, space_id, key_reg);
+	int seek_adr = sqlite3VdbeAddOp4Int(v, OP_SeekLE, cursor, 0,
+					    key_reg, 1);
+	sqlite3VdbeAddOp4Int(v, OP_IdxLT, cursor, 0, key_reg, 1);
+	/* Jump over Halt block. */
+	int goto_succ_addr = sqlite3VdbeAddOp0(v, OP_Goto);
+	/* Invalid space id handling block starts here. */
+	sqlite3VdbeJumpHere(v, seek_adr);
+	sqlite3VdbeJumpHere(v, seek_adr + 1);
+	sqlite3VdbeAddOp4(v, OP_Halt, SQLITE_ERROR, ON_CONFLICT_ACTION_FAIL, 0,
+			  sqlite3MPrintf(parse->db, "Invalid space id: %d",
+					 space_id), P4_DYNAMIC);
 
-	/*
-	 * If SeekLE succeeds, the control falls through here, skipping
-	 * IdxLt.
-	 *
-	 * If it fails (no entry with the given key prefix: invalid spaceId)
-	 * VDBE jumps to the next code block (jump target is IMM, fixed up
-	 * later with sqlite3VdbeJumpHere()).
-	 */
-	iGotoInst = sqlite3VdbeAddOp0(v, OP_Goto);	/* Jump over Halt */
-
-	/* Invalid spaceId detected. Halt now. */
-	sqlite3VdbeJumpHere(v, iSeekInst);
-	sqlite3VdbeJumpHere(v, iSeekInst + 1);
-	sqlite3VdbeAddOp4(v,
-			  OP_Halt, SQLITE_ERROR, ON_CONFLICT_ACTION_FAIL, 0,
-			  sqlite3MPrintf(pParse->db, "Invalid space id: %d",
-					 iSpaceId), P4_DYNAMIC);
-
-	/* Fetch iid from the row and ++it. */
-	sqlite3VdbeJumpHere(v, iGotoInst);
-	sqlite3VdbeAddOp3(v, OP_Column, iCursor, 1, iRes);
-	sqlite3VdbeAddOp2(v, OP_AddImm, iRes, 1);
-	return iRes;
+	sqlite3VdbeJumpHere(v, goto_succ_addr);
+	/* Fetch iid from the row and increment it. */
+	int iid_reg = ++parse->nMem;
+	sqlite3VdbeAddOp3(v, OP_Column, cursor, 1, iid_reg);
+	sqlite3VdbeAddOp2(v, OP_AddImm, iid_reg, 1);
+	return iid_reg;
 }
 
 /**
@@ -2523,7 +2521,7 @@ sql_create_index(struct Parse *parse, struct Token *token,
 				  P4_SPACEPTR);
 		sqlite3VdbeChangeP5(vdbe, OPFLAG_SEEKEQ);
 
-		int index_id = getNewIid(parse, def->id, cursor);
+		int index_id = generate_index_id(parse, def->id, cursor);
 		sqlite3VdbeAddOp1(vdbe, OP_Close, cursor);
 		vdbe_emit_create_index(parse, def, index->def,
 				       def->id, index_id);
