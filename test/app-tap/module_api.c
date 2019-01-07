@@ -449,6 +449,18 @@ test_iscallable(lua_State *L)
 	return 1;
 }
 
+static int
+test_luaT_new_key_def(lua_State *L)
+{
+	/*
+	 * Ignore the return value. Here we test whether the
+	 * function raises an error.
+	 */
+	luaT_new_key_def(L, 1);
+	lua_pop(L, 1);
+	return 0;
+}
+
 LUA_API int
 luaopen_module_api(lua_State *L)
 {
@@ -477,6 +489,7 @@ luaopen_module_api(lua_State *L)
 		{"test_state", test_state},
 		{"test_tostring", test_tostring},
 		{"iscallable", test_iscallable},
+		{"luaT_new_key_def", test_luaT_new_key_def},
 		{NULL, NULL}
 	};
 	luaL_register(L, "module_api", lib);

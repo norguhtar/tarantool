@@ -2,7 +2,6 @@
 
 local fio = require('fio')
 
-box.cfg{log = "tarantool.log"}
 -- Use BUILDDIR passed from test-run or cwd when run w/o
 -- test-run to find test/app-tap/module_api.{so,dylib}.
 build_path = os.getenv("BUILDDIR") or '.'
@@ -116,8 +115,91 @@ local function test_iscallable(test, module)
     end
 end
 
+local function test_luaT_new_key_def(test, module)
+    local cases = {
+        -- Cases to call before box.cfg{}.
+        {
+            'Pass a field on an unknown type',
+            parts = {{
+                fieldno = 2,
+                type = 'unknown',
+            }},
+            exp_err = 'Unknown field type: unknown',
+        },
+        {
+            'Try to use collation_id before box.cfg{}',
+            parts = {{
+                fieldno = 1,
+                type = 'string',
+                collation_id = 2,
+            }},
+            exp_err = 'Cannot use collations: please call box.cfg{}',
+        },
+        {
+            'Try to use collation before box.cfg{}',
+            parts = {{
+                fieldno = 1,
+                type = 'string',
+                collation = 'unicode_ci',
+            }},
+            exp_err = 'Cannot use collations: please call box.cfg{}',
+        },
+        function()
+            -- For collations.
+            box.cfg{}
+        end,
+        -- Cases to call after box.cfg{}.
+        {
+            'Try to use both collation_id and collation',
+            parts = {{
+                fieldno = 1,
+                type = 'string',
+                collation_id = 2,
+                collation = 'unicode_ci',
+            }},
+            exp_err = 'Conflicting options: collation_id and collation',
+        },
+        {
+            'Unknown collation_id',
+            parts = {{
+                fieldno = 1,
+                type = 'string',
+                collation_id = 42,
+            }},
+            exp_err = 'Unknown collation_id: 42',
+        },
+        {
+            'Unknown collation name',
+            parts = {{
+                fieldno = 1,
+                type = 'string',
+                collation = 'unknown',
+            }},
+            exp_err = 'Unknown collation: "unknown"',
+        },
+        {
+            parts = 1,
+            exp_err = 'Bad params, use: luaT_new_key_def({' ..
+                '{fieldno = fieldno, type = type' ..
+                '[, is_nullable = is_nullable' ..
+                '[, collation_id = collation_id' ..
+                '[, collation = collation]]]}, ...}',
+        },
+    }
+
+    test:plan(#cases - 1)
+    for _, case in ipairs(cases) do
+        if type(case) == 'function' then
+            case()
+        else
+            local ok, err = pcall(module.luaT_new_key_def, case.parts)
+            test:is_deeply({ok, err}, {false, case.exp_err}, case[1])
+        end
+    end
+end
+
 local test = require('tap').test("module_api", function(test)
-    test:plan(24)
+    test:plan(25)
     local status, module = pcall(require, 'module_api')
     test:is(status, true, "module")
     test:ok(status, "module is loaded")
@@ -128,6 +210,9 @@ local test = require('tap').test("module_api", function(test)
         end
         return
     end
+
+    -- Should be called before box.cfg{}. Calls box.cfg{} itself.
+    test:test("luaT_new_key_def", test_luaT_new_key_def, module)
 
     local space  = box.schema.space.create("test")
     space:create_index('primary')

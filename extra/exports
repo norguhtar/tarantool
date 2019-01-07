@@ -210,6 +210,7 @@ clock_realtime64
 clock_monotonic64
 clock_process64
 clock_thread64
+luaT_new_key_def
 
 # Lua / LuaJIT
 
