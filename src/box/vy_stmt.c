@@ -385,26 +385,43 @@ vy_stmt_new_surrogate_from_key(const char *key, enum iproto_type type,
 	struct region *region = &fiber()->gc;
 
 	uint32_t field_count = format->index_field_count;
-	struct iovec *iov = region_alloc(region, sizeof(*iov) * field_count);
+	uint32_t iov_sz =
+		sizeof(struct iovec) * format->total_field_count;
+	struct iovec *iov = region_alloc(region, iov_sz);
 	if (iov == NULL) {
-		diag_set(OutOfMemory, sizeof(*iov) * field_count,
-			 "region", "iov for surrogate key");
+		diag_set(OutOfMemory, iov_sz, "region_alloc",
+			 "iov for surrogate key");
 		return NULL;
 	}
-	memset(iov, 0, sizeof(*iov) * field_count);
+	memset(iov, 0, iov_sz);
 	uint32_t part_count = mp_decode_array(&key);
 	assert(part_count == cmp_def->part_count);
-	assert(part_count <= field_count);
-	uint32_t nulls_count = field_count - cmp_def->part_count;
+	assert(part_count <= format->total_field_count);
+	/**
+	 * The format:vy_stmt_size contains a size of
+	 * stmt tuple having all leaf fields set to null.
+	 * Calculate bsize as vy_stmt_size where parts_count
+	 * nulls replaced with extracted keys.
+	 */
 	uint32_t bsize = mp_sizeof_array(field_count) +
-			 mp_sizeof_nil() * nulls_count;
+			 format->vy_stmt_size - mp_sizeof_nil() * part_count;
 	for (uint32_t i = 0; i < part_count; ++i) {
 		const struct key_part *part = &cmp_def->parts[i];
 		assert(part->fieldno < field_count);
+		struct tuple_field *field;
+		if (part->path != NULL) {
+			field = tuple_format_field_by_path(format,
+							   part->fieldno,
+							   part->path,
+							   part->path_len);
+		} else {
+			field = tuple_format_field(format, part->fieldno);
+		}
+		assert(field != NULL);
 		const char *svp = key;
-		iov[part->fieldno].iov_base = (char *) key;
+		iov[field->id].iov_base = (char *) key;
 		mp_next(&key);
-		iov[part->fieldno].iov_len = key - svp;
+		iov[field->id].iov_len = key - svp;
 		bsize += key - svp;
 	}
 
@@ -414,18 +431,10 @@ vy_stmt_new_surrogate_from_key(const char *key, enum iproto_type type,
 
 	char *raw = (char *) tuple_data(stmt);
 	uint32_t *field_map = (uint32_t *) raw;
+	memset((char *)field_map - format->field_map_size, 0,
+	       format->field_map_size);
 	char *wpos = mp_encode_array(raw, field_count);
-	for (uint32_t i = 0; i < field_count; ++i) {
-		struct tuple_field *field = tuple_format_field(format, i);
-		if (field->offset_slot != TUPLE_OFFSET_SLOT_NIL)
-			field_map[field->offset_slot] = wpos - raw;
-		if (iov[i].iov_base == NULL) {
-			wpos = mp_encode_nil(wpos);
-		} else {
-			memcpy(wpos, iov[i].iov_base, iov[i].iov_len);
-			wpos += iov[i].iov_len;
-		}
-	}
+	(void)tuple_format_stmt_encode(format, &wpos, raw, field_map, iov);
 	assert(wpos == raw + bsize);
 	vy_stmt_set_type(stmt, type);
 	return stmt;

@@ -354,6 +354,14 @@ json_tree_lookup_path(struct json_tree *tree, struct json_token *root,
 		      const char *path, int path_len, int index_base);
 
 /**
+ * Return the child of @parent following @pos or NULL if @pos
+ * points to the last child in the children array. If @pos is
+ * NULL, this function returns the first child.
+ */
+struct json_token *
+json_tree_child_next(struct json_token *parent, struct json_token *pos);
+
+/**
  * Perform pre-order traversal in a JSON subtree rooted
  * at a given node.
  *
@@ -434,6 +442,14 @@ json_tree_postorder_next(struct json_token *root, struct json_token *pos);
 	struct json_token *ret = json_tree_lookup_path((tree), (root),	     \
 					(path), (path_len), (index_base));   \
 	json_tree_entry_safe(ret, type, member);			     \
+})
+
+/**
+ * Container-aware wrapper around json_tree_child_next().
+ */
+#define json_tree_child_next_entry(parent, pos, type, member) ({	     \
+	struct json_token *next = json_tree_child_next((parent), (pos));     \
+	json_tree_entry_safe(next, type, member);			     \
 })
 
 /**

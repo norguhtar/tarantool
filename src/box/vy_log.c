@@ -581,9 +581,11 @@ vy_log_record_decode(struct vy_log_record *record,
 			record->group_id = mp_decode_uint(&pos);
 			break;
 		case VY_LOG_KEY_DEF: {
+			struct region *region = &fiber()->gc;
 			uint32_t part_count = mp_decode_array(&pos);
-			struct key_part_def *parts = region_alloc(&fiber()->gc,
-						sizeof(*parts) * part_count);
+			struct key_part_def *parts =
+				region_alloc(region,
+					     sizeof(*parts) * part_count);
 			if (parts == NULL) {
 				diag_set(OutOfMemory,
 					 sizeof(*parts) * part_count,
@@ -591,7 +593,7 @@ vy_log_record_decode(struct vy_log_record *record,
 				return -1;
 			}
 			if (key_def_decode_parts(parts, part_count, &pos,
-						 NULL, 0) != 0) {
+						 NULL, 0, region) != 0) {
 				diag_log();
 				diag_set(ClientError, ER_INVALID_VYLOG_FILE,
 					 "Bad record: failed to decode "
@@ -705,7 +707,8 @@ vy_log_record_dup(struct region *pool, const struct vy_log_record *src)
 				 "struct key_part_def");
 			goto err;
 		}
-		key_def_dump_parts(src->key_def, dst->key_parts);
+		if (key_def_dump_parts(src->key_def, dst->key_parts, pool) != 0)
+			goto err;
 		dst->key_part_count = src->key_def->part_count;
 		dst->key_def = NULL;
 	}

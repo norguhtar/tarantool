@@ -572,12 +572,7 @@ json_tree_lookup_path(struct json_tree *tree, struct json_token *root,
 	return ret;
 }
 
-/**
- * Return the child of @parent following @pos or NULL if @pos
- * points to the last child in the children array. If @pos is
- * NULL, this function returns the first child.
- */
-static struct json_token *
+struct json_token *
 json_tree_child_next(struct json_token *parent, struct json_token *pos)
 {
 	assert(pos == NULL || pos->parent == parent);
