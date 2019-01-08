@@ -2072,8 +2072,8 @@ generate_index_id(struct Parse *parse, uint32_t space_id, int cursor)
 	sqlite3VdbeJumpHere(v, seek_adr);
 	sqlite3VdbeJumpHere(v, seek_adr + 1);
 	sqlite3VdbeAddOp4(v, OP_Halt, SQLITE_ERROR, ON_CONFLICT_ACTION_FAIL, 0,
-			  sqlite3MPrintf(parse->db, "Invalid space id: %d",
-					 space_id), P4_DYNAMIC);
+			  "can not add a secondary key before primary",
+			  P4_STATIC);
 
 	sqlite3VdbeJumpHere(v, goto_succ_addr);
 	/* Fetch iid from the row and increment it. */
