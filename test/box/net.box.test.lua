@@ -1388,6 +1388,32 @@ c = net.connect('8.8.8.8:123456', {wait_connected = false})
 c
 c:close()
 
+ffi = require('ffi')
+
+-- Case: valid iproto_data packet; char *.
+data = '\x81\x30\x90'
+rpos = ffi.cast('char *', data)
+net.check_iproto_data(rpos, #data) - rpos -- 2
+
+-- Case: valid iproto_data packet; const char *.
+rpos = ffi.cast('const char *', data)
+net.check_iproto_data(rpos, #data) - rpos -- 2
+
+-- Case: invalid iproto_data packet.
+data = '\x91\x01'
+rpos = ffi.cast('char *', data)
+net.check_iproto_data(rpos, #data) -- error
+
+-- Case: truncated msgpack.
+data = '\x81'
+rpos = ffi.cast('char *', data)
+net.check_iproto_data(rpos, #data) -- error
+
+-- Case: zero size buffer.
+data = ''
+rpos = ffi.cast('char *', data)
+net.check_iproto_data(rpos, #data) -- error
+
 box.schema.func.drop('do_long')
 box.schema.user.revoke('guest', 'write', 'space', '_schema')
 box.schema.user.revoke('guest', 'read,write', 'space', '_space')

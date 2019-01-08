@@ -51,6 +51,9 @@
 
 #define cfg luaL_msgpack_default
 
+static uint32_t CTID_CHAR_PTR;
+static uint32_t CTID_CONST_CHAR_PTR;
+
 static inline size_t
 netbox_prepare_request(lua_State *L, struct mpstream *stream, uint32_t r_type)
 {
@@ -745,9 +748,54 @@ netbox_decode_execute(struct lua_State *L)
 	return 2;
 }
 
+/**
+ * net_box.check_iproto_data(buf.rpos, buf.wpos - buf.rpos)
+ *     -> new_rpos
+ *     -> nil, err_msg
+ */
+int
+netbox_check_iproto_data(struct lua_State *L)
+{
+	uint32_t ctypeid;
+	const char *data = *(const char **) luaL_checkcdata(L, 1, &ctypeid);
+	if (ctypeid != CTID_CHAR_PTR && ctypeid != CTID_CONST_CHAR_PTR)
+		return luaL_error(L,
+			"net_box.check_iproto_data: 'char *' or "
+			"'const char *' expected");
+
+	if (!lua_isnumber(L, 2))
+		return luaL_error(L, "net_box.check_iproto_data: number "
+				  "expected as 2nd argument");
+	const char *end = data + lua_tointeger(L, 2);
+
+	int ok = data < end &&
+		mp_typeof(*data) == MP_MAP &&
+		mp_check_map(data, end) <= 0 &&
+		mp_decode_map(&data) == 1 &&
+		data < end &&
+		mp_typeof(*data) == MP_UINT &&
+		mp_check_uint(data, end) <= 0 &&
+		mp_decode_uint(&data) == IPROTO_DATA;
+
+	if (!ok) {
+		lua_pushnil(L);
+		lua_pushstring(L,
+			"net_box.check_iproto_data: wrong iproto data packet");
+		return 2;
+	}
+
+	*(const char **) luaL_pushcdata(L, ctypeid) = data;
+	return 1;
+}
+
 int
 luaopen_net_box(struct lua_State *L)
 {
+	CTID_CHAR_PTR = luaL_ctypeid(L, "char *");
+	assert(CTID_CHAR_PTR != 0);
+	CTID_CONST_CHAR_PTR = luaL_ctypeid(L, "const char *");
+	assert(CTID_CONST_CHAR_PTR != 0);
+
 	static const luaL_Reg net_box_lib[] = {
 		{ "encode_ping",    netbox_encode_ping },
 		{ "encode_call_16", netbox_encode_call_16 },
@@ -765,6 +813,7 @@ luaopen_net_box(struct lua_State *L)
 		{ "communicate",    netbox_communicate },
 		{ "decode_select",  netbox_decode_select },
 		{ "decode_execute", netbox_decode_execute },
+		{ "check_iproto_data", netbox_check_iproto_data },
 		{ NULL, NULL}
 	};
 	/* luaL_register_module polutes _G */

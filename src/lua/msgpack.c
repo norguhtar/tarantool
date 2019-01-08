@@ -51,6 +51,7 @@ luamp_error(void *error_ctx)
 }
 
 static uint32_t CTID_CHAR_PTR;
+static uint32_t CTID_CONST_CHAR_PTR;
 static uint32_t CTID_STRUCT_IBUF;
 
 struct luaL_serializer *luaL_msgpack_default = NULL;
@@ -418,6 +419,68 @@ lua_ibuf_msgpack_decode(lua_State *L)
 	return 2;
 }
 
+/**
+ * msgpack.check_array(buf.rpos, buf.wpos - buf.rpos, [, arr_len])
+ *     -> new_rpos, arr_len
+ *     -> nil, err_msg
+ */
+static int
+lua_check_array(lua_State *L)
+{
+	uint32_t ctypeid;
+	const char *data = *(const char **) luaL_checkcdata(L, 1, &ctypeid);
+	if (ctypeid != CTID_CHAR_PTR && ctypeid != CTID_CONST_CHAR_PTR)
+		return luaL_error(L, "msgpack.check_array: 'char *' or "
+				  "'const char *' expected");
+
+	if (!lua_isnumber(L, 2))
+		return luaL_error(L, "msgpack.check_array: number expected as "
+				  "2nd argument");
+	const char *end = data + lua_tointeger(L, 2);
+
+	if (!lua_isnoneornil(L, 3) && !lua_isnumber(L, 3))
+		return luaL_error(L, "msgpack.check_array: number or nil "
+				  "expected as 3rd argument");
+
+	static const char *end_of_buffer_msg = "msgpack.check_array: "
+		"unexpected end of buffer";
+
+	if (data >= end) {
+		lua_pushnil(L);
+		lua_pushstring(L, end_of_buffer_msg);
+		return 2;
+	}
+
+	if (mp_typeof(*data) != MP_ARRAY) {
+		lua_pushnil(L);
+		lua_pushstring(L, "msgpack.check_array: wrong array header");
+		return 2;
+	}
+
+	if (mp_check_array(data, end) > 0) {
+		lua_pushnil(L);
+		lua_pushstring(L, end_of_buffer_msg);
+		return 2;
+	}
+
+	uint32_t len = mp_decode_array(&data);
+
+	if (!lua_isnoneornil(L, 3)) {
+		uint32_t exp_len = (uint32_t) lua_tointeger(L, 3);
+		if (len != exp_len) {
+			lua_pushnil(L);
+			lua_pushfstring(L, "msgpack.check_array: expected "
+					"array of length %d, got length %d",
+					len, exp_len);
+			return 2;
+		}
+	}
+
+	*(const char **) luaL_pushcdata(L, ctypeid) = data;
+	lua_pushinteger(L, len);
+	return 2;
+}
+
 static int
 lua_msgpack_new(lua_State *L);
 
@@ -426,6 +489,7 @@ static const luaL_Reg msgpacklib[] = {
 	{ "decode", lua_msgpack_decode },
 	{ "decode_unchecked", lua_msgpack_decode_unchecked },
 	{ "ibuf_decode", lua_ibuf_msgpack_decode },
+	{ "check_array", lua_check_array },
 	{ "new", lua_msgpack_new },
 	{ NULL, NULL }
 };
@@ -447,6 +511,8 @@ luaopen_msgpack(lua_State *L)
 	assert(CTID_STRUCT_IBUF != 0);
 	CTID_CHAR_PTR = luaL_ctypeid(L, "char *");
 	assert(CTID_CHAR_PTR != 0);
+	CTID_CONST_CHAR_PTR = luaL_ctypeid(L, "const char *");
+	assert(CTID_CONST_CHAR_PTR != 0);
 	luaL_msgpack_default = luaL_newserializer(L, "msgpack", msgpacklib);
 	return 1;
 }

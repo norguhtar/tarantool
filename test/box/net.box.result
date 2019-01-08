@@ -3433,6 +3433,64 @@ c
 c:close()
 ---
 ...
+ffi = require('ffi')
+---
+...
+-- Case: valid iproto_data packet; char *.
+data = '\x81\x30\x90'
+---
+...
+rpos = ffi.cast('char *', data)
+---
+...
+net.check_iproto_data(rpos, #data) - rpos -- 2
+---
+- 2
+...
+-- Case: valid iproto_data packet; const char *.
+rpos = ffi.cast('const char *', data)
+---
+...
+net.check_iproto_data(rpos, #data) - rpos -- 2
+---
+- 2
+...
+-- Case: invalid iproto_data packet.
+data = '\x91\x01'
+---
+...
+rpos = ffi.cast('char *', data)
+---
+...
+net.check_iproto_data(rpos, #data) -- error
+---
+- null
+- 'net_box.check_iproto_data: wrong iproto data packet'
+...
+-- Case: truncated msgpack.
+data = '\x81'
+---
+...
+rpos = ffi.cast('char *', data)
+---
+...
+net.check_iproto_data(rpos, #data) -- error
+---
+- null
+- 'net_box.check_iproto_data: wrong iproto data packet'
+...
+-- Case: zero size buffer.
+data = ''
+---
+...
+rpos = ffi.cast('char *', data)
+---
+...
+net.check_iproto_data(rpos, #data) -- error
+---
+- null
+- 'net_box.check_iproto_data: wrong iproto data packet'
+...
 box.schema.func.drop('do_long')
 ---
 ...

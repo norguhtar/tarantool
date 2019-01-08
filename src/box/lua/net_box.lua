@@ -1424,6 +1424,7 @@ local this_module = {
     new = connect, -- Tarantool < 1.7.1 compatibility,
     wrap = wrap,
     establish_connection = establish_connection,
+    check_iproto_data = internal.check_iproto_data,
 }
 
 function this_module.timeout(timeout, ...)
