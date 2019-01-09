@@ -318,10 +318,8 @@ tcons ::= UNIQUE LP sortlist(X) RP.
                                                    SQL_INDEX_TYPE_CONSTRAINT_UNIQUE);}
 tcons ::= CHECK LP expr(E) RP onconf.
                                  {sql_add_check_constraint(pParse,&E);}
-tcons ::= FOREIGN KEY LP eidlist(FA) RP
-          REFERENCES nm(T) eidlist_opt(TA) refargs(R) defer_subclause_opt(D). {
-    sql_create_foreign_key(pParse, FA, &T, TA, D, R);
-}
+tcons ::= foreign_key_def.
+
 %type defer_subclause_opt {int}
 defer_subclause_opt(A) ::= .                    {A = 0;}
 defer_subclause_opt(A) ::= defer_subclause(A).
@@ -1444,22 +1442,38 @@ cmd ::= ANALYZE.                {sqlite3Analyze(pParse, 0);}
 cmd ::= ANALYZE nm(X).          {sqlite3Analyze(pParse, &X);}
 
 //////////////////////// ALTER TABLE table ... ////////////////////////////////
-cmd ::= ALTER TABLE fullname(X) RENAME TO nm(Z). {
-  pParse->constraint->table_name = X;
+cmd ::= alter_table_start alter_table_action .
+
+alter_table_start ::= ALTER TABLE fullname(Z) . {
+  pParse->constraint->table_name = Z;
+  pParse->constraint->name.n = 0;
+}
+
+alter_table_action ::= add_constraint_def.
+alter_table_action ::= drop_constraint_def.
+/** RENAME is ANSI extension, so it comes as a very special case. */
+alter_table_action ::= rename.
+
+rename ::= RENAME TO nm(Z). {
   sql_alter_table_rename(pParse, &Z);
 }
 
-cmd ::= ALTER TABLE fullname(X) ADD CONSTRAINT nm(Z) FOREIGN KEY
-        LP eidlist(FA) RP REFERENCES nm(T) eidlist_opt(TA) refargs(R)
-        defer_subclause_opt(D). {
-    pParse->constraint->table_name = X;
-    pParse->constraint->name = Z;
-    sql_create_foreign_key(pParse, FA, &T, TA, D, R);
+add_constraint_def ::= add_constraint_start constraint_def.
+
+add_constraint_start ::= ADD CONSTRAINT nm(Z). {
+  pParse->constraint->name = Z;
 }
 
-cmd ::= ALTER TABLE fullname(X) DROP CONSTRAINT nm(Z). {
-    pParse->constraint->table_name = X;
-    sql_drop_foreign_key(pParse, &Z);
+constraint_def ::= foreign_key_def.
+
+foreign_key_def ::= FOREIGN KEY LP eidlist(FA) RP REFERENCES nm(T)
+                    eidlist_opt(TA) refargs(R) defer_subclause_opt(D). {
+  sql_create_foreign_key(pParse, FA, &T, TA, D, R);
+}
+
+
+drop_constraint_def ::= DROP CONSTRAINT nm(Z). {
+  sql_drop_foreign_key(pParse, &Z);
 }
 
 //////////////////////// COMMON TABLE EXPRESSIONS ////////////////////////////
