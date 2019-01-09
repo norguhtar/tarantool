@@ -119,13 +119,10 @@ lbox_execute(struct lua_State *L)
 	size_t length;
 	struct port port;
 
-	if (lua_type(L, 1) != LUA_TSTRING)
+	if (lua_type(L, 1) != LUA_TSTRING || ! lua_isstring(L, 1))
 		return luaL_error(L, "Usage: box.execute(sqlstring)");
 
 	const char *sql = lua_tolstring(L, 1, &length);
-	if (sql == NULL)
-		return luaL_error(L, "Usage: box.execute(sqlstring)");
-
 	if (sql_prepare_and_execute(sql, length, bind, bind_count, &port,
 				    &fiber()->gc) != 0)
 		return luaT_error(L);

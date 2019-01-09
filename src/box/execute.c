@@ -146,6 +146,13 @@ static_assert(sizeof(struct port_sql) <= sizeof(struct port),
 static int
 port_sql_dump_msgpack(struct port *port, struct obuf *out);
 
+/**
+ * Dump a built SQL response into Lua stack. The response is
+ * destroyed.
+ *
+ * @param port Port that contains SQL response.
+ * @param L Lua stack.
+ */
 static void
 port_sql_dump_lua(struct port *port, struct lua_State *L);
 
@@ -680,7 +687,7 @@ finish:
 }
 
 /**
- * Push a metadata of the prepared statement to Lua stack.
+ * Serialize a description of the prepared statement.
  *
  * @param stmt Prepared statement.
  * @param L Lua stack.
@@ -693,7 +700,7 @@ lua_sql_get_description(struct sqlite3_stmt *stmt, struct lua_State *L,
 	assert(column_count > 0);
 	lua_createtable(L, column_count, 0);
 	for (int i = 0; i < column_count; ++i) {
-		lua_createtable(L, 2, 0);
+		lua_createtable(L, 0, 2);
 		const char *name = sqlite3_column_name(stmt, i);
 		const char *type = sqlite3_column_datatype(stmt, i);
 		/*
@@ -702,6 +709,7 @@ lua_sql_get_description(struct sqlite3_stmt *stmt, struct lua_State *L,
 		 * column_name simply returns them.
 		 */
 		assert(name != NULL);
+		assert(type != NULL);
 		lua_pushstring(L, name);
 		lua_setfield(L, -2, "name");
 		lua_pushstring(L, type);
@@ -710,13 +718,6 @@ lua_sql_get_description(struct sqlite3_stmt *stmt, struct lua_State *L,
 	}
 }
 
-/**
- * Dump a built response into Lua stack. The response is
- * destroyed.
- *
- * @param port port with EXECUTE response.
- * @param L Lua stack.
- */
 static void
 port_sql_dump_lua(struct port *port, struct lua_State *L)
 {
@@ -728,10 +729,6 @@ port_sql_dump_lua(struct port *port, struct lua_State *L)
 		lua_createtable(L, 0, 2);
 		lua_sql_get_description(stmt, L, column_count);
 		lua_setfield(L, -2, "metadata");
-		/*
-		 * We can use the port_tuple methods, since
-		 * port_sql was inherited from it.
-		 */
 		port_tuple_vtab.dump_lua(port, L);
 		lua_setfield(L, -2, "rows");
 	} else {
