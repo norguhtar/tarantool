@@ -237,8 +237,8 @@ nm(A) ::= id(A). {
 carglist ::= carglist cconsdef.
 carglist ::= .
 cconsdef ::= cconsname ccons.
-cconsname ::= CONSTRAINT nm(X).           {pParse->constraintName = X;}
-cconsname ::= .                           {pParse->constraintName.n = 0;}
+cconsname ::= CONSTRAINT nm(X).           {pParse->constraint->name = X;}
+cconsname ::= .                           {pParse->constraint->name.n = 0;}
 ccons ::= DEFAULT term(X).            {sqlite3AddDefaultValue(pParse,&X);}
 ccons ::= DEFAULT LP expr(X) RP.      {sqlite3AddDefaultValue(pParse,&X);}
 ccons ::= DEFAULT PLUS term(X).       {sqlite3AddDefaultValue(pParse,&X);}
@@ -267,7 +267,7 @@ ccons ::= UNIQUE.                {sql_create_index(pParse,0,0,0,0,
                                                    SQL_INDEX_TYPE_CONSTRAINT_UNIQUE);}
 ccons ::= CHECK LP expr(X) RP.   {sql_add_check_constraint(pParse,&X);}
 ccons ::= REFERENCES nm(T) eidlist_opt(TA) refargs(R).
-                                 {sql_create_foreign_key(pParse, NULL, NULL, NULL, &T, TA, false, R);}
+                                 {sql_create_foreign_key(pParse, NULL, &T, TA, false, R);}
 ccons ::= defer_subclause(D).    {fkey_change_defer_mode(pParse, D);}
 ccons ::= COLLATE id(C).        {sqlite3AddCollateType(pParse, &C);}
 
@@ -308,8 +308,8 @@ init_deferred_pred_opt(A) ::= INITIALLY DEFERRED.     {A = 1;}
 init_deferred_pred_opt(A) ::= INITIALLY IMMEDIATE.    {A = 0;}
 
 tconsdef ::= tconsname tcons.
-tconsname ::= CONSTRAINT nm(X).      {pParse->constraintName = X;}
-tconsname ::= .                      {pParse->constraintName.n = 0;}
+tconsname ::= CONSTRAINT nm(X).      {pParse->constraint->name = X;}
+tconsname ::= .                      {pParse->constraint->name.n = 0;}
 tcons ::= PRIMARY KEY LP sortlist(X) autoinc(I) RP.
                                  {sqlite3AddPrimaryKey(pParse,X,I,0);}
 tcons ::= UNIQUE LP sortlist(X) RP.
@@ -320,7 +320,7 @@ tcons ::= CHECK LP expr(E) RP onconf.
                                  {sql_add_check_constraint(pParse,&E);}
 tcons ::= FOREIGN KEY LP eidlist(FA) RP
           REFERENCES nm(T) eidlist_opt(TA) refargs(R) defer_subclause_opt(D). {
-    sql_create_foreign_key(pParse, NULL, NULL, FA, &T, TA, D, R);
+    sql_create_foreign_key(pParse, FA, &T, TA, D, R);
 }
 %type defer_subclause_opt {int}
 defer_subclause_opt(A) ::= .                    {A = 0;}
@@ -1445,17 +1445,21 @@ cmd ::= ANALYZE nm(X).          {sqlite3Analyze(pParse, &X);}
 
 //////////////////////// ALTER TABLE table ... ////////////////////////////////
 cmd ::= ALTER TABLE fullname(X) RENAME TO nm(Z). {
-  sql_alter_table_rename(pParse,X,&Z);
+  pParse->constraint->table_name = X;
+  sql_alter_table_rename(pParse, &Z);
 }
 
 cmd ::= ALTER TABLE fullname(X) ADD CONSTRAINT nm(Z) FOREIGN KEY
         LP eidlist(FA) RP REFERENCES nm(T) eidlist_opt(TA) refargs(R)
         defer_subclause_opt(D). {
-    sql_create_foreign_key(pParse, X, &Z, FA, &T, TA, D, R);
+    pParse->constraint->table_name = X;
+    pParse->constraint->name = Z;
+    sql_create_foreign_key(pParse, FA, &T, TA, D, R);
 }
 
 cmd ::= ALTER TABLE fullname(X) DROP CONSTRAINT nm(Z). {
-    sql_drop_foreign_key(pParse, X, &Z);
+    pParse->constraint->table_name = X;
+    sql_drop_foreign_key(pParse, &Z);
 }
 
 //////////////////////// COMMON TABLE EXPRESSIONS ////////////////////////////

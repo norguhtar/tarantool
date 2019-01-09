@@ -58,6 +58,17 @@ sqlite3Prepare(sqlite3 * db,	/* Database handle. */
 	Parse sParse;		/* Parsing context */
 	sql_parser_create(&sParse, db);
 	sParse.pReprepare = pReprepare;
+	sParse.constraint = region_alloc(&sParse.region,
+					 sizeof(*sParse.constraint));
+	if (sParse.constraint == NULL) {
+		diag_set(OutOfMemory, sizeof(*sParse.constraint), "region",
+			 "constraint");
+		sql_parser_destroy(&sParse);
+		rc = SQLITE_NOMEM;
+		return rc;
+	}
+	sParse.constraint->name.z = NULL;
+	sParse.constraint->name.n = 0;
 	assert(ppStmt && *ppStmt == 0);
 	/* assert( !db->mallocFailed ); // not true with SQLITE_USE_ALLOCA */
 

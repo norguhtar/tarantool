@@ -2691,6 +2691,17 @@ struct fkey_parse {
 	struct rlist link;
 };
 
+/**
+ * Used to hold intermediate meta-information during
+ * constraint creation or alteration.
+ */
+struct constraint_parse {
+	/** Name of table which constraint belongs to. */
+	struct SrcList *table_name;
+	/** Name of the constraint currently being parsed. */
+	struct Token name;
+};
+
 /*
  * An SQL parser context.  A copy of this structure is passed through
  * the parser and down into all the parser action routine in order to
@@ -2728,7 +2739,6 @@ struct Parse {
 	int nLabel;		/* Number of labels used */
 	int *aLabel;		/* Space to hold the labels */
 	ExprList *pConstExpr;	/* Constant expressions */
-	Token constraintName;	/* Name of the constraint currently being parsed */
 	int nMaxArg;		/* Max args passed to user function by sub-program */
 	int nSelect;		/* Number of SELECT statements seen */
 	int nSelectIndent;	/* How far to indent SELECTTRACE() output */
@@ -2781,6 +2791,10 @@ struct Parse {
 	TriggerPrg *pTriggerPrg;	/* Linked list of coded triggers */
 	With *pWith;		/* Current WITH clause, or NULL */
 	With *pWithToFree;	/* Free this WITH object at the end of the parse */
+	/**
+	 * Constraint currently being parsed.
+	 */
+	struct constraint_parse *constraint;
 	/**
 	 * Number of FK constraints declared within
 	 * CREATE TABLE statement.
@@ -4136,11 +4150,6 @@ fkey_change_defer_mode(struct Parse *parse_context, bool is_deferred);
  * OR to handle <CREATE TABLE ...>
  *
  * @param parse_context Parsing context.
- * @param child Name of table to be altered. NULL on CREATE TABLE
- *              statement processing.
- * @param constraint Name of the constraint to be created. May be
- *                   NULL on CREATE TABLE statement processing.
- *                   Then, auto-generated name is used.
  * @param child_cols Columns of child table involved in FK.
  *                   May be NULL on CREATE TABLE statement processing.
  *                   If so, the last column added is used.
@@ -4152,8 +4161,7 @@ fkey_change_defer_mode(struct Parse *parse_context, bool is_deferred);
  *                algorithms (e.g. CASCADE, RESTRICT etc).
  */
 void
-sql_create_foreign_key(struct Parse *parse_context, struct SrcList *child,
-		       struct Token *constraint, struct ExprList *child_cols,
+sql_create_foreign_key(struct Parse *parse_context, struct ExprList *child_cols,
 		       struct Token *parent, struct ExprList *parent_cols,
 		       bool is_deferred, int actions);
 
@@ -4162,12 +4170,10 @@ sql_create_foreign_key(struct Parse *parse_context, struct SrcList *child,
  * <ALTER TABLE table DROP CONSTRAINT constraint> SQL statement.
  *
  * @param parse_context Parsing context.
- * @param table Table to be altered.
  * @param constraint Name of constraint to be dropped.
  */
 void
-sql_drop_foreign_key(struct Parse *parse_context, struct SrcList *table,
-		     struct Token *constraint);
+sql_drop_foreign_key(struct Parse *parse_context, struct Token *constraint);
 
 void sqlite3Detach(Parse *, Expr *);
 int sqlite3AtoF(const char *z, double *, int);
@@ -4385,12 +4391,10 @@ extern int sqlite3PendingByte;
  * command.
  *
  * @param parse Current parsing context.
- * @param src_tab The table to rename.
  * @param new_name_tk Token containing new name of the table.
  */
 void
-sql_alter_table_rename(struct Parse *parse, struct SrcList *src_tab,
-		       struct Token *new_name_tk);
+sql_alter_table_rename(struct Parse *parse, struct Token *new_name_tk);
 
 /**
  * Return the length (in bytes) of the token that begins at z[0].

@@ -38,9 +38,9 @@
 #include "box/schema.h"
 
 void
-sql_alter_table_rename(struct Parse *parse, struct SrcList *src_tab,
-		       struct Token *new_name_tk)
+sql_alter_table_rename(struct Parse *parse, struct Token *new_name_tk)
 {
+	struct SrcList *src_tab = parse->constraint->table_name;
 	assert(src_tab->nSrc == 1);
 	struct sqlite3 *db = parse->db;
 	char *new_name = sqlite3NameFromToken(db, new_name_tk);

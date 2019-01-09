@@ -566,7 +566,7 @@ sqlite3AddColumn(Parse * pParse, Token * pName, struct type_def *type_def)
 	column_def->affinity = type_def->type;
 	column_def->type = sql_affinity_to_field_type(column_def->affinity);
 	p->def->field_count++;
-	pParse->constraintName.n = 0;
+	pParse->constraint->name.n = 0;
 }
 
 void
@@ -774,9 +774,9 @@ sql_add_check_constraint(struct Parse *parser, struct ExprSpan *span)
 			sqlite3DbFree(parser->db, expr->u.zToken);
 			goto release_expr;
 		}
-		if (parser->constraintName.n) {
+		if (parser->constraint->name.n) {
 			sqlite3ExprListSetName(parser, table->def->opts.checks,
-					       &parser->constraintName, 1);
+					       &parser->constraint->name, 1);
 		}
 	} else {
 release_expr:
@@ -1800,8 +1800,7 @@ columnno_by_name(struct Parse *parse_context, const struct space *space,
 }
 
 void
-sql_create_foreign_key(struct Parse *parse_context, struct SrcList *child,
-		       struct Token *constraint, struct ExprList *child_cols,
+sql_create_foreign_key(struct Parse *parse_context, struct ExprList *child_cols,
 		       struct Token *parent, struct ExprList *parent_cols,
 		       bool is_deferred, int actions)
 {
@@ -1834,10 +1833,10 @@ sql_create_foreign_key(struct Parse *parse_context, struct SrcList *child,
 	} else {
 		child_cols_count = child_cols->nExpr;
 	}
-	assert(!is_alter || (child != NULL && child->nSrc == 1));
 	struct space *child_space = NULL;
 	if (is_alter) {
-		const char *child_name = child->a[0].zName;
+		const char *child_name =
+			parse_context->constraint->table_name->a[0].zName;
 		child_space = space_by_name(child_name);
 		if (child_space == NULL) {
 			diag_set(ClientError, ER_NO_SUCH_SPACE, child_name);
@@ -1884,18 +1883,21 @@ sql_create_foreign_key(struct Parse *parse_context, struct SrcList *child,
 			goto exit_create_fk;
 		}
 	}
-	if (constraint == NULL && !is_alter) {
-		if (parse_context->constraintName.n == 0) {
+	if (!is_alter) {
+		if (parse_context->constraint->name.n == 0) {
 			constraint_name =
 				sqlite3MPrintf(db, "FK_CONSTRAINT_%d_%s",
 					       ++parse_context->fkey_count,
 					       new_tab->def->name);
 		} else {
-			struct Token *cnstr_nm = &parse_context->constraintName;
+			struct Token *cnstr_nm =
+				&parse_context->constraint->name;
 			constraint_name = sqlite3NameFromToken(db, cnstr_nm);
 		}
 	} else {
-		constraint_name = sqlite3NameFromToken(db, constraint);
+		constraint_name =
+			sqlite3NameFromToken(db,
+					     &parse_context->constraint->name);
 	}
 	if (constraint_name == NULL)
 		goto exit_create_fk;
@@ -2016,11 +2018,11 @@ fkey_change_defer_mode(struct Parse *parse_context, bool is_deferred)
 }
 
 void
-sql_drop_foreign_key(struct Parse *parse_context, struct SrcList *table,
-		     struct Token *constraint)
+sql_drop_foreign_key(struct Parse *parse_context, struct Token *constraint)
 {
-	assert(table != NULL && table->nSrc == 1);
-	const char *table_name = table->a[0].zName;
+	const char *table_name =
+		parse_context->constraint->table_name->a[0].zName;
+	assert(table_name != NULL);
 	struct space *child = space_by_name(table_name);
 	if (child == NULL) {
 		diag_set(ClientError, ER_NO_SUCH_SPACE, table_name);
@@ -2311,10 +2313,10 @@ sql_create_index(struct Parse *parse, struct Token *token,
 		}
 	} else {
 		char *constraint_name = NULL;
-		if (parse->constraintName.z != NULL)
+		if (parse->constraint->name.z != NULL)
 			constraint_name =
 				sqlite3NameFromToken(db,
-						     &parse->constraintName);
+						     &parse->constraint->name);
 
 	       /*
 		* This naming is temporary. Now it's not
