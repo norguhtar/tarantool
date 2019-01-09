@@ -1643,8 +1643,10 @@ tx_process_sql(struct cmsg *m)
 	out = msg->connection->tx.p_obuf;
 	struct obuf_svp header_svp;
 	/* Prepare memory for the iproto header. */
-	if (iproto_prepare_header(out, &header_svp, IPROTO_HEADER_LEN) != 0)
+	if (iproto_prepare_header(out, &header_svp, IPROTO_HEADER_LEN) != 0) {
+		port_destroy(&port);
 		goto error;
+	}
 	if (port_dump_msgpack(&port, out) != 0) {
 		obuf_rollback_to_svp(out, &header_svp);
 		goto error;

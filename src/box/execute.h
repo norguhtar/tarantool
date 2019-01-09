@@ -74,7 +74,7 @@ sql_bind_list_decode(const char *data, struct sql_bind **out_bind);
  * @param len Length of @a sql.
  * @param bind Array of parameters.
  * @param bind_count Length of @a bind.
- * @param[out] response Response to store result.
+ * @param[out] port Port to store SQL response.
  * @param region Runtime allocator for temporary objects
  *        (columns, tuples ...).
  *

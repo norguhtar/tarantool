@@ -83,12 +83,15 @@ struct sql_bind {
 };
 
 /**
- * Port implementation used for dump tuples, stored in port_tuple,
- * to obuf or Lua.
+ * The port implementation is used to store SQL responses and
+ * output them to obuf or Lua. This port implementation is
+ * inherited from the port_tuple structure. This allows us to use
+ * this structure in the port_tuple methods instead of port_tuple
+ * itself.
  *
- * All port_tuple methods can be used with port_sql, since
- * port_sql is a structure inherited from port_tuple. Calling
- * port_tuple methods we are going via port_tuple_vtab.
+ * The methods of port_tuple are called via explicit access to
+ * port_tuple_vtab just like C++ does with BaseClass::method, when
+ * it is called in a child method.
  */
 struct port_sql {
 	/* port_tuple to inherit from. */
@@ -96,21 +99,74 @@ struct port_sql {
 	/* Prepared SQL statement. */
 	struct sqlite3_stmt *stmt;
 };
+
 static_assert(sizeof(struct port_sql) <= sizeof(struct port),
 	      "sizeof(struct port_sql) must be <= sizeof(struct port)");
 
+/**
+ * Dump tuples, metadata, or information obtained from an excuted
+ * SQL query and saved to the port in obuf. The port is destroyed.
+ *
+ * Dumped msgpack structure:
+ * +----------------------------------------------+
+ * | IPROTO_BODY: {                               |
+ * |     IPROTO_METADATA: [                       |
+ * |         {IPROTO_FIELD_NAME: column name1},   |
+ * |         {IPROTO_FIELD_NAME: column name2},   |
+ * |         ...                                  |
+ * |     ],                                       |
+ * |                                              |
+ * |     IPROTO_DATA: [                           |
+ * |         tuple, tuple, tuple, ...             |
+ * |     ]                                        |
+ * | }                                            |
+ * +-------------------- OR ----------------------+
+ * | IPROTO_BODY: {                               |
+ * |     IPROTO_SQL_INFO: {                       |
+ * |         SQL_INFO_ROW_COUNT: number           |
+ * |         SQL_INFO_AUTOINCREMENT_IDS: [        |
+ * |             id, id, id, ...                  |
+ * |         ]                                    |
+ * |     }                                        |
+ * | }                                            |
+ * +-------------------- OR ----------------------+
+ * | IPROTO_BODY: {                               |
+ * |     IPROTO_SQL_INFO: {                       |
+ * |         SQL_INFO_ROW_COUNT: number           |
+ * |     }                                        |
+ * | }                                            |
+ * +----------------------------------------------+
+ * @param port Port that contains SQL response.
+ * @param[out] out Output buffer.
+ *
+ * @retval  0 Success.
+ * @retval -1 Memory error.
+ */
 static int
 port_sql_dump_msgpack(struct port *port, struct obuf *out);
-static void
-port_sql_destroy(struct port *base);
 
-const struct port_vtab port_sql_vtab = {
-	.dump_msgpack = port_sql_dump_msgpack,
-	.dump_msgpack_16 = NULL,
-	.dump_lua = NULL,
-	.dump_plain = NULL,
-	.destroy = port_sql_destroy,
+static void
+port_sql_destroy(struct port *base)
+{
+	port_tuple_vtab.destroy(base);
+	sqlite3_finalize(((struct port_sql *)base)->stmt);
+}
+
+static const struct port_vtab port_sql_vtab = {
+	/* .dump_msgpack = */ port_sql_dump_msgpack,
+	/* .dump_msgpack_16 = */ NULL,
+	/* .dump_lua = */ NULL,
+	/* .dump_plain = */ NULL,
+	/* .destroy = */ port_sql_destroy,
 };
+
+static void
+port_sql_create(struct port *port, struct sqlite3_stmt *stmt)
+{
+	port_tuple_create(port);
+	((struct port_sql *)port)->stmt = stmt;
+	port->vtab = &port_sql_vtab;
+}
 
 /**
  * Return a string name of a parameter marker.
@@ -386,11 +442,6 @@ sql_row_to_port(struct sqlite3_stmt *stmt, int column_count,
 	if (tuple == NULL)
 		goto error;
 	region_truncate(region, svp);
-	/*
-	 * The port_tuple_add function can be used with port_sql,
-	 * since it does not call any port_tuple methods and works
-	 * only with fields.
-	 */
 	return port_tuple_add(port, tuple);
 
 error:
@@ -522,6 +573,7 @@ sql_get_description(struct sqlite3_stmt *stmt, struct obuf *out,
 		 * column_name simply returns them.
 		 */
 		assert(name != NULL);
+		assert(type != NULL);
 		size += mp_sizeof_str(strlen(name));
 		size += mp_sizeof_str(strlen(type));
 		char *pos = (char *) obuf_alloc(out, size);
@@ -538,53 +590,6 @@ sql_get_description(struct sqlite3_stmt *stmt, struct obuf *out,
 	return 0;
 }
 
-static void
-port_sql_create(struct port *port, struct sqlite3_stmt *stmt)
-{
-	port_tuple_create(port);
-	((struct port_sql *)port)->stmt = stmt;
-	port->vtab = &port_sql_vtab;
-}
-
-/**
- * Dump tuples, metadata, or information obtained from an excuted
- * SQL query and saved to the port in obuf. The port is destroyed.
- *
- * Dumped msgpack structure:
- * +----------------------------------------------+
- * | IPROTO_BODY: {                               |
- * |     IPROTO_METADATA: [                       |
- * |         {IPROTO_FIELD_NAME: column name1},   |
- * |         {IPROTO_FIELD_NAME: column name2},   |
- * |         ...                                  |
- * |     ],                                       |
- * |                                              |
- * |     IPROTO_DATA: [                           |
- * |         tuple, tuple, tuple, ...             |
- * |     ]                                        |
- * | }                                            |
- * +-------------------- OR ----------------------+
- * | IPROTO_BODY: {                               |
- * |     IPROTO_SQL_INFO: {                       |
- * |         SQL_INFO_ROW_COUNT: number           |
- * |         SQL_INFO_AUTOINCREMENT_IDS: [        |
- * |             id, id, id, ...                  |
- * |         ]                                    |
- * |     }                                        |
- * | }                                            |
- * +-------------------- OR ----------------------+
- * | IPROTO_BODY: {                               |
- * |     IPROTO_SQL_INFO: {                       |
- * |         SQL_INFO_ROW_COUNT: number           |
- * |     }                                        |
- * | }                                            |
- * +----------------------------------------------+
- * @param port port with tuples, metadata or info.
- * @param out Output buffer.
- *
- * @retval  0 Success.
- * @retval -1 Memory error.
- */
 static int
 port_sql_dump_msgpack(struct port *port, struct obuf *out)
 {
@@ -613,7 +618,6 @@ err:
 			goto err;
 		}
 		pos = mp_encode_uint(pos, IPROTO_DATA);
-		/* Calling BaseStruct::methods via its vtab. */
 		if (port_tuple_vtab.dump_msgpack(port, out) < 0)
 			goto err;
 	} else {
@@ -671,14 +675,19 @@ finish:
 	return rc;
 }
 
-static void
-port_sql_destroy(struct port *base)
-{
-	/* Calling BaseStruct::methods via its vtab. */
-	port_tuple_vtab.destroy(base);
-	sqlite3_finalize(((struct port_sql *)base)->stmt);
-}
-
+/**
+ * Execute prepared SQL statement. It uses region to allocate
+ * memory for temporary objects. After this function, REGION will
+ * be in the same state in which it was before this function.
+ *
+ * @param db SQL handle.
+ * @param stmt Prepared statement.
+ * @param[out] port Port to store SQL response.
+ * @param region Region to allocate temporary objects.
+ *
+ * @retval  0 Success.
+ * @retval -1 Error.
+ */
 static inline int
 sql_execute(sqlite3 *db, struct sqlite3_stmt *stmt, struct port *port,
 	    struct region *region)
@@ -711,10 +720,6 @@ sql_prepare_and_execute(const char *sql, int len, const struct sql_bind *bind,
 {
 	struct sqlite3_stmt *stmt;
 	sqlite3 *db = sql_get();
-	if (db == NULL) {
-		diag_set(ClientError, ER_LOADING);
-		return -1;
-	}
 	if (sqlite3_prepare_v2(db, sql, len, &stmt, NULL) != SQLITE_OK) {
 		diag_set(ClientError, ER_SQL_EXECUTE, sqlite3_errmsg(db));
 		return -1;
