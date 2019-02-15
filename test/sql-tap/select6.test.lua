@@ -13,7 +13,7 @@ test:plan(88)
 --    May you share freely, never taking more than you give.
 --
 -------------------------------------------------------------------------
--- This file implements regression tests for SQLite library.  The
+-- This file implements regression tests for sql library.  The
 -- focus of this file is testing SELECT statements that contain
 -- subqueries in their FROM clause.
 --
@@ -657,7 +657,7 @@ test:do_execsql2_test(
 -- The following procedure compiles the SQL given as an argument and returns
 -- TRUE if that SQL uses any transient tables and returns FALSE if no
 -- transient tables are used.  This is used to make sure that the
--- sqliteFlattenSubquery() routine in select.c is doing its job.
+-- sqlFlattenSubquery() routine in select.c is doing its job.
 --
 
 
@@ -842,7 +842,7 @@ test:do_execsql_test(
 test:do_execsql_test(
     "select6-9.7",
     [[
-        SELECT x FROM (SELECT x FROM t1 LIMIT -1) LIMIT 3;
+        SELECT x FROM (SELECT x FROM t1 LIMIT 101) LIMIT 3;
     ]], {
         -- <select6-9.7>
         1, 2, 3
@@ -852,7 +852,7 @@ test:do_execsql_test(
 test:do_execsql_test(
     "select6-9.8",
     [[
-        SELECT x FROM (SELECT x FROM t1 LIMIT -1);
+        SELECT x FROM (SELECT x FROM t1 LIMIT 101);
     ]], {
         -- <select6-9.8>
         1, 2, 3, 4
@@ -862,7 +862,7 @@ test:do_execsql_test(
 test:do_execsql_test(
     "select6-9.9",
     [[
-        SELECT x FROM (SELECT x FROM t1 LIMIT -1 OFFSET 1);
+        SELECT x FROM (SELECT x FROM t1 LIMIT 10-1 OFFSET 1);
     ]], {
         -- <select6-9.9>
         2, 3, 4
@@ -872,7 +872,7 @@ test:do_execsql_test(
 test:do_execsql_test(
     "select6-9.10",
     [[
-        SELECT x, y FROM (SELECT x, (SELECT 10+x) y FROM t1 LIMIT -1 OFFSET 1);
+        SELECT x, y FROM (SELECT x, (SELECT 10+x) y FROM t1 LIMIT 9-1 OFFSET 1);
     ]], {
         -- <select6-9.10>
         2, 12, 3, 13, 4, 14
@@ -882,7 +882,7 @@ test:do_execsql_test(
 test:do_execsql_test(
     "select6-9.11",
     [[
-        SELECT x, y FROM (SELECT x, (SELECT 10)+x y FROM t1 LIMIT -1 OFFSET 1);
+        SELECT x, y FROM (SELECT x, (SELECT 10)+x y FROM t1 LIMIT 7-1 OFFSET 1);
     ]], {
         -- <select6-9.11>
         2, 12, 3, 13, 4, 14

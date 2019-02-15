@@ -13,7 +13,7 @@ test:plan(3)
 --    May you share freely, never taking more than you give.
 --
 -------------------------------------------------------------------------
--- This file implements regression tests for SQLite library. 
+-- This file implements regression tests for sql library.
 --
 -- The focus of this file is testing that LIMIT and OFFSET work for
 -- unusual combinations SELECT statements.
@@ -69,7 +69,7 @@ test:do_execsql_test(
         SELECT DISTINCT artist,sum(timesplayed) AS total      
         FROM songs      
         GROUP BY LOWER(artist)      
-        LIMIT -1 OFFSET 2
+        LIMIT 1000 OFFSET 2
     ]], subrange(result, 5, #result))
 
 test:finish_test()

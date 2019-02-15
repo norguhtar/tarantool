@@ -32,6 +32,7 @@
 #include "tuple_hash.h"
 #include "third_party/PMurHash.h"
 #include "coll.h"
+#include <math.h>
 
 /* Tuple and key hasher */
 namespace {
@@ -213,7 +214,7 @@ static const hasher_signature hash_arr[] = {
 
 #undef HASHER
 
-template <bool has_optional_parts>
+template <bool has_optional_parts, bool has_json_paths>
 uint32_t
 tuple_hash_slowpath(const struct tuple *tuple, struct key_def *key_def);
 
@@ -222,7 +223,7 @@ key_hash_slowpath(const char *key, struct key_def *key_def);
 
 void
 tuple_hash_func_set(struct key_def *key_def) {
-	if (key_def->is_nullable)
+	if (key_def->is_nullable || key_def->has_json_paths)
 		goto slowpath;
 	/*
 	 * Check that key_def defines sequential a key without holes
@@ -256,10 +257,17 @@ tuple_hash_func_set(struct key_def *key_def) {
 	}
 
 slowpath:
-	if (key_def->has_optional_parts)
-		key_def->tuple_hash = tuple_hash_slowpath<true>;
-	else
-		key_def->tuple_hash = tuple_hash_slowpath<false>;
+	if (key_def->has_optional_parts) {
+		if (key_def->has_json_paths)
+			key_def->tuple_hash = tuple_hash_slowpath<true, true>;
+		else
+			key_def->tuple_hash = tuple_hash_slowpath<true, false>;
+	} else {
+		if (key_def->has_json_paths)
+			key_def->tuple_hash = tuple_hash_slowpath<false, true>;
+		else
+			key_def->tuple_hash = tuple_hash_slowpath<false, false>;
+	}
 	key_def->key_hash = key_hash_slowpath;
 }
 
@@ -267,6 +275,7 @@ uint32_t
 tuple_hash_field(uint32_t *ph1, uint32_t *pcarry, const char **field,
 		 struct coll *coll)
 {
+	char buf[9]; /* enough to store MP_INT/MP_UINT */
 	const char *f = *field;
 	uint32_t size;
 
@@ -282,6 +291,33 @@ tuple_hash_field(uint32_t *ph1, uint32_t *pcarry, const char **field,
 		if (coll != NULL)
 			return coll->hash(f, size, ph1, pcarry, coll);
 		break;
+	case MP_FLOAT:
+	case MP_DOUBLE: {
+		/*
+		 * If a floating point number can be stored as an integer,
+		 * convert it to MP_INT/MP_UINT before hashing so that we
+		 * can select integer values by floating point keys and
+		 * vice versa.
+		 */
+		double iptr;
+		double val = mp_typeof(**field) == MP_FLOAT ?
+			     mp_decode_float(field) :
+			     mp_decode_double(field);
+		if (!isfinite(val) || modf(val, &iptr) != 0 ||
+		    val < -exp2(63) || val >= exp2(64)) {
+			size = *field - f;
+			break;
+		}
+		char *data;
+		if (val >= 0)
+			data = mp_encode_uint(buf, (uint64_t)val);
+		else
+			data = mp_encode_int(buf, (int64_t)val);
+		size = data - buf;
+		assert(size <= sizeof(buf));
+		f = buf;
+		break;
+	}
 	default:
 		mp_next(field);
 		size = *field - f;  /* calculate the size of field */
@@ -319,10 +355,11 @@ tuple_hash_key_part(uint32_t *ph1, uint32_t *pcarry, const struct tuple *tuple,
 	return tuple_hash_field(ph1, pcarry, &field, part->coll);
 }
 
-template <bool has_optional_parts>
+template <bool has_optional_parts, bool has_json_paths>
 uint32_t
 tuple_hash_slowpath(const struct tuple *tuple, struct key_def *key_def)
 {
+	assert(has_json_paths == key_def->has_json_paths);
 	assert(has_optional_parts == key_def->has_optional_parts);
 	uint32_t h = HASH_SEED;
 	uint32_t carry = 0;
@@ -331,9 +368,14 @@ tuple_hash_slowpath(const struct tuple *tuple, struct key_def *key_def)
 	struct tuple_format *format = tuple_format(tuple);
 	const char *tuple_raw = tuple_data(tuple);
 	const uint32_t *field_map = tuple_field_map(tuple);
-	const char *field =
-		tuple_field_by_part_raw(format, tuple_raw, field_map,
-					key_def->parts);
+	const char *field;
+	if (has_json_paths) {
+		field = tuple_field_raw_by_part(format, tuple_raw, field_map,
+						key_def->parts);
+	} else {
+		field = tuple_field_raw(format, tuple_raw, field_map,
+					prev_fieldno);
+	}
 	const char *end = (char *)tuple + tuple_size(tuple);
 	if (has_optional_parts && field == NULL) {
 		total_size += tuple_hash_null(&h, &carry);
@@ -348,8 +390,13 @@ tuple_hash_slowpath(const struct tuple *tuple, struct key_def *key_def)
 		 */
 		if (prev_fieldno + 1 != key_def->parts[part_id].fieldno) {
 			struct key_part *part = &key_def->parts[part_id];
-			field = tuple_field_by_part_raw(format, tuple_raw,
-							field_map, part);
+			if (has_json_paths) {
+				field = tuple_field_raw_by_part(format, tuple_raw,
+								field_map, part);
+			} else {
+				field = tuple_field_raw(format, tuple_raw, field_map,
+						    part->fieldno);
+			}
 		}
 		if (has_optional_parts && (field == NULL || field >= end)) {
 			total_size += tuple_hash_null(&h, &carry);

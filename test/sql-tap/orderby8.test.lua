@@ -13,7 +13,7 @@ test:plan(201)
 --    May you share freely, never taking more than you give.
 --
 -------------------------------------------------------------------------
--- This file implements regression tests for SQLite library.  The
+-- This file implements regression tests for sql library.  The
 -- focus of this file is testing ORDER BY and LIMIT on tables with
 -- many columns.
 --
@@ -44,7 +44,7 @@ for i=1,200 do
     rs = rs..", x+"..i
     test:do_execsql_test(
         "1."..i,
-        "SELECT x FROM (SELECT "..rs.." FROM t1 ORDER BY x LIMIT -1)",
+        "SELECT x FROM (SELECT "..rs.." FROM t1 ORDER BY x LIMIT 100)",
         {
             1, 2, 3, 4, 5, 6, 7, 8, 9
     })

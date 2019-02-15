@@ -1,6 +1,6 @@
 #!/usr/bin/env tarantool
 test = require("sqltester")
-test:plan(58)
+test:plan(61)
 
 --!./tcltestrunner.lua
 -- 2005 November 2
@@ -13,7 +13,7 @@ test:plan(58)
 --    May you share freely, never taking more than you give.
 --
 -------------------------------------------------------------------------
--- This file implements regression tests for SQLite library.  The
+-- This file implements regression tests for sql library.  The
 -- focus of this file is testing CHECK constraints
 --
 -- $Id: check.test,v 1.13 2009/06/05 17:09:12 drh Exp $
@@ -228,7 +228,7 @@ test:do_execsql_test(
     })
 
 --db("close")
---sqlite3("db", "test.db")
+--sql("db", "test.db")
 test:do_execsql_test(
     "check-2.3",
     [[
@@ -324,11 +324,11 @@ test:do_catchsql_test(
     })
 
 
---    MUST_WORK_TEST use smth instead of sqlite_master
+--    MUST_WORK_TEST use smth instead of sql_master
 --    test:do_execsql_test(
 --        "check-3.2",
 --        [[
---            SELECT name FROM sqlite_master ORDER BY name
+--            SELECT name FROM sql_master ORDER BY name
 --        ]], {
 --            -- <check-3.2>
 --            "t1", "t2"
@@ -348,11 +348,11 @@ test:do_catchsql_test(
         -- </check-3.3>
     })
 
---    MUST_WORK_TEST use smth instead of sqlite_master
+--    MUST_WORK_TEST use smth instead of sql_master
 --    test:do_execsql_test(
 --        "check-3.4",
 --        [[
---            SELECT name FROM sqlite_master ORDER BY name
+--            SELECT name FROM sql_master ORDER BY name
 --        ]], {
 --            -- <check-3.4>
 --            "t1", "t2"
@@ -372,11 +372,11 @@ test:do_catchsql_test(
         -- </check-3.5>
     })
 
---    MUST_WORK_TEST use smth instead of sqlite_master
+--    MUST_WORK_TEST use smth instead of sql_master
 --    test:do_execsql_test(
 --        "check-3.6",
 --        [[
---            SELECT name FROM sqlite_master ORDER BY name
+--            SELECT name FROM sql_master ORDER BY name
 --        ]], {
 --            -- <check-3.6>
 --            "t1", "t2"
@@ -420,7 +420,7 @@ test:do_catchsql_test(
 test:do_execsql_test(
     "check-4.1",
     [[
-        CREATE TABLE t4(x  INT primary key, y INT ,
+        CREATE TABLE t4(x INT UNIQUE, y INT, z INT PRIMARY KEY
           CHECK (
                x+y==11
             OR x*y==12
@@ -437,8 +437,8 @@ test:do_execsql_test(
 test:do_execsql_test(
     "check-4.2",
     [[
-        INSERT INTO t4 VALUES(1,10);
-        SELECT * FROM t4
+        INSERT INTO t4 VALUES(1,10,1);
+        SELECT x,y FROM t4
     ]], {
         -- <check-4.2>
         1, 10
@@ -449,7 +449,7 @@ test:do_execsql_test(
     "check-4.3",
     [[
         UPDATE t4 SET x=4, y=3;
-        SELECT * FROM t4
+        SELECT x,y FROM t4
     ]], {
         -- <check-4.3>
         4, 3
@@ -460,7 +460,7 @@ test:do_execsql_test(
     "check-4.4",
     [[
         UPDATE t4 SET x=12, y=2;
-        SELECT * FROM t4
+        SELECT x,y FROM t4
     ]], {
         -- <check-4.4>
         12, 2
@@ -471,7 +471,7 @@ test:do_execsql_test(
     "check-4.5",
     [[
         UPDATE t4 SET x=12, y=-22;
-        SELECT * FROM t4
+        SELECT x,y FROM t4
     ]], {
         -- <check-4.5>
         12, -22
@@ -491,7 +491,7 @@ test:do_catchsql_test(
 test:do_execsql_test(
     "check-4.7",
     [[
-        SELECT * FROM t4;
+        SELECT x,y FROM t4;
     ]], {
         -- <check-4.7>
         12, -22
@@ -709,7 +709,7 @@ if (0 > 0) then
 test:do_test(
     7.4,
     function()
-        --sqlite3("db2", "test.db")
+        --sql("db2", "test.db")
         return test:execsql(" SELECT * FROM t6 ") --, "db2")
     end, {
         -- <7.4>
@@ -770,6 +770,41 @@ test:do_execsql_test(
         -- <8.1>
 
         -- </8.1>
+    })
+
+-- gh-3345 : the test checks that ON CONFLICT REPLACE
+-- is not allowed for CHECK constraint.
+test:do_catchsql_test(
+    9.1,
+    [[
+        CREATE TABLE t101 (a INT primary key, b INT, CHECK(b < 10)
+        ON CONFLICT REPLACE)
+    ]], {
+        -- <9.1>
+        1, "keyword \"ON\" is reserved"
+        -- </9.1>
+    })
+
+test:do_catchsql_test(
+    9.2,
+    [[
+        CREATE TABLE t101 (a INT primary key, b INT, CHECK(b < 10)
+        ON CONFLICT ABORT)
+    ]], {
+        -- <9.2>
+        1, "keyword \"ON\" is reserved"
+        -- </9.2>
+    })
+
+test:do_catchsql_test(
+    9.3,
+    [[
+        CREATE TABLE t101 (a INT primary key, b INT, CHECK(b < 10)
+        ON CONFLICT ROLLBACK)
+    ]], {
+        -- <9.3>
+        1, "keyword \"ON\" is reserved"
+        -- </9.3>
     })
 
 test:finish_test()

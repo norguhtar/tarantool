@@ -73,20 +73,23 @@ enum on_conflict_action {
 	on_conflict_action_MAX
 };
 
-enum affinity_type {
-    AFFINITY_UNDEFINED = 0,
-    AFFINITY_BLOB = 'A',
-    AFFINITY_TEXT = 'B',
-    AFFINITY_NUMERIC = 'C',
-    AFFINITY_INTEGER = 'D',
-    AFFINITY_REAL = 'E',
+/** \endcond public */
+
+enum {
+	/**
+	 * This mask allows to store in VdbeOp.p5 operand of
+	 * OP_Eq, OP_Lt etc opcodes field type alongside with
+	 * flags.
+	 */
+	FIELD_TYPE_MASK = 15
 };
 
-/** String name of @a type. */
-const char *
-affinity_type_str(enum affinity_type type);
-
-/** \endcond public */
+/**
+ * For detailed explanation see context of OP_Eq, OP_Lt etc
+ * opcodes in vdbe.c.
+ */
+static_assert((int) field_type_MAX <= (int) FIELD_TYPE_MASK,
+	      "values of enum field_type should fit into 4 bits of VdbeOp.p5");
 
 extern const char *field_type_strs[];
 
@@ -124,11 +127,6 @@ struct field_def {
 	 * then UNKNOWN is stored for it.
 	 */
 	enum field_type type;
-	/**
-	* Affinity type for comparations in SQL.
-	* FIXME: Remove affinity after types redesign in SQL.
-	*/
-	enum affinity_type affinity;
 	/** 0-terminated field name. */
 	char *name;
 	/** True, if a field can store NULL. */

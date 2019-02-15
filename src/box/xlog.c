@@ -663,7 +663,25 @@ xdir_format_filename(struct xdir *dir, int64_t signature,
 	return filename;
 }
 
-int
+static void
+xdir_say_gc(int result, int errorno, const char *filename)
+{
+	if (result == 0) {
+		say_info("removed %s", filename);
+	} else if (errorno != ENOENT) {
+		errno = errorno;
+		say_syserror("error while removing %s", filename);
+	}
+}
+
+static int
+xdir_complete_gc(eio_req *req)
+{
+	xdir_say_gc(req->result, req->errorno, EIO_PATH(req));
+	return 0;
+}
+
+void
 xdir_collect_garbage(struct xdir *dir, int64_t signature, unsigned flags)
 {
 	struct vclock *vclock;
@@ -671,29 +689,16 @@ xdir_collect_garbage(struct xdir *dir, int64_t signature, unsigned flags)
 	       vclock_sum(vclock) < signature) {
 		char *filename = xdir_format_filename(dir, vclock_sum(vclock),
 						      NONE);
-		int rc;
-		if (flags & XDIR_GC_USE_COIO)
-			rc = coio_unlink(filename);
+		if (flags & XDIR_GC_ASYNC)
+			eio_unlink(filename, 0, xdir_complete_gc, NULL);
 		else
-			rc = unlink(filename);
-		if (rc < 0) {
-			if (errno != ENOENT) {
-				say_syserror("error while removing %s",
-					     filename);
-				diag_set(SystemError,
-					 "failed to unlink file '%s'",
-					 filename);
-				return -1;
-			}
-		} else
-			say_info("removed %s", filename);
+			xdir_say_gc(unlink(filename), errno, filename);
 		vclockset_remove(&dir->index, vclock);
 		free(vclock);
 
 		if (flags & XDIR_GC_REMOVE_ONE)
 			break;
 	}
-	return 0;
 }
 
 void

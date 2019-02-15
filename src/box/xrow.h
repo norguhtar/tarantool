@@ -52,12 +52,6 @@ enum {
 	IPROTO_HEADER_LEN = 28,
 	/** 7 = sizeof(iproto_body_bin). */
 	IPROTO_SELECT_HEADER_LEN = IPROTO_HEADER_LEN + 7,
-	/**
-	 * Header of message + header of body with one or two
-	 * keys: IPROTO_DATA and IPROTO_METADATA or
-	 * IPROTO_SQL_INFO. 1 == mp_sizeof_map(<=15).
-	 */
-	IPROTO_SQL_HEADER_LEN = IPROTO_HEADER_LEN + 1,
 };
 
 struct xrow_header {
@@ -355,6 +349,37 @@ xrow_decode_vclock(struct xrow_header *row, struct vclock *vclock)
 }
 
 /**
+ * Encode a response to subscribe request.
+ * @param row[out] Row to encode into.
+ * @param replicaset_uuid.
+ * @param vclock.
+ *
+ * @retval 0 Success.
+ * @retval -1 Memory error.
+ */
+int
+xrow_encode_subscribe_response(struct xrow_header *row,
+			      const struct tt_uuid *replicaset_uuid,
+			      const struct vclock *vclock);
+
+/**
+ * Decode a response to subscribe request.
+ * @param row Row to decode.
+ * @param[out] replicaset_uuid.
+ * @param[out] vclock.
+ *
+ * @retval 0 Success.
+ * @retval -1 Memory or format error.
+ */
+static inline int
+xrow_decode_subscribe_response(struct xrow_header *row,
+			       struct tt_uuid *replicaset_uuid,
+			       struct vclock *vclock)
+{
+	return xrow_decode_subscribe(row, replicaset_uuid, NULL, vclock, NULL);
+}
+
+/**
  * Encode a heartbeat message.
  * @param row[out] Row to encode into.
  * @param replica_id Instance id.
@@ -491,11 +516,10 @@ xrow_decode_sql(const struct xrow_header *row, struct sql_request *request);
  * @param svp Savepoint of the header beginning.
  * @param sync Request sync.
  * @param schema_version Schema version.
- * @param keys Count of keys in the body.
  */
 void
 iproto_reply_sql(struct obuf *buf, struct obuf_svp *svp, uint64_t sync,
-		 uint32_t schema_version, int keys);
+		 uint32_t schema_version);
 
 /**
  * Write an IPROTO_CHUNK header from a specified position in a
@@ -607,7 +631,7 @@ vclock_follow_xrow(struct vclock* vclock, const struct xrow_header *row)
 {
 	assert(row);
 	assert(row->replica_id < VCLOCK_MAX);
-	if (row->lsn <= vclock->lsn[row->replica_id]) {
+	if (row->lsn <= vclock_get(vclock, row->replica_id)) {
 		struct request req;
 		const char *req_str = "n/a";
 		if (xrow_decode_dml((struct xrow_header *)row, &req, 0) == 0)
@@ -616,7 +640,7 @@ vclock_follow_xrow(struct vclock* vclock, const struct xrow_header *row)
 		panic("LSN for %u is used twice or COMMIT order is broken: "
 		      "confirmed: %lld, new: %lld, req: %s",
 		      (unsigned) row->replica_id,
-		      (long long) vclock->lsn[row->replica_id],
+		      (long long) vclock_get(vclock, row->replica_id),
 		      (long long) row->lsn,
 		      req_str);
 	}
@@ -763,6 +787,26 @@ static inline void
 xrow_decode_vclock_xc(struct xrow_header *row, struct vclock *vclock)
 {
 	if (xrow_decode_vclock(row, vclock) != 0)
+		diag_raise();
+}
+
+/** @copydoc xrow_encode_subscribe_response. */
+static inline void
+xrow_encode_subscribe_response_xc(struct xrow_header *row,
+				  const struct tt_uuid *replicaset_uuid,
+				  const struct vclock *vclock)
+{
+	if (xrow_encode_subscribe_response(row, replicaset_uuid, vclock) != 0)
+		diag_raise();
+}
+
+/** @copydoc xrow_decode_subscribe_response. */
+static inline void
+xrow_decode_subscribe_response_xc(struct xrow_header *row,
+				  struct tt_uuid *replicaset_uuid,
+				  struct vclock *vclock)
+{
+	if (xrow_decode_subscribe_response(row, replicaset_uuid, vclock) != 0)
 		diag_raise();
 }
 

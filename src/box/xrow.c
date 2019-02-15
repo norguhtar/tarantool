@@ -508,17 +508,11 @@ error:
 
 void
 iproto_reply_sql(struct obuf *buf, struct obuf_svp *svp, uint64_t sync,
-		 uint32_t schema_version, int keys)
+		 uint32_t schema_version)
 {
 	char *pos = (char *) obuf_svp_to_ptr(buf, svp);
 	iproto_header_encode(pos, IPROTO_OK, sync, schema_version,
 			     obuf_size(buf) - svp->used - IPROTO_HEADER_LEN);
-	/*
-	 * MessagePack encodes value <= 15 as
-	 * bitwise OR with 0x80.
-	 */
-	assert(keys <= 15);
-	*(pos + IPROTO_HEADER_LEN) = 0x80 | keys;
 }
 
 void
@@ -629,9 +623,11 @@ request_str(const struct request *request)
 	char *buf = tt_static_buf();
 	char *end = buf + TT_STATIC_BUF_LEN;
 	char *pos = buf;
-	pos += snprintf(pos, end - pos, "{type: '%s', lsn: %lld, "\
+	pos += snprintf(pos, end - pos, "{type: '%s', "
+			"replica_id: %u, lsn: %lld, "
 			"space_id: %u, index_id: %u",
 			iproto_type_name(request->type),
+			(unsigned) request->header->replica_id,
 			(long long) request->header->lsn,
 			(unsigned) request->space_id,
 			(unsigned) request->index_id);
@@ -1168,6 +1164,35 @@ xrow_encode_vclock(struct xrow_header *row, const struct vclock *vclock)
 	data = mp_encode_map(data, 1);
 	data = mp_encode_uint(data, IPROTO_VCLOCK);
 	data = mp_encode_vclock(data, vclock);
+	assert(data <= buf + size);
+	row->body[0].iov_base = buf;
+	row->body[0].iov_len = (data - buf);
+	row->bodycnt = 1;
+	row->type = IPROTO_OK;
+	return 0;
+}
+
+int
+xrow_encode_subscribe_response(struct xrow_header *row,
+			       const struct tt_uuid *replicaset_uuid,
+			       const struct vclock *vclock)
+{
+	memset(row, 0, sizeof(*row));
+	size_t size = mp_sizeof_map(2) +
+		      mp_sizeof_uint(IPROTO_VCLOCK) + mp_sizeof_vclock(vclock) +
+		      mp_sizeof_uint(IPROTO_CLUSTER_UUID) +
+		      mp_sizeof_str(UUID_STR_LEN);
+	char *buf = (char *) region_alloc(&fiber()->gc, size);
+	if (buf == NULL) {
+		diag_set(OutOfMemory, size, "region_alloc", "buf");
+		return -1;
+	}
+	char *data = buf;
+	data = mp_encode_map(data, 2);
+	data = mp_encode_uint(data, IPROTO_VCLOCK);
+	data = mp_encode_vclock(data, vclock);
+	data = mp_encode_uint(data, IPROTO_CLUSTER_UUID);
+	data = xrow_encode_uuid(data, replicaset_uuid);
 	assert(data <= buf + size);
 	row->body[0].iov_base = buf;
 	row->body[0].iov_len = (data - buf);

@@ -68,7 +68,7 @@ struct sql_response {
  *        the named parameter, value - scalar value of the
  *        parameter. Named and positioned parameters can be mixed.
  *        For more details
- *        @sa https://www.sqlite.org/lang_expr.html#varparam.
+ *        @sa https://www.sql.org/lang_expr.html#varparam.
  * @param[out] out_bind Pointer to save decoded parameters.
  *
  * @retval  >= 0 Number of decoded parameters.
@@ -105,14 +105,13 @@ sql_bind_list_decode(const char *data, struct sql_bind **out_bind);
  * | }                                            |
  * +----------------------------------------------+
  * @param response EXECUTE response.
- * @param[out] keys number of keys in dumped map.
  * @param out Output buffer.
  *
  * @retval  0 Success.
  * @retval -1 Memory error.
  */
 int
-sql_response_dump(struct sql_response *response, int *keys, struct obuf *out);
+sql_response_dump(struct sql_response *response, struct obuf *out);
 
 /**
  * Prepare and execute an SQL statement.

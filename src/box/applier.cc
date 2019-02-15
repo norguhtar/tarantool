@@ -391,6 +391,7 @@ applier_subscribe(struct applier *applier)
 	struct ibuf *ibuf = &applier->ibuf;
 	struct xrow_header row;
 	struct vclock remote_vclock_at_subscribe;
+	struct tt_uuid cluster_id = uuid_nil;
 
 	xrow_encode_subscribe_xc(&row, &REPLICASET_UUID, &INSTANCE_UUID,
 				 &replicaset.vclock);
@@ -408,9 +409,26 @@ applier_subscribe(struct applier *applier)
 		/*
 		 * In case of successful subscribe, the server
 		 * responds with its current vclock.
+		 *
+		 * Tarantool > 2.1.1 also sends its cluster id to
+		 * the replica, and replica has to check whether
+		 * its and master's cluster ids match.
 		 */
 		vclock_create(&remote_vclock_at_subscribe);
-		xrow_decode_vclock_xc(&row, &remote_vclock_at_subscribe);
+		xrow_decode_subscribe_response_xc(&row,
+						  &cluster_id,
+						  &remote_vclock_at_subscribe);
+		/*
+		 * If master didn't send us its cluster id
+		 * assume that it has done all the checks.
+		 * In this case cluster_id will remain zero.
+		 */
+		if (!tt_uuid_is_nil(&cluster_id) &&
+		    !tt_uuid_is_equal(&cluster_id, &REPLICASET_UUID)) {
+			tnt_raise(ClientError, ER_REPLICASET_UUID_MISMATCH,
+				  tt_uuid_str(&cluster_id),
+				  tt_uuid_str(&REPLICASET_UUID));
+		}
 	}
 	/*
 	 * Tarantool < 1.6.7:
@@ -512,48 +530,46 @@ applier_subscribe(struct applier *applier)
 
 		applier->lag = ev_now(loop()) - row.tm;
 		applier->last_row_time = ev_monotonic_now(loop());
-
+		struct replica *replica = replica_by_id(row.replica_id);
+		struct latch *latch = (replica ? &replica->order_latch :
+				       &replicaset.applier.order_latch);
+		/*
+		 * In a full mesh topology, the same set of changes
+		 * may arrive via two concurrently running appliers.
+		 * Hence we need a latch to strictly order all changes
+		 * that belong to the same server id.
+		 */
+		latch_lock(latch);
 		if (vclock_get(&replicaset.vclock, row.replica_id) < row.lsn) {
-			/**
-			 * Promote the replica set vclock before
-			 * applying the row. If there is an
-			 * exception (conflict) applying the row,
-			 * the row is skipped when the replication
-			 * is resumed.
-			 */
-			vclock_follow_xrow(&replicaset.vclock, &row);
-			struct replica *replica = replica_by_id(row.replica_id);
-			struct latch *latch = (replica ? &replica->order_latch :
-					       &replicaset.applier.order_latch);
-			/*
-			 * In a full mesh topology, the same set
-			 * of changes may arrive via two
-			 * concurrently running appliers. Thanks
-			 * to vclock_follow() above, the first row
-			 * in the set will be skipped - but the
-			 * remaining may execute out of order,
-			 * when the following xstream_write()
-			 * yields on WAL. Hence we need a latch to
-			 * strictly order all changes which belong
-			 * to the same server id.
-			 */
-			latch_lock(latch);
 			int res = xstream_write(applier->subscribe_stream, &row);
-			latch_unlock(latch);
 			if (res != 0) {
 				struct error *e = diag_last_error(diag_get());
-				/**
-				 * Silently skip ER_TUPLE_FOUND error if such
-				 * option is set in config.
+				/*
+				 * In case of ER_TUPLE_FOUND error and enabled
+				 * replication_skip_conflict configuration
+				 * option, skip applying the foreign row and
+				 * replace it with NOP in the local write ahead
+				 * log.
 				 */
 				if (e->type == &type_ClientError &&
 				    box_error_code(e) == ER_TUPLE_FOUND &&
-				    replication_skip_conflict)
+				    replication_skip_conflict) {
 					diag_clear(diag_get());
-				else
-					diag_raise();
+					struct xrow_header nop;
+					nop.type = IPROTO_NOP;
+					nop.bodycnt = 0;
+					nop.replica_id = row.replica_id;
+					nop.lsn = row.lsn;
+					res = xstream_write(applier->subscribe_stream, &nop);
+				}
+			}
+			if (res != 0) {
+				latch_unlock(latch);
+				diag_raise();
 			}
 		}
+		latch_unlock(latch);
+
 		if (applier->state == APPLIER_SYNC ||
 		    applier->state == APPLIER_FOLLOW)
 			fiber_cond_signal(&applier->writer_cond);

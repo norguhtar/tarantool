@@ -1,6 +1,6 @@
 #!/usr/bin/env tarantool
 test = require("sqltester")
-test:plan(523)
+test:plan(520)
 
 --!./tcltestrunner.lua
 -- 2010 July 16
@@ -300,7 +300,7 @@ test:do_select_tests(
 
 --
 -- The following block of tests - e_select-1.4.* - test that the description
--- of cartesian joins in the SELECT documentation is consistent with SQLite.
+-- of cartesian joins in the SELECT documentation is consistent with sql.
 -- In doing so, we test the following three requirements as a side-effect:
 --
 -- EVIDENCE-OF: R-49872-03192 If the join-operator is "CROSS JOIN",
@@ -837,14 +837,14 @@ end
 -- MUST_WORK_TEST prepared statement
 if 0>0 then
 for _ in X(0, "X!foreach", [=[["tn select nCol","\n  1   \"SELECT a,b,c FROM z1\" 3\n  2   \"SELECT a,b,c FROM z1 NATURAL JOIN z3\"  3\n  3   \"SELECT z1.a,z1.b,z1.c FROM z1 NATURAL JOIN z3\" 3\n  4   \"SELECT z3.a,z3.b FROM z1 NATURAL JOIN z3\" 2\n  5   \"SELECT z1.a,z1.b,z1.c, z3.a,z3.b FROM z1 NATURAL JOIN z3\" 5\n  6   \"SELECT 1, 2, z1.a,z1.b,z1.c FROM z1\" 5\n  7   \"SELECT a, a,b,c, b, c FROM z1\" 6\n"]]=]) do
-    stmt = sqlite3_prepare_v2("db", select, -1, "DUMMY")
-    test:do_sqlite3_column_count_test(
+    stmt = sql_prepare_v2("db", select, -1, "DUMMY")
+    test:do_sql_column_count_test(
         "e_select-4.3."..tn,
         stmt, {
             nCol
         })
 
-    sqlite3_finalize(stmt)
+    sql_finalize(stmt)
 end
 end
 -- In lang_select.html, a non-aggregate query is defined as any simple SELECT
@@ -909,7 +909,7 @@ test:do_select_tests(
 --
 --   Note: The results of many of the queries in this block of tests are
 --   technically undefined, as the documentation does not specify which row
---   SQLite will arbitrarily select to use for the evaluation of the
+--   sql will arbitrarily select to use for the evaluation of the
 --   non-aggregate expressions.
 --
 test:drop_all_tables()
@@ -965,16 +965,16 @@ test:do_select_tests(
 if 0>0 then
 for _ in X(0, "X!foreach", [=[["tn select","\n  8.1  \"SELECT count(*) FROM a1\"\n  8.2  \"SELECT count(*) FROM a1 WHERE 0\"\n  8.3  \"SELECT count(*) FROM a1 WHERE 1\"\n  8.4  \"SELECT max(a1.one)+min(two), a1.one, two, * FROM a1, a2 WHERE 1\"\n  8.5  \"SELECT max(a1.one)+min(two), a1.one, two, * FROM a1, a2 WHERE 0\"\n"]]=]) do
     -- Set $nRow to the number of rows returned by $select:
-    stmt = sqlite3_prepare_v2("db", select, -1, "DUMMY")
+    stmt = sql_prepare_v2("db", select, -1, "DUMMY")
     nRow = 0
-    while X(979, "X!cmd", [=[["expr","\"SQLITE_ROW\" == [sqlite3_step $::stmt]"]]=])
+    while X(979, "X!cmd", [=[["expr","\"sql_ROW\" == [sql_step $::stmt]"]]=])
  do
         nRow = nRow + 1
     end
-    rc = sqlite3_finalize(stmt)
+    rc = sql_finalize(stmt)
     -- Test that $nRow==1 and that statement execution was successful
-    -- (rc==SQLITE_OK).
-    X(983, "X!cmd", [=[["do_test",["e_select-4.",["tn"]],[["list","list",["rc"],["nRow"]]],"SQLITE_OK 1"]]=])
+    -- (rc==sql_OK).
+    X(983, "X!cmd", [=[["do_test",["e_select-4.",["tn"]],[["list","list",["rc"],["nRow"]]],"sql_OK 1"]]=])
 end
 end
 test:drop_all_tables()
@@ -2026,7 +2026,7 @@ test:do_execsql_test(
     })
 
 -- EVIDENCE-OF: R-44130-32593 If an ORDER BY expression is not an integer
--- alias, then SQLite searches the left-most SELECT in the compound for a
+-- alias, then sql searches the left-most SELECT in the compound for a
 -- result column that matches either the second or third rules above. If
 -- a match is found, the search stops and the expression is handled as an
 -- alias for the result column that it has been matched against.
@@ -2176,7 +2176,7 @@ for _, val in ipairs({
         "e_select-9.2."..tn,
         select,
         {
-            1, "datatype mismatch"})
+            1, "Only positive integers are allowed in the LIMIT clause"})
 end
 
 -- EVIDENCE-OF: R-03014-26414 If the LIMIT expression evaluates to a
@@ -2186,9 +2186,9 @@ end
 test:do_select_tests(
     "e_select-9.4",
     {
-        {"1", "SELECT b FROM f1 ORDER BY a LIMIT -1 ", {"a",  "b",  "c",  "d",  "e",  "f",  "g",  "h",  "i",  "j",  "k",  "l",  "m",  "n",  "o",  "p",  "q", "r", "s", "t", "u", "v", "w", "x", "y", "z"}},
-        {"2", "SELECT b FROM f1 ORDER BY a LIMIT length('abc')-100 ", {"a",  "b",  "c",  "d",  "e",  "f",  "g",  "h",  "i",  "j",  "k",  "l",  "m",  "n",  "o",  "p",  "q", "r", "s", "t", "u", "v", "w", "x", "y", "z"}},
-        {"3", "SELECT b FROM f1 ORDER BY a LIMIT (SELECT count(*) FROM f1)/2 - 14 ", {"a",  "b",  "c",  "d",  "e",  "f",  "g",  "h",  "i",  "j",  "k",  "l",  "m",  "n",  "o",  "p",  "q", "r", "s", "t", "u", "v", "w", "x", "y", "z"}},
+        {"1", "SELECT b FROM f1 ORDER BY a LIMIT 10000 ", {"a",  "b",  "c",  "d",  "e",  "f",  "g",  "h",  "i",  "j",  "k",  "l",  "m",  "n",  "o",  "p",  "q", "r", "s", "t", "u", "v", "w", "x", "y", "z"}},
+        {"2", "SELECT b FROM f1 ORDER BY a LIMIT 123+length('abc')-100 ", {"a",  "b",  "c",  "d",  "e",  "f",  "g",  "h",  "i",  "j",  "k",  "l",  "m",  "n",  "o",  "p",  "q", "r", "s", "t", "u", "v", "w", "x", "y", "z"}},
+        {"3", "SELECT b FROM f1 ORDER BY a LIMIT (SELECT count(*) FROM f1)/2 - 10 ", {"a",  "b",  "c"}},
     })
 
 -- EVIDENCE-OF: R-33750-29536 Otherwise, the SELECT returns the first N
@@ -2230,7 +2230,7 @@ for _, val in ipairs({
     test:do_catchsql_test(
         "e_select-9.7."..tn,
         select, {
-            1, "datatype mismatch"
+            1, "Only positive integers are allowed in the OFFSET clause"
         })
 
 end
@@ -2270,9 +2270,7 @@ test:do_select_tests(
 test:do_select_tests(
     "e_select-9.10",
     {
-        {"1", "SELECT b FROM f1 ORDER BY a LIMIT 5 OFFSET -1 ", {"a", "b", "c", "d", "e"}},
-        {"2", "SELECT b FROM f1 ORDER BY a LIMIT 5 OFFSET -500 ", {"a", "b", "c", "d", "e"}},
-        {"3", "SELECT b FROM f1 ORDER BY a LIMIT 5 OFFSET 0  ", {"a", "b", "c", "d", "e"}},
+        {"1", "SELECT b FROM f1 ORDER BY a LIMIT 5 OFFSET 0 ", {"a", "b", "c", "d", "e"}},
     })
 
 -- EVIDENCE-OF: R-19509-40356 Instead of a separate OFFSET clause, the
@@ -2293,9 +2291,8 @@ test:do_select_tests(
         {"7", "SELECT b FROM f1 ORDER BY a LIMIT '1'||'5', 3 ", {"p", "q", "r"}},
         {"8", "SELECT b FROM f1 ORDER BY a LIMIT 20, 10 ", {"u", "v", "w", "x", "y", "z"}},
         {"9", "SELECT a FROM f1 ORDER BY a DESC LIMIT 18+4, 100 ", {4, 3, 2, 1}},
-        {"10", "SELECT b FROM f1 ORDER BY a LIMIT -1, 5 ", {"a", "b", "c", "d", "e"}},
-        {"11", "SELECT b FROM f1 ORDER BY a LIMIT -500, 5 ", {"a", "b", "c", "d", "e"}},
-        {"12", "SELECT b FROM f1 ORDER BY a LIMIT 0, 5 ", {"a", "b", "c", "d", "e"}},
+        {"10", "SELECT b FROM f1 ORDER BY a LIMIT 0, 5 ", {"a", "b", "c", "d", "e"}},
+        {"11", "SELECT b FROM f1 ORDER BY a LIMIT 500-500, 5 ", {"a", "b", "c", "d", "e"}},
     })
 
 test:finish_test()

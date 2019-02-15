@@ -46,6 +46,7 @@
 #include <rmean.h>
 #include "main.h"
 #include "tuple.h"
+#include "tuple_format.h"
 #include "session.h"
 #include "schema.h"
 #include "engine.h"
@@ -78,6 +79,8 @@ static char status[64] = "unknown";
 
 /** box.stat rmean */
 struct rmean *rmean_box;
+
+struct rlist box_on_shutdown = RLIST_HEAD_INITIALIZER(box_on_shutdown);
 
 static void title(const char *new_status)
 {
@@ -592,11 +595,7 @@ box_check_vinyl_options(void)
 		tnt_raise(ClientError, ER_CFG, "vinyl_write_threads",
 			  "must be greater than or equal to 2");
 	}
-	if (range_size <= 0) {
-		tnt_raise(ClientError, ER_CFG, "vinyl_range_size",
-			  "must be greater than 0");
-	}
-	if (page_size <= 0 || page_size > range_size) {
+	if (page_size <= 0 || (range_size > 0 && page_size > range_size)) {
 		tnt_raise(ClientError, ER_CFG, "vinyl_page_size",
 			  "must be greater than 0 and less than "
 			  "or equal to vinyl_range_size");
@@ -1581,18 +1580,6 @@ box_process_subscribe(struct ev_io *io, struct xrow_header *header)
 	/* Check permissions */
 	access_check_universe_xc(PRIV_R);
 
-	/**
-	 * Check that the given UUID matches the UUID of the
-	 * replica set this replica belongs to. Used to handshake
-	 * replica connect, and refuse a connection from a replica
-	 * which belongs to a different replica set.
-	 */
-	if (!tt_uuid_is_equal(&replicaset_uuid, &REPLICASET_UUID)) {
-		tnt_raise(ClientError, ER_REPLICASET_UUID_MISMATCH,
-			  tt_uuid_str(&REPLICASET_UUID),
-			  tt_uuid_str(&replicaset_uuid));
-	}
-
 	/* Check replica uuid */
 	struct replica *replica = replica_by_uuid(&replica_uuid);
 	if (replica == NULL || replica->id == REPLICA_ID_NIL) {
@@ -1617,9 +1604,17 @@ box_process_subscribe(struct ev_io *io, struct xrow_header *header)
 	 * Send a response to SUBSCRIBE request, tell
 	 * the replica how many rows we have in stock for it,
 	 * and identify ourselves with our own replica id.
+	 *
+	 * Tarantool > 2.1.1 master doesn't check that replica
+	 * has the same cluster id. Instead it sends its cluster
+	 * id to replica, and replica checks that its cluster id
+	 * matches master's one. Older versions will just ignore
+	 * the additional field.
 	 */
 	struct xrow_header row;
-	xrow_encode_vclock_xc(&row, &replicaset.vclock);
+	xrow_encode_subscribe_response_xc(&row,
+					  &REPLICASET_UUID,
+					  &replicaset.vclock);
 	/*
 	 * Identify the message with the replica id of this
 	 * instance, this is the only way for a replica to find
@@ -1681,7 +1676,6 @@ box_free(void)
 	if (is_box_configured) {
 #if 0
 		session_free();
-		sql_free();
 		user_cache_free();
 		schema_free();
 		module_free();
@@ -1692,7 +1686,7 @@ box_free(void)
 		sequence_free();
 		gc_free();
 		engine_shutdown();
-		wal_thread_stop();
+		wal_free();
 	}
 }
 
@@ -1762,12 +1756,13 @@ bootstrap_master(const struct tt_uuid *replicaset_uuid)
 	/* Set UUID of a new replica set */
 	box_set_replicaset_uuid(replicaset_uuid);
 
-	/* Make the initial checkpoint */
-	if (engine_begin_checkpoint() ||
-	    engine_commit_checkpoint(&replicaset.vclock))
-		panic("failed to create a checkpoint");
+	/* Enable WAL subsystem. */
+	if (wal_enable() != 0)
+		diag_raise();
 
-	gc_add_checkpoint(&replicaset.vclock);
+	/* Make the initial checkpoint */
+	if (gc_checkpoint() != 0)
+		panic("failed to create a checkpoint");
 }
 
 /**
@@ -1814,9 +1809,6 @@ bootstrap_from_master(struct replica *master)
 
 	applier_resume_to_state(applier, APPLIER_JOINED, TIMEOUT_INFINITY);
 
-	/* Clear the pointer to journal before it goes out of scope */
-	journal_set(NULL);
-
 	/* Finalize the new replica */
 	engine_end_recovery_xc();
 
@@ -1824,12 +1816,22 @@ bootstrap_from_master(struct replica *master)
 	applier_resume_to_state(applier, APPLIER_READY, TIMEOUT_INFINITY);
 	assert(applier->state == APPLIER_READY);
 
-	/* Make the initial checkpoint */
-	if (engine_begin_checkpoint() ||
-	    engine_commit_checkpoint(&replicaset.vclock))
-		panic("failed to create a checkpoint");
+	/*
+	 * An engine may write to WAL on its own during the join
+	 * stage (e.g. Vinyl's deferred DELETEs). That's OK - those
+	 * records will pass through the recovery journal and wind
+	 * up in the initial checkpoint. However, we must enable
+	 * the WAL right before starting checkpointing so that
+	 * records written during and after the initial checkpoint
+	 * go to the real WAL and can be recovered after restart.
+	 * This also clears the recovery journal created on stack.
+	 */
+	if (wal_enable() != 0)
+		diag_raise();
 
-	gc_add_checkpoint(&replicaset.vclock);
+	/* Make the initial checkpoint */
+	if (gc_checkpoint() != 0)
+		panic("failed to create a checkpoint");
 }
 
 /**
@@ -2001,6 +2003,16 @@ local_recovery(const struct tt_uuid *instance_uuid,
 		box_sync_replication(false);
 	}
 	recovery_finalize(recovery);
+
+	/*
+	 * We must enable WAL before finalizing engine recovery,
+	 * because an engine may start writing to WAL right after
+	 * this point (e.g. deferred DELETE statements in Vinyl).
+	 * This also clears the recovery journal created on stack.
+	 */
+	if (wal_enable() != 0)
+		diag_raise();
+
 	engine_end_recovery_xc();
 
 	/* Check replica set UUID. */
@@ -2010,9 +2022,6 @@ local_recovery(const struct tt_uuid *instance_uuid,
 			  tt_uuid_str(replicaset_uuid),
 			  tt_uuid_str(&REPLICASET_UUID));
 	}
-
-	/* Clear the pointer to journal before it goes out of scope */
-	journal_set(NULL);
 }
 
 static void
@@ -2084,7 +2093,15 @@ box_cfg_xc(void)
 	port_init();
 	iproto_init();
 	sql_init();
-	wal_thread_start();
+
+	int64_t wal_max_rows = box_check_wal_max_rows(cfg_geti64("rows_per_wal"));
+	int64_t wal_max_size = box_check_wal_max_size(cfg_geti64("wal_max_size"));
+	enum wal_mode wal_mode = box_check_wal_mode(cfg_gets("wal_mode"));
+	if (wal_init(wal_mode, cfg_gets("wal_dir"), wal_max_rows,
+		     wal_max_size, &INSTANCE_UUID, on_wal_garbage_collection,
+		     on_wal_checkpoint_threshold) != 0) {
+		diag_raise();
+	}
 
 	title("loading");
 
@@ -2129,8 +2146,6 @@ box_cfg_xc(void)
 		/* Bootstrap a new master */
 		bootstrap(&instance_uuid, &replicaset_uuid,
 			  &is_bootstrap_leader);
-		checkpoint = gc_last_checkpoint();
-		assert(checkpoint != NULL);
 	}
 	fiber_gc();
 
@@ -2142,17 +2157,6 @@ box_cfg_xc(void)
 				  tt_uuid_str(&INSTANCE_UUID),
 				  tt_uuid_str(&REPLICASET_UUID));
 		}
-	}
-
-	/* Start WAL writer */
-	int64_t wal_max_rows = box_check_wal_max_rows(cfg_geti64("rows_per_wal"));
-	int64_t wal_max_size = box_check_wal_max_size(cfg_geti64("wal_max_size"));
-	enum wal_mode wal_mode = box_check_wal_mode(cfg_gets("wal_mode"));
-	if (wal_init(wal_mode, cfg_gets("wal_dir"), wal_max_rows,
-		     wal_max_size, &INSTANCE_UUID, &replicaset.vclock,
-		     &checkpoint->vclock, on_wal_garbage_collection,
-		     on_wal_checkpoint_threshold) != 0) {
-		diag_raise();
 	}
 
 	rmean_cleanup(rmean_box);

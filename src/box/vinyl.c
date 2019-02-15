@@ -245,6 +245,27 @@ static struct trigger on_replace_vinyl_deferred_delete;
 /** {{{ Introspection */
 
 static void
+vy_info_append_scheduler(struct vy_env *env, struct info_handler *h)
+{
+	struct vy_scheduler_stat *stat = &env->scheduler.stat;
+
+	info_table_begin(h, "scheduler");
+	info_append_int(h, "tasks_inprogress", stat->tasks_inprogress);
+	info_append_int(h, "tasks_completed", stat->tasks_completed);
+	info_append_int(h, "tasks_failed", stat->tasks_failed);
+	info_append_int(h, "dump_count", stat->dump_count);
+	info_append_double(h, "dump_time", stat->dump_time);
+	info_append_int(h, "dump_input", stat->dump_input);
+	info_append_int(h, "dump_output", stat->dump_output);
+	info_append_double(h, "compaction_time", stat->compaction_time);
+	info_append_int(h, "compaction_input", stat->compaction_input);
+	info_append_int(h, "compaction_output", stat->compaction_output);
+	info_append_int(h, "compaction_queue",
+			env->lsm_env.compaction_queue_size);
+	info_table_end(h); /* scheduler */
+}
+
+static void
 vy_info_append_regulator(struct vy_env *env, struct info_handler *h)
 {
 	struct vy_regulator *r = &env->regulator;
@@ -253,6 +274,8 @@ vy_info_append_regulator(struct vy_env *env, struct info_handler *h)
 	info_append_int(h, "write_rate", r->write_rate);
 	info_append_int(h, "dump_bandwidth", r->dump_bandwidth);
 	info_append_int(h, "dump_watermark", r->dump_watermark);
+	info_append_int(h, "rate_limit", vy_quota_get_rate_limit(r->quota,
+							VY_QUOTA_CONSUMER_TX));
 	info_table_end(h); /* regulator */
 }
 
@@ -295,24 +318,10 @@ vy_info_append_memory(struct vy_env *env, struct info_handler *h)
 static void
 vy_info_append_disk(struct vy_env *env, struct info_handler *h)
 {
-	struct vy_disk_stat *stat = &env->lsm_env.disk_stat;
-
 	info_table_begin(h, "disk");
-
-	info_append_int(h, "data", stat->data);
-	info_append_int(h, "index", stat->index);
-
-	info_table_begin(h, "dump");
-	info_append_int(h, "in", stat->dump.in);
-	info_append_int(h, "out", stat->dump.out);
-	info_table_end(h); /* dump */
-
-	info_table_begin(h, "compact");
-	info_append_int(h, "in", stat->compact.in);
-	info_append_int(h, "out", stat->compact.out);
-	info_append_int(h, "queue", stat->compact.queue);
-	info_table_end(h); /* compact */
-
+	info_append_int(h, "data", env->lsm_env.disk_data_size);
+	info_append_int(h, "index", env->lsm_env.disk_index_size);
+	info_append_int(h, "data_compacted", env->lsm_env.compacted_data_size);
 	info_table_end(h); /* disk */
 }
 
@@ -325,6 +334,7 @@ vinyl_engine_stat(struct vinyl_engine *vinyl, struct info_handler *h)
 	vy_info_append_tx(env, h);
 	vy_info_append_memory(env, h);
 	vy_info_append_disk(env, h);
+	vy_info_append_scheduler(env, h);
 	vy_info_append_regulator(env, h);
 	info_end(h);
 }
@@ -397,6 +407,8 @@ vinyl_index_stat(struct index *index, struct info_handler *h)
 
 	info_table_begin(h, "disk");
 	vy_info_append_disk_stmt_counter(h, NULL, &stat->disk.count);
+	vy_info_append_disk_stmt_counter(h, "last_level",
+					 &stat->disk.last_level_count);
 	info_table_begin(h, "statement");
 	info_append_int(h, "inserts", stat->disk.stmt.inserts);
 	info_append_int(h, "replaces", stat->disk.stmt.replaces);
@@ -414,15 +426,17 @@ vinyl_index_stat(struct index *index, struct info_handler *h)
 	info_table_end(h); /* iterator */
 	info_table_begin(h, "dump");
 	info_append_int(h, "count", stat->disk.dump.count);
-	vy_info_append_stmt_counter(h, "in", &stat->disk.dump.in);
-	vy_info_append_disk_stmt_counter(h, "out", &stat->disk.dump.out);
+	info_append_double(h, "time", stat->disk.dump.time);
+	vy_info_append_stmt_counter(h, "input", &stat->disk.dump.input);
+	vy_info_append_disk_stmt_counter(h, "output", &stat->disk.dump.output);
 	info_table_end(h); /* dump */
-	info_table_begin(h, "compact");
-	info_append_int(h, "count", stat->disk.compact.count);
-	vy_info_append_disk_stmt_counter(h, "in", &stat->disk.compact.in);
-	vy_info_append_disk_stmt_counter(h, "out", &stat->disk.compact.out);
-	vy_info_append_disk_stmt_counter(h, "queue", &stat->disk.compact.queue);
-	info_table_end(h); /* compact */
+	info_table_begin(h, "compaction");
+	info_append_int(h, "count", stat->disk.compaction.count);
+	info_append_double(h, "time", stat->disk.compaction.time);
+	vy_info_append_disk_stmt_counter(h, "input", &stat->disk.compaction.input);
+	vy_info_append_disk_stmt_counter(h, "output", &stat->disk.compaction.output);
+	vy_info_append_disk_stmt_counter(h, "queue", &stat->disk.compaction.queue);
+	info_table_end(h); /* compaction */
 	info_append_int(h, "index_size", lsm->page_index_size);
 	info_append_int(h, "bloom_size", lsm->bloom_size);
 	info_table_end(h); /* disk */
@@ -446,11 +460,14 @@ vinyl_index_stat(struct index *index, struct info_handler *h)
 	info_table_end(h); /* iterator */
 	info_table_end(h); /* txw */
 
+	info_append_int(h, "range_size", vy_lsm_range_size(lsm));
 	info_append_int(h, "range_count", lsm->range_count);
 	info_append_int(h, "run_count", lsm->run_count);
 	info_append_int(h, "run_avg", lsm->run_count / lsm->range_count);
 	histogram_snprint(buf, sizeof(buf), lsm->run_hist);
 	info_append_str(h, "run_histogram", buf);
+	info_append_int(h, "dumps_per_compaction",
+			vy_lsm_dumps_per_compaction(lsm));
 
 	info_end(h);
 }
@@ -476,13 +493,15 @@ vinyl_index_reset_stat(struct index *index)
 
 	/* Dump */
 	stat->disk.dump.count = 0;
-	vy_stmt_counter_reset(&stat->disk.dump.in);
-	vy_disk_stmt_counter_reset(&stat->disk.dump.out);
+	stat->disk.dump.time = 0;
+	vy_stmt_counter_reset(&stat->disk.dump.input);
+	vy_disk_stmt_counter_reset(&stat->disk.dump.output);
 
 	/* Compaction */
-	stat->disk.compact.count = 0;
-	vy_disk_stmt_counter_reset(&stat->disk.compact.in);
-	vy_disk_stmt_counter_reset(&stat->disk.compact.out);
+	stat->disk.compaction.count = 0;
+	stat->disk.compaction.time = 0;
+	vy_disk_stmt_counter_reset(&stat->disk.compaction.input);
+	vy_disk_stmt_counter_reset(&stat->disk.compaction.output);
 
 	/* Cache */
 	cache_stat->lookup = 0;
@@ -514,11 +533,8 @@ vinyl_engine_reset_stat(struct engine *engine)
 	struct tx_manager *xm = env->xm;
 	memset(&xm->stat, 0, sizeof(xm->stat));
 
-	struct vy_disk_stat *disk_stat = &env->lsm_env.disk_stat;
-	disk_stat->dump.in = 0;
-	disk_stat->dump.out = 0;
-	disk_stat->compact.in = 0;
-	disk_stat->compact.out = 0;
+	vy_scheduler_reset_stat(&env->scheduler);
+	vy_regulator_reset_stat(&env->regulator);
 }
 
 /** }}} Introspection */
@@ -609,13 +625,14 @@ vinyl_engine_create_space(struct engine *engine, struct space_def *def,
 		keys[key_count++] = index_def->key_def;
 
 	struct tuple_format *format =
-		tuple_format_new(&vy_tuple_format_vtab, keys, key_count,
-				 def->fields, def->field_count, def->dict);
+		tuple_format_new(&vy_tuple_format_vtab, NULL, keys, key_count,
+				 def->fields, def->field_count,
+				 def->exact_field_count, def->dict, false,
+				 false);
 	if (format == NULL) {
 		free(space);
 		return NULL;
 	}
-	format->exact_field_count = def->exact_field_count;
 	tuple_format_ref(format);
 
 	if (space_create(space, engine, &vinyl_space_vtab,
@@ -749,18 +766,16 @@ vinyl_index_open(struct index *index)
 		diag_set(SystemError, "can not access vinyl data directory");
 		return -1;
 	}
-	int rc;
 	switch (env->status) {
 	case VINYL_ONLINE:
 		/*
 		 * The recovery is complete, simply
 		 * create a new index.
 		 */
-		rc = vy_lsm_create(lsm);
-		if (rc == 0) {
-			/* Make sure reader threads are up and running. */
-			vy_run_env_enable_coio(&env->run_env);
-		}
+		if (vy_lsm_create(lsm) != 0)
+			return -1;
+		/* Make sure reader threads are up and running. */
+		vy_run_env_enable_coio(&env->run_env);
 		break;
 	case VINYL_INITIAL_RECOVERY_REMOTE:
 	case VINYL_FINAL_RECOVERY_REMOTE:
@@ -769,7 +784,8 @@ vinyl_index_open(struct index *index)
 		 * exist locally, and we should create the
 		 * index directory from scratch.
 		 */
-		rc = vy_lsm_create(lsm);
+		if (vy_lsm_create(lsm) != 0)
+			return -1;
 		break;
 	case VINYL_INITIAL_RECOVERY_LOCAL:
 	case VINYL_FINAL_RECOVERY_LOCAL:
@@ -779,17 +795,30 @@ vinyl_index_open(struct index *index)
 		 * have already been created, so try to load
 		 * the index files from it.
 		 */
-		rc = vy_lsm_recover(lsm, env->recovery, &env->run_env,
-				    vclock_sum(env->recovery_vclock),
-				    env->status == VINYL_INITIAL_RECOVERY_LOCAL,
-				    env->force_recovery);
+		if (vy_lsm_recover(lsm, env->recovery, &env->run_env,
+				   vclock_sum(env->recovery_vclock),
+				   env->status == VINYL_INITIAL_RECOVERY_LOCAL,
+				   env->force_recovery) != 0)
+			return -1;
 		break;
 	default:
 		unreachable();
 	}
-	if (rc == 0)
+	/*
+	 * Add the new LSM tree to the scheduler so that it can
+	 * be dumped and compacted.
+	 *
+	 * Note, during local recovery an LSM tree may be marked
+	 * as dropped, which means that it will be dropped before
+	 * recovery is complete. In this case there's no need in
+	 * letting the scheduler know about it.
+	 */
+	if (!lsm->is_dropped)
 		vy_scheduler_add_lsm(&env->scheduler, lsm);
-	return rc;
+	else
+		assert(env->status == VINYL_INITIAL_RECOVERY_LOCAL ||
+		       env->status == VINYL_FINAL_RECOVERY_LOCAL);
+	return 0;
 }
 
 static void
@@ -911,8 +940,6 @@ vinyl_index_commit_drop(struct index *index, int64_t lsn)
 	struct vy_env *env = vy_env(index->engine);
 	struct vy_lsm *lsm = vy_lsm(index);
 
-	vy_scheduler_remove_lsm(&env->scheduler, lsm);
-
 	/*
 	 * We can't abort here, because the index drop request has
 	 * already been written to WAL. So if we fail to write the
@@ -923,6 +950,8 @@ vinyl_index_commit_drop(struct index *index, int64_t lsn)
 	 */
 	if (env->status == VINYL_FINAL_RECOVERY_LOCAL && lsm->is_dropped)
 		return;
+
+	vy_scheduler_remove_lsm(&env->scheduler, lsm);
 
 	lsm->is_dropped = true;
 
@@ -981,6 +1010,10 @@ vinyl_index_def_change_requires_rebuild(struct index *index,
 		    !key_part_is_nullable(new_part))
 			return true;
 		if (!field_type1_contains_type2(new_part->type, old_part->type))
+			return true;
+		if (json_path_cmp(old_part->path, old_part->path_len,
+				  new_part->path, new_part->path_len,
+				  TUPLE_INDEX_BASE) != 0)
 			return true;
 	}
 	return false;
@@ -2317,7 +2350,8 @@ vinyl_engine_prepare(struct engine *engine, struct txn *txn)
 	 * the transaction to be sent to read view or aborted, we call
 	 * it before checking for conflicts.
 	 */
-	if (vy_quota_use(&env->quota, tx->write_size, timeout) != 0)
+	if (vy_quota_use(&env->quota, VY_QUOTA_CONSUMER_TX,
+			 tx->write_size, timeout) != 0)
 		return -1;
 
 	size_t mem_used_before = lsregion_used(&env->mem_env.allocator);
@@ -2326,8 +2360,8 @@ vinyl_engine_prepare(struct engine *engine, struct txn *txn)
 
 	size_t mem_used_after = lsregion_used(&env->mem_env.allocator);
 	assert(mem_used_after >= mem_used_before);
-	vy_quota_adjust(&env->quota, tx->write_size,
-			mem_used_after - mem_used_before);
+	vy_quota_adjust(&env->quota, VY_QUOTA_CONSUMER_TX,
+			tx->write_size, mem_used_after - mem_used_before);
 	vy_regulator_check_dump_watermark(&env->regulator);
 	return rc;
 }
@@ -2352,7 +2386,8 @@ vinyl_engine_commit(struct engine *engine, struct txn *txn)
 	size_t mem_used_after = lsregion_used(&env->mem_env.allocator);
 	assert(mem_used_after >= mem_used_before);
 	/* We can't abort the transaction at this point, use force. */
-	vy_quota_force_use(&env->quota, mem_used_after - mem_used_before);
+	vy_quota_force_use(&env->quota, VY_QUOTA_CONSUMER_TX,
+			   mem_used_after - mem_used_before);
 	vy_regulator_check_dump_watermark(&env->regulator);
 
 	txn->engine_tx = NULL;
@@ -2448,6 +2483,9 @@ vy_env_dump_complete_cb(struct vy_scheduler *scheduler,
 	 */
 	vy_regulator_dump_complete(&env->regulator, mem_dumped, dump_duration);
 	vy_quota_release(quota, mem_dumped);
+
+	vy_regulator_update_rate_limit(&env->regulator, &scheduler->stat,
+				       scheduler->compaction_pool.size);
 }
 
 static struct vy_squash_queue *
@@ -3021,8 +3059,9 @@ vy_send_lsm(struct vy_join_ctx *ctx, struct vy_lsm_recovery_info *lsm_info)
 				   lsm_info->key_part_count);
 	if (ctx->key_def == NULL)
 		goto out;
-	ctx->format = tuple_format_new(&vy_tuple_format_vtab, &ctx->key_def,
-				       1, NULL, 0, NULL);
+	ctx->format = tuple_format_new(&vy_tuple_format_vtab, NULL,
+				       &ctx->key_def, 1, NULL, 0, 0, NULL,
+				       false, false);
 	if (ctx->format == NULL)
 		goto out_free_key_def;
 	tuple_format_ref(ctx->format);
@@ -3163,7 +3202,8 @@ vinyl_space_apply_initial_join_row(struct space *space, struct request *request)
 	 * quota accounting.
 	 */
 	size_t reserved = tx->write_size;
-	if (vy_quota_use(&env->quota, reserved, TIMEOUT_INFINITY) != 0)
+	if (vy_quota_use(&env->quota, VY_QUOTA_CONSUMER_TX,
+			 reserved, TIMEOUT_INFINITY) != 0)
 		unreachable();
 
 	size_t mem_used_before = lsregion_used(&env->mem_env.allocator);
@@ -3182,7 +3222,7 @@ vinyl_space_apply_initial_join_row(struct space *space, struct request *request)
 	size_t mem_used_after = lsregion_used(&env->mem_env.allocator);
 	assert(mem_used_after >= mem_used_before);
 	size_t used = mem_used_after - mem_used_before;
-	vy_quota_adjust(&env->quota, reserved, used);
+	vy_quota_adjust(&env->quota, VY_QUOTA_CONSUMER_TX, reserved, used);
 	vy_regulator_check_dump_watermark(&env->regulator);
 	return rc;
 }
@@ -3293,7 +3333,7 @@ vy_gc(struct vy_env *env, struct vy_recovery *recovery,
 	}
 }
 
-static int
+static void
 vinyl_engine_collect_garbage(struct engine *engine, const struct vclock *vclock)
 {
 	struct vy_env *env = vy_env(engine);
@@ -3305,11 +3345,10 @@ vinyl_engine_collect_garbage(struct engine *engine, const struct vclock *vclock)
 	struct vy_recovery *recovery = vy_recovery_new(vy_log_signature(), 0);
 	if (recovery == NULL) {
 		say_error("failed to recover vylog for garbage collection");
-		return 0;
+		return;
 	}
 	vy_gc(env, recovery, VY_GC_DROPPED, vclock_sum(vclock));
 	vy_recovery_delete(recovery);
-	return 0;
 }
 
 /* }}} Garbage collection */
@@ -3504,7 +3543,7 @@ vy_squash_process(struct vy_squash *squash)
 		 * so there's no need in invalidating the cache.
 		 */
 		vy_mem_commit_stmt(mem, region_stmt);
-		vy_quota_force_use(&env->quota,
+		vy_quota_force_use(&env->quota, VY_QUOTA_CONSUMER_TX,
 				   mem_used_after - mem_used_before);
 		vy_regulator_check_dump_watermark(&env->regulator);
 	}
@@ -3980,9 +4019,10 @@ vy_build_insert_tuple(struct vy_env *env, struct vy_lsm *lsm,
 	/* Consume memory quota. Throttle if it is exceeded. */
 	size_t mem_used_after = lsregion_used(&env->mem_env.allocator);
 	assert(mem_used_after >= mem_used_before);
-	vy_quota_force_use(&env->quota, mem_used_after - mem_used_before);
+	vy_quota_force_use(&env->quota, VY_QUOTA_CONSUMER_TX,
+			   mem_used_after - mem_used_before);
 	vy_regulator_check_dump_watermark(&env->regulator);
-	vy_quota_wait(&env->quota);
+	vy_quota_wait(&env->quota, VY_QUOTA_CONSUMER_TX);
 	return rc;
 }
 
@@ -4108,7 +4148,8 @@ vy_build_recover(struct vy_env *env, struct vy_lsm *lsm, struct vy_lsm *pk)
 
 	mem_used_after = lsregion_used(&env->mem_env.allocator);
 	assert(mem_used_after >= mem_used_before);
-	vy_quota_force_use(&env->quota, mem_used_after - mem_used_before);
+	vy_quota_force_use(&env->quota, VY_QUOTA_CONSUMER_TX,
+			   mem_used_after - mem_used_before);
 	return rc;
 }
 
@@ -4324,7 +4365,7 @@ vy_deferred_delete_on_replace(struct trigger *trigger, void *event)
 	 */
 	struct vy_env *env = vy_env(space->engine);
 	if (is_first_statement)
-		vy_quota_wait(&env->quota);
+		vy_quota_wait(&env->quota, VY_QUOTA_CONSUMER_COMPACTION);
 
 	/* Create the deferred DELETE statement. */
 	struct vy_lsm *pk = vy_lsm(space->index[0]);
@@ -4411,7 +4452,8 @@ vy_deferred_delete_on_replace(struct trigger *trigger, void *event)
 	}
 	size_t mem_used_after = lsregion_used(&env->mem_env.allocator);
 	assert(mem_used_after >= mem_used_before);
-	vy_quota_force_use(&env->quota, mem_used_after - mem_used_before);
+	vy_quota_force_use(&env->quota, VY_QUOTA_CONSUMER_COMPACTION,
+			   mem_used_after - mem_used_before);
 	vy_regulator_check_dump_watermark(&env->regulator);
 
 	tuple_unref(delete);

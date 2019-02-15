@@ -13,7 +13,7 @@ test:plan(5)
 --    May you share freely, never taking more than you give.
 --
 -------------------------------------------------------------------------
--- This file implements regression tests for SQLite library.
+-- This file implements regression tests for sql library.
 --
 -- This file implements tests to increase coverage of trigger.c.
 --
@@ -40,7 +40,7 @@ test:do_test(
     "trigger7-2.1",
     function()
         test:execsql [[
-			CREATE TABLE t1(x INT PRIMARY KEY, y INT);
+            CREATE TABLE t1(x INT UNIQUE, y INT, z INT PRIMARY KEY AUTOINCREMENT);
             CREATE TRIGGER r1 AFTER UPDATE OF x ON t1 BEGIN
               SELECT '___update_t1.x___';
             END;
@@ -134,10 +134,10 @@ test:do_execsql_test(
 -- #
 -- do_test trigger7-99.1 {
 --   execsql {
---     UPDATE sqlite_master SET sql='nonsense';
+--     UPDATE sql_master SET sql='nonsense';
 --   }
 --   db close
---   catch { sqlite3 db test.db }
+--   catch { sql db test.db }
 --   catchsql { DROP TRIGGER t2r5 }
 -- } {1 {malformed database schema (t2r12)}}
 test:finish_test()

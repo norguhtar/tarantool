@@ -163,7 +163,7 @@ static int
 vy_point_lookup_scan_slices(struct vy_lsm *lsm, const struct vy_read_view **rv,
 			    struct tuple *key, struct vy_history *history)
 {
-	struct vy_range *range = vy_range_tree_find_by_key(lsm->tree,
+	struct vy_range *range = vy_range_tree_find_by_key(&lsm->range_tree,
 							   ITER_EQ, key);
 	assert(range != NULL);
 	int slice_count = range->slice_count;
@@ -196,7 +196,9 @@ vy_point_lookup(struct vy_lsm *lsm, struct vy_tx *tx,
 		const struct vy_read_view **rv,
 		struct tuple *key, struct tuple **ret)
 {
-	assert(tuple_field_count(key) >= lsm->cmp_def->part_count);
+	/* All key parts must be set for a point lookup. */
+	assert(vy_stmt_type(key) != IPROTO_SELECT ||
+	       tuple_field_count(key) >= lsm->cmp_def->part_count);
 
 	*ret = NULL;
 	double start_time = ev_monotonic_now(loop());

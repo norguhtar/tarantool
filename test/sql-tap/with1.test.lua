@@ -1,6 +1,6 @@
 #!/usr/bin/env tarantool
 test = require("sqltester")
-test:plan(67)
+test:plan(65)
 
 --!./tcltestrunner.lua
 -- 2014 January 11
@@ -13,7 +13,7 @@ test:plan(67)
 --    May you share freely, never taking more than you give.
 --
 -------------------------------------------------------------------------
--- This file implements regression tests for SQLite library.  The
+-- This file implements regression tests for sql library.  The
 -- focus of this file is testing the WITH clause.
 --
 -- ["set","testdir",[["file","dirname",["argv0"]]]]
@@ -25,7 +25,7 @@ testprefix = "with1"
 -- end
 
 test:do_execsql_test(1.0, [[
-  CREATE TABLE t1(x INTEGER PRIMARY KEY, y INTEGER);
+  CREATE TABLE t1(x INTEGER UNIQUE, y INTEGER, z INTEGER PRIMARY KEY);
   WITH x(a) AS ( SELECT * FROM t1) SELECT 10
 ]], {
   -- <1.0>
@@ -42,7 +42,7 @@ test:do_execsql_test(1.1, [[
 })
 
 test:do_execsql_test(1.2, [[
-  WITH x(a) AS ( SELECT * FROM t1) INSERT INTO t1 VALUES(1,2);
+  WITH x(a) AS ( SELECT * FROM t1) INSERT INTO t1 VALUES(1,1,2);
 ]], {
   -- <1.2>
   
@@ -185,15 +185,15 @@ test:do_catchsql_test(3.6, [[
 ---------------------------------------------------------------------------
 test:do_execsql_test(4.1, [[
   DROP TABLE IF EXISTS t1;
-  CREATE TABLE t1(x INT PRIMARY KEY);
-  INSERT INTO t1 VALUES(1);
-  INSERT INTO t1 VALUES(2);
-  INSERT INTO t1 VALUES(3);
-  INSERT INTO t1 VALUES(4);
+  CREATE TABLE t1(x INT UNIQUE, z INT PRIMARY KEY AUTOINCREMENT);
+  INSERT INTO t1(x) VALUES(1);
+  INSERT INTO t1(x) VALUES(2);
+  INSERT INTO t1(x) VALUES(3);
+  INSERT INTO t1(x) VALUES(4);
 
   WITH dset AS ( SELECT 2 UNION ALL SELECT 4 )
   DELETE FROM t1 WHERE x IN dset;
-  SELECT * FROM t1;
+  SELECT (x) FROM t1;
 ]], {
   -- <4.1>
   1, 3
@@ -202,18 +202,18 @@ test:do_execsql_test(4.1, [[
 
 test:do_execsql_test(4.2, [[
   WITH iset AS ( SELECT 2 UNION ALL SELECT 4 )
-  INSERT INTO t1 SELECT * FROM iset;
-  SELECT * FROM t1;
+  INSERT INTO t1(x) SELECT * FROM iset;
+  SELECT x FROM t1;
 ]], {
   -- <4.2>
-  1, 2, 3, 4
+  1, 3, 2, 4
   -- </4.2>
 })
 
 test:do_execsql_test(4.3, [[
   WITH uset(a, b) AS ( SELECT 2, 8 UNION ALL SELECT 4, 9 )
   UPDATE t1 SET x = COALESCE( (SELECT b FROM uset WHERE a=x), x );
-  SELECT * FROM t1;
+  SELECT x FROM t1;
 ]], {
   -- <4.3>
   1, 3, 8, 9
@@ -663,8 +663,6 @@ limit_test(9.4, 20, -1)
 limit_test(9.5, 5, 5)
 limit_test(9.6, 0, -1)
 limit_test(9.7, 40, -1)
-limit_test(9.8, -1, -1)
-limit_test(9.9, -1, -1)
 -- #--------------------------------------------------------------------------
 -- # Test the ORDER BY clause on recursive tables.
 -- #

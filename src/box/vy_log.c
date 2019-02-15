@@ -84,6 +84,7 @@ enum vy_log_key {
 	VY_LOG_KEY_MODIFY_LSN		= 13,
 	VY_LOG_KEY_DROP_LSN		= 14,
 	VY_LOG_KEY_GROUP_ID		= 15,
+	VY_LOG_KEY_DUMP_COUNT		= 16,
 };
 
 /** vy_log_key -> human readable name. */
@@ -104,6 +105,7 @@ static const char *vy_log_key_name[] = {
 	[VY_LOG_KEY_MODIFY_LSN]		= "modify_lsn",
 	[VY_LOG_KEY_DROP_LSN]		= "drop_lsn",
 	[VY_LOG_KEY_GROUP_ID]		= "group_id",
+	[VY_LOG_KEY_DUMP_COUNT]		= "dump_count",
 };
 
 /** vy_log_type -> human readable name. */
@@ -285,6 +287,10 @@ vy_log_record_snprint(char *buf, int size, const struct vy_log_record *record)
 		SNPRINT(total, snprintf, buf, size, "%s=%"PRIi64", ",
 			vy_log_key_name[VY_LOG_KEY_GC_LSN],
 			record->gc_lsn);
+	if (record->dump_count > 0)
+		SNPRINT(total, snprintf, buf, size, "%s=%"PRIu32", ",
+			vy_log_key_name[VY_LOG_KEY_DUMP_COUNT],
+			record->dump_count);
 	SNPRINT(total, snprintf, buf, size, "}");
 	return total;
 }
@@ -411,6 +417,11 @@ vy_log_record_encode(const struct vy_log_record *record,
 		size += mp_sizeof_uint(record->gc_lsn);
 		n_keys++;
 	}
+	if (record->dump_count > 0) {
+		size += mp_sizeof_uint(VY_LOG_KEY_DUMP_COUNT);
+		size += mp_sizeof_uint(record->dump_count);
+		n_keys++;
+	}
 	size += mp_sizeof_map(n_keys);
 
 	/*
@@ -492,6 +503,10 @@ vy_log_record_encode(const struct vy_log_record *record,
 	if (record->gc_lsn > 0) {
 		pos = mp_encode_uint(pos, VY_LOG_KEY_GC_LSN);
 		pos = mp_encode_uint(pos, record->gc_lsn);
+	}
+	if (record->dump_count > 0) {
+		pos = mp_encode_uint(pos, VY_LOG_KEY_DUMP_COUNT);
+		pos = mp_encode_uint(pos, record->dump_count);
 	}
 	assert(pos == tuple + size);
 
@@ -581,8 +596,9 @@ vy_log_record_decode(struct vy_log_record *record,
 			record->group_id = mp_decode_uint(&pos);
 			break;
 		case VY_LOG_KEY_DEF: {
+			struct region *region = &fiber()->gc;
 			uint32_t part_count = mp_decode_array(&pos);
-			struct key_part_def *parts = region_alloc(&fiber()->gc,
+			struct key_part_def *parts = region_alloc(region,
 						sizeof(*parts) * part_count);
 			if (parts == NULL) {
 				diag_set(OutOfMemory,
@@ -591,7 +607,7 @@ vy_log_record_decode(struct vy_log_record *record,
 				return -1;
 			}
 			if (key_def_decode_parts(parts, part_count, &pos,
-						 NULL, 0) != 0) {
+						 NULL, 0, region) != 0) {
 				diag_log();
 				diag_set(ClientError, ER_INVALID_VYLOG_FILE,
 					 "Bad record: failed to decode "
@@ -620,14 +636,12 @@ vy_log_record_decode(struct vy_log_record *record,
 		case VY_LOG_KEY_GC_LSN:
 			record->gc_lsn = mp_decode_uint(&pos);
 			break;
-		case VY_LOG_KEY_TRUNCATE_COUNT:
-			/* Not used anymore, ignore. */
+		case VY_LOG_KEY_DUMP_COUNT:
+			record->dump_count = mp_decode_uint(&pos);
 			break;
 		default:
-			diag_set(ClientError, ER_INVALID_VYLOG_FILE,
-				 tt_sprintf("Bad record: unknown key %u",
-					    (unsigned)key));
-			goto fail;
+			mp_next(&pos); /* unknown key, ignore */
+			break;
 		}
 	}
 	if (record->type == VY_LOG_CREATE_LSM) {
@@ -705,7 +719,8 @@ vy_log_record_dup(struct region *pool, const struct vy_log_record *src)
 				 "struct key_part_def");
 			goto err;
 		}
-		key_def_dump_parts(src->key_def, dst->key_parts);
+		if (key_def_dump_parts(src->key_def, dst->key_parts, pool) != 0)
+			goto err;
 		dst->key_part_count = src->key_def->part_count;
 		dst->key_def = NULL;
 	}
@@ -1079,7 +1094,7 @@ vy_log_collect_garbage(const struct vclock *vclock)
 	vclock = vy_log_prev_checkpoint(vclock);
 	if (vclock == NULL)
 		return;
-	xdir_collect_garbage(&vy_log.dir, vclock_sum(vclock), XDIR_GC_USE_COIO);
+	xdir_collect_garbage(&vy_log.dir, vclock_sum(vclock), XDIR_GC_ASYNC);
 }
 
 int64_t
@@ -1273,6 +1288,46 @@ vy_recovery_lookup_slice(struct vy_recovery *recovery, int64_t slice_id)
 }
 
 /**
+ * Allocate duplicate of the data of key_part_count
+ * key_part_def objects. This function is required because the
+ * original key_part passed as an argument can have non-NULL
+ * path fields referencing other memory fragments.
+ *
+ * Returns the key_part_def on success, NULL on error.
+ */
+struct key_part_def *
+vy_recovery_alloc_key_parts(const struct key_part_def *key_parts,
+			    uint32_t key_part_count)
+{
+	uint32_t new_parts_sz = sizeof(*key_parts) * key_part_count;
+	for (uint32_t i = 0; i < key_part_count; i++) {
+		new_parts_sz += key_parts[i].path != NULL ?
+				strlen(key_parts[i].path) + 1 : 0;
+	}
+	struct key_part_def *new_parts = malloc(new_parts_sz);
+	if (new_parts == NULL) {
+		diag_set(OutOfMemory, sizeof(*key_parts) * key_part_count,
+			 "malloc", "struct key_part_def");
+		return NULL;
+	}
+	memcpy(new_parts, key_parts, sizeof(*key_parts) * key_part_count);
+	char *path_pool =
+		(char *)new_parts + sizeof(*key_parts) * key_part_count;
+	for (uint32_t i = 0; i < key_part_count; i++) {
+		if (key_parts[i].path == NULL)
+			continue;
+		char *path = path_pool;
+		uint32_t path_len = strlen(key_parts[i].path);
+		path_pool += path_len + 1;
+		memcpy(path, key_parts[i].path, path_len);
+		path[path_len] = '\0';
+		new_parts[i].path = path;
+	}
+	assert(path_pool == (char *)new_parts + new_parts_sz);
+	return new_parts;
+}
+
+/**
  * Allocate a new LSM tree with the given ID and add it to
  * the recovery context.
  *
@@ -1297,10 +1352,8 @@ vy_recovery_do_create_lsm(struct vy_recovery *recovery, int64_t id,
 			 "malloc", "struct vy_lsm_recovery_info");
 		return NULL;
 	}
-	lsm->key_parts = malloc(sizeof(*key_parts) * key_part_count);
+	lsm->key_parts = vy_recovery_alloc_key_parts(key_parts, key_part_count);
 	if (lsm->key_parts == NULL) {
-		diag_set(OutOfMemory, sizeof(*key_parts) * key_part_count,
-			 "malloc", "struct key_part_def");
 		free(lsm);
 		return NULL;
 	}
@@ -1318,7 +1371,6 @@ vy_recovery_do_create_lsm(struct vy_recovery *recovery, int64_t id,
 	lsm->space_id = space_id;
 	lsm->index_id = index_id;
 	lsm->group_id = group_id;
-	memcpy(lsm->key_parts, key_parts, sizeof(*key_parts) * key_part_count);
 	lsm->key_part_count = key_part_count;
 	lsm->create_lsn = -1;
 	lsm->modify_lsn = -1;
@@ -1445,13 +1497,9 @@ vy_recovery_modify_lsm(struct vy_recovery *recovery, int64_t id,
 		return -1;
 	}
 	free(lsm->key_parts);
-	lsm->key_parts = malloc(sizeof(*key_parts) * key_part_count);
-	if (lsm->key_parts == NULL) {
-		diag_set(OutOfMemory, sizeof(*key_parts) * key_part_count,
-			 "malloc", "struct key_part_def");
+	lsm->key_parts = vy_recovery_alloc_key_parts(key_parts, key_part_count);
+	if (lsm->key_parts == NULL)
 		return -1;
-	}
-	memcpy(lsm->key_parts, key_parts, sizeof(*key_parts) * key_part_count);
 	lsm->key_part_count = key_part_count;
 	lsm->modify_lsn = modify_lsn;
 	return 0;
@@ -1563,6 +1611,7 @@ vy_recovery_do_create_run(struct vy_recovery *recovery, int64_t run_id)
 	run->id = run_id;
 	run->dump_lsn = -1;
 	run->gc_lsn = -1;
+	run->dump_count = 0;
 	run->is_incomplete = false;
 	run->is_dropped = false;
 	run->data = NULL;
@@ -1617,7 +1666,7 @@ vy_recovery_prepare_run(struct vy_recovery *recovery, int64_t lsm_id,
  */
 static int
 vy_recovery_create_run(struct vy_recovery *recovery, int64_t lsm_id,
-		       int64_t run_id, int64_t dump_lsn)
+		       int64_t run_id, int64_t dump_lsn, uint32_t dump_count)
 {
 	struct vy_lsm_recovery_info *lsm;
 	lsm = vy_recovery_lookup_lsm(recovery, lsm_id);
@@ -1642,6 +1691,7 @@ vy_recovery_create_run(struct vy_recovery *recovery, int64_t lsm_id,
 			return -1;
 	}
 	run->dump_lsn = dump_lsn;
+	run->dump_count = dump_count;
 	run->is_incomplete = false;
 	rlist_move_entry(&lsm->runs, run, in_lsm);
 	return 0;
@@ -2003,7 +2053,8 @@ vy_recovery_process_record(struct vy_recovery *recovery,
 		break;
 	case VY_LOG_CREATE_RUN:
 		rc = vy_recovery_create_run(recovery, record->lsm_id,
-					    record->run_id, record->dump_lsn);
+					    record->run_id, record->dump_lsn,
+					    record->dump_count);
 		break;
 	case VY_LOG_DROP_RUN:
 		rc = vy_recovery_drop_run(recovery, record->run_id,
@@ -2353,6 +2404,7 @@ vy_log_append_lsm(struct xlog *xlog, struct vy_lsm_recovery_info *lsm)
 		} else {
 			record.type = VY_LOG_CREATE_RUN;
 			record.dump_lsn = run->dump_lsn;
+			record.dump_count = run->dump_count;
 		}
 		record.lsm_id = lsm->id;
 		record.run_id = run->id;

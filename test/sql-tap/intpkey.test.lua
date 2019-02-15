@@ -1,6 +1,6 @@
 #!/usr/bin/env tarantool
 test = require("sqltester")
-test:plan(39)
+test:plan(40)
 
 --!./tcltestrunner.lua
 -- 2001 September 15
@@ -13,7 +13,7 @@ test:plan(39)
 --    May you share freely, never taking more than you give.
 --
 -------------------------------------------------------------------------
--- This file implements regression tests for SQLite library.
+-- This file implements regression tests for sql library.
 --
 -- This file implements tests for the special processing associated
 -- with INTEGER PRIMARY KEY columns.
@@ -54,7 +54,7 @@ test:do_execsql_test(
     [[
         DROP TABLE t1;
         CREATE TABLE t1(a INTEGER PRIMARY KEY, b TEXT, c TEXT);
-        --SELECT name FROM sqlite_master
+        --SELECT name FROM sql_master
         --  WHERE type='index' AND tbl_name='t1';
     ]], {
         -- <intpkey-1.2>
@@ -149,7 +149,8 @@ test:do_execsql_test(
 test:do_execsql_test(
     "intpkey-1.11",
     [[
-        UPDATE t1 SET a=4 WHERE b='one';
+        DELETE FROM t1 WHERE a = 7;
+        INSERT INTO t1 VALUES(4,'one','two');
         SELECT * FROM t1;
     ]], {
         -- <intpkey-1.11>
@@ -239,6 +240,18 @@ test:do_execsql_test(
         -- </intpkey-1.16>
     })
 
+-- Direct update of PK is forbidden
+--
+test:do_catchsql_test(
+    "intpkey-1.17",
+    [[
+        CREATE TABLE test(id INT PRIMARY KEY AUTOINCREMENT);
+        INSERT INTO test VALUES (1);
+        UPDATE test SET id = 2;
+    ]], {
+        1, "Attempt to modify a tuple field which is part of index 'pk_unnamed_TEST_1' in space 'TEST'"
+    })
+
 --### INDICES
 -- Check to make sure indices work correctly with integer primary keys
 --
@@ -281,7 +294,8 @@ test:do_execsql_test(
 test:do_execsql_test(
     "intpkey-2.2",
     [[
-        UPDATE t1 SET a=8 WHERE b=='y';
+        DELETE FROM t1 WHERE b=='y';
+        INSERT INTO t1 VALUES(8,'y','z');
         SELECT * FROM t1 WHERE b=='y';
     ]], {
         -- <intpkey-2.2>
@@ -335,7 +349,8 @@ test:do_execsql_test(
     "intpkey-2.7",
     [[
         --UPDATE t1 SET a=-4 WHERE rowid=8;
-        UPDATE t1 SET a=-4 WHERE a=8;
+        DELETE FROM t1 WHERE a==8;
+        INSERT INTO t1 VALUES(-4,'y','z');
         SELECT * FROM t1 WHERE b>'a';
     ]], {
         -- <intpkey-2.7>
@@ -356,9 +371,9 @@ test:do_execsql_test(
 -- Do an SQL statement.  Append the search count to the end of the result.
 --
 local function count(sql)
-    sqlite_search_count = 0
+    sql_search_count = 0
     local r = test:execsql(sql)
-    table.insert(r, sqlite_search_count)
+    table.insert(r, sql_search_count)
     return r
 end
 

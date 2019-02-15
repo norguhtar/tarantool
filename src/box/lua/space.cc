@@ -30,7 +30,7 @@
  */
 #include "box/lua/space.h"
 #include "box/lua/tuple.h"
-#include "box/sql/sqliteLimit.h"
+#include "box/sql/sqlLimit.h"
 #include "lua/utils.h"
 #include "lua/trigger.h"
 
@@ -296,6 +296,11 @@ lbox_fillspace(struct lua_State *L, struct space *space, int i)
 			lua_pushnumber(L, part->fieldno + TUPLE_INDEX_BASE);
 			lua_setfield(L, -2, "fieldno");
 
+			if (part->path != NULL) {
+				lua_pushlstring(L, part->path, part->path_len);
+				lua_setfield(L, -2, "path");
+			}
+
 			lua_pushboolean(L, key_part_is_nullable(part));
 			lua_setfield(L, -2, "is_nullable");
 
@@ -334,8 +339,10 @@ lbox_fillspace(struct lua_State *L, struct space *space, int i)
 			lua_pushstring(L, "options");
 			lua_newtable(L);
 
-			lua_pushnumber(L, index_opts->range_size);
-			lua_setfield(L, -2, "range_size");
+			if (index_opts->range_size > 0) {
+				lua_pushnumber(L, index_opts->range_size);
+				lua_setfield(L, -2, "range_size");
+			}
 
 			lua_pushnumber(L, index_opts->page_size);
 			lua_setfield(L, -2, "page_size");

@@ -45,10 +45,22 @@ cn:execute('')
 cn:execute('   ;')
 
 --
--- Parmaeters bindig.
+-- gh-3467: allow only positive integers under limit clause.
 --
-
 cn:execute('select * from test where id = ?', {1})
+cn:execute('select * from test limit ?', {2})
+cn:execute('select * from test limit ?', {-2})
+cn:execute('select * from test limit ?', {2.7})
+cn:execute('select * from test limit ?', {'Hello'})
+
+cn:execute('select * from test limit 1 offset ?', {2})
+cn:execute('select * from test limit 1 offset ?', {-2})
+cn:execute('select * from test limit 1 offset ?', {2.7})
+cn:execute('select * from test limit 1 offset ?', {'Hello'})
+
+--
+-- Parameters binding.
+--
 parameters = {}
 parameters[1] = {}
 parameters[1][':value'] = 1
@@ -100,7 +112,7 @@ cn:execute(sql, parameters)
 --
 -- Errors during parameters binding.
 --
--- Try value > INT64_MAX. SQLite can't bind it, since it has no
+-- Try value > INT64_MAX. sql can't bind it, since it has no
 -- suitable method in its bind API.
 cn:execute('select ? as big_uint', {0xefffffffffffffff})
 -- Bind incorrect parameters.

@@ -25,7 +25,7 @@ ffi.cdef[[
 --    May you share freely, never taking more than you give.
 --
 -------------------------------------------------------------------------
--- This file implements regression tests for SQLite library.  The
+-- This file implements regression tests for sql library.  The
 -- focus of this file is testing the use of indices in WHERE clauses
 -- based on recent changes to the optimizer.
 --
@@ -653,14 +653,13 @@ test:do_test(
         "where2-6.9",
         function()
             return queryplan([[
-    -- The + operator removes affinity from the rhs.  No conversions
-    -- occur and the comparison is false.  The result is an empty set.
+    -- The + operator doesn't affect RHS.
     --
     SELECT b,a FROM t2249b CROSS JOIN t2249a WHERE a=+b;
   ]])
         end, {
             -- <where2-6.9>
-            "nosort", "T2249B", "*", "T2249A", "*"
+            123, "0123", "nosort", "T2249B", "*", "T2249A", "*"
             -- </where2-6.9>
         })
 
@@ -673,7 +672,7 @@ test:do_test(
   ]])
         end, {
             -- <where2-6.9.2>
-            "nosort", "T2249B", "*", "T2249A", "*"
+            123, "0123","nosort", "T2249B", "*", "T2249A", "*"
             -- </where2-6.9.2>
         })
 
@@ -681,9 +680,6 @@ test:do_test(
         "where2-6.10",
         function()
             return queryplan([[
-    -- Use + on both sides of the comparison to disable indices
-    -- completely.  Make sure we get the same result.
-    --
     SELECT b,a FROM t2249b CROSS JOIN t2249a WHERE +a=+b;
   ]])
         end, {
@@ -753,45 +749,36 @@ test:do_test(
     test:do_test(
         "where2-6.12",
         function()
-            -- In this case, the +b disables the affinity conflict and allows
-            -- the OR optimization to be used again.  The result is now an empty
-            -- set, the same as in where2-6.9.
             return queryplan([[
       SELECT b,a FROM t2249b CROSS JOIN t2249a WHERE a=+b OR a='hello';
     ]])
         end, {
             -- <where2-6.12>
-            "nosort", "T2249B", "*", "T2249A", "*"
+            123, "0123", "nosort", "T2249B", "*", "T2249A", "*"
             -- </where2-6.12>
         })
 
     test:do_test(
         "where2-6.12.2",
         function()
-            -- In this case, the +b disables the affinity conflict and allows
-            -- the OR optimization to be used again.  The result is now an empty
-            -- set, the same as in where2-6.9.
             return queryplan([[
       SELECT b,a FROM t2249b CROSS JOIN t2249a WHERE a='hello' OR +b=a;
     ]])
         end, {
             -- <where2-6.12.2>
-            "nosort", "T2249B", "*", "T2249A", "*"
+            123, "0123", "nosort", "T2249B", "*", "T2249A", "*"
             -- </where2-6.12.2>
         })
 
     test:do_test(
         "where2-6.12.3",
         function()
-            -- In this case, the +b disables the affinity conflict and allows
-            -- the OR optimization to be used again.  The result is now an empty
-            -- set, the same as in where2-6.9.
             return queryplan([[
       SELECT b,a FROM t2249b CROSS JOIN t2249a WHERE +b=a OR a='hello';
     ]])
         end, {
             -- <where2-6.12.3>
-            "nosort", "T2249B", "*", "T2249A", "*"
+            123, "0123", "nosort", "T2249B", "*", "T2249A", "*"
             -- </where2-6.12.3>
         })
 
@@ -931,10 +918,10 @@ test:do_test(
             -- <where2-7.4>
             --1, 2, 3, 2, 3, "sort"
             -- This is tahter strange, but when pk was deleted from secondary indexes
-            -- sqlite became able to optimize sort using information that i9y is unique and
+            -- sql became able to optimize sort using information that i9y is unique and
             -- there is nothing to sort here.
             -- todo: It seems like this kind of optimization was appliable until removing pk and
-            -- it is a bug in sqlite optimizer.
+            -- it is a bug in sql optimizer.
             1, 2, 3, 2, 3, "nosort"
             -- </where2-7.4>
         })

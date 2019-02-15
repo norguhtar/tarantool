@@ -91,8 +91,38 @@ struct vy_lsm_env {
 	size_t bloom_size;
 	/** Size of memory used for page index. */
 	size_t page_index_size;
-	/** Global disk statistics. */
-	struct vy_disk_stat disk_stat;
+	/**
+	 * Size of disk space used for storing data of all spaces,
+	 * in bytes, without taking into account disk compression.
+	 * By 'data' we mean statements stored in primary indexes
+	 * only, which is consistent with space.bsize().
+	 */
+	int64_t disk_data_size;
+	/**
+	 * Size of disk space used for indexing data in all spaces,
+	 * in bytes, without taking into account disk compression.
+	 * This consists of page indexes and bloom filters, which
+	 * are stored in .index files, as well as the total size of
+	 * statements stored in secondary index .run files, which
+	 * is consistent with index.bsize().
+	 */
+	int64_t disk_index_size;
+	/**
+	 * Min size of disk space required to store data of all
+	 * spaces of the database. In other words, the size of
+	 * disk space the database would occupy if all spaces were
+	 * compacted and there were no indexes. Accounted in bytes,
+	 * without taking into account disk compression. Estimated
+	 * as the size of data stored in the last level of primary
+	 * LSM trees. Along with disk_data_size and disk_index_size,
+	 * it can be used for evaluating space amplification.
+	 */
+	int64_t compacted_data_size;
+	/**
+	 * Size of data of all spaces that need to be compacted,
+	 * in bytes, without taking into account disk compression.
+	 */
+	int64_t compaction_queue_size;
 	/** Memory pool for vy_history_node allocations. */
 	struct mempool history_node_pool;
 };
@@ -218,10 +248,12 @@ struct vy_lsm {
 	 * Tree of all ranges of this LSM tree, linked by
 	 * vy_range->tree_node, ordered by vy_range->begin.
 	 */
-	vy_range_tree_t *tree;
+	vy_range_tree_t range_tree;
 	/** Number of ranges in this LSM tree. */
 	int range_count;
-	/** Heap of ranges, prioritized by compact_priority. */
+	/** Sum dumps_per_compaction across all ranges. */
+	int sum_dumps_per_compaction;
+	/** Heap of ranges, prioritized by compaction_priority. */
 	heap_t range_heap;
 	/**
 	 * List of all runs created for this LSM tree,
@@ -276,8 +308,8 @@ struct vy_lsm {
 	bool is_dumping;
 	/** Link in vy_scheduler->dump_heap. */
 	struct heap_node in_dump;
-	/** Link in vy_scheduler->compact_heap. */
-	struct heap_node in_compact;
+	/** Link in vy_scheduler->compaction_heap. */
+	struct heap_node in_compaction;
 	/**
 	 * Interval tree containing reads from this LSM tree done by
 	 * all active transactions. Linked by vy_tx_interval->in_lsm.
@@ -318,6 +350,16 @@ vy_lsm_is_empty(struct vy_lsm *lsm)
 {
 	return (lsm->stat.disk.count.rows == 0 &&
 		lsm->stat.memory.count.rows == 0);
+}
+
+/**
+ * Return the averange number of dumps it takes to trigger major
+ * compaction of a range in this LSM tree.
+ */
+static inline int
+vy_lsm_dumps_per_compaction(struct vy_lsm *lsm)
+{
+	return lsm->sum_dumps_per_compaction / lsm->range_count;
 }
 
 /**
@@ -404,9 +446,13 @@ vy_lsm_recover(struct vy_lsm *lsm, struct vy_recovery *recovery,
 int64_t
 vy_lsm_generation(struct vy_lsm *lsm);
 
-/** Return max compact_priority among ranges of an LSM tree. */
+/** Return max compaction_priority among ranges of an LSM tree. */
 int
-vy_lsm_compact_priority(struct vy_lsm *lsm);
+vy_lsm_compaction_priority(struct vy_lsm *lsm);
+
+/** Return the target size of a range in an LSM tree. */
+int64_t
+vy_lsm_range_size(struct vy_lsm *lsm);
 
 /** Add a run to the list of runs of an LSM tree. */
 void
@@ -434,10 +480,11 @@ vy_lsm_remove_range(struct vy_lsm *lsm, struct vy_range *range);
  * Account a range in an LSM tree.
  *
  * This function updates the following LSM tree statistics:
- *  - vy_lsm::run_hist after a slice is added to or removed from
- *    a range of the LSM tree.
- *  - vy_lsm::stat::disk::compact::queue after compaction priority
+ *  - vy_lsm::run_hist and vy_lsm::sum_dumps_per_compaction after
+ *    a slice is added to or removed from a range of the LSM tree.
+ *  - vy_lsm::stat::disk::compaction::queue after compaction priority
  *    of a range is updated.
+ *  - vy_lsm::stat::disk::last_level_count after a range is compacted.
  */
 void
 vy_lsm_acct_range(struct vy_lsm *lsm, struct vy_range *range);
@@ -454,17 +501,17 @@ vy_lsm_unacct_range(struct vy_lsm *lsm, struct vy_range *range);
  * Account dump in LSM tree statistics.
  */
 void
-vy_lsm_acct_dump(struct vy_lsm *lsm,
-		 const struct vy_stmt_counter *in,
-		 const struct vy_disk_stmt_counter *out);
+vy_lsm_acct_dump(struct vy_lsm *lsm, double time,
+		 const struct vy_stmt_counter *input,
+		 const struct vy_disk_stmt_counter *output);
 
 /**
  * Account compaction in LSM tree statistics.
  */
 void
-vy_lsm_acct_compaction(struct vy_lsm *lsm,
-		       const struct vy_disk_stmt_counter *in,
-		       const struct vy_disk_stmt_counter *out);
+vy_lsm_acct_compaction(struct vy_lsm *lsm, double time,
+		       const struct vy_disk_stmt_counter *input,
+		       const struct vy_disk_stmt_counter *output);
 
 /**
  * Allocate a new active in-memory index for an LSM tree while

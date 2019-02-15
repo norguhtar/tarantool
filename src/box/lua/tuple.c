@@ -463,13 +463,13 @@ lbox_tuple_field_by_path(struct lua_State *L)
 	const char *field = NULL, *path = lua_tolstring(L, 2, &len);
 	if (len == 0)
 		return 0;
-	if (tuple_field_by_path(tuple, path, (uint32_t) len,
-				lua_hashstring(L, 2), &field) != 0) {
-		return luaT_error(L);
-	} else if (field == NULL) {
+	field = tuple_field_raw_by_full_path(tuple_format(tuple),
+					     tuple_data(tuple),
+					     tuple_field_map(tuple),
+					     path, (uint32_t)len,
+					     lua_hashstring(L, 2));
+	if (field == NULL)
 		return 0;
-	}
-	assert(field != NULL);
 	luamp_decode(L, luaL_msgpack_default, &field);
 	return 1;
 }

@@ -33,18 +33,19 @@
  * This file contains C code routines that are called by the parser
  * to handle UPDATE statements.
  */
-#include "sqliteInt.h"
+#include "sqlInt.h"
 #include "box/session.h"
 #include "tarantoolInt.h"
+#include "box/tuple_format.h"
 #include "box/schema.h"
 
 void
-sqlite3ColumnDefault(Vdbe *v, struct space_def *def, int i, int ireg)
+sqlColumnDefault(Vdbe *v, struct space_def *def, int i, int ireg)
 {
 	assert(def != 0);
 	if (!def->opts.is_view) {
-		sqlite3_value *pValue = 0;
-		char affinity = def->fields[i].affinity;
+		sql_value *pValue = 0;
+		enum field_type type = def->fields[i].type;
 		VdbeComment((v, "%s.%s", def->name, def->fields[i].name));
 		assert(i < (int)def->field_count);
 
@@ -52,14 +53,14 @@ sqlite3ColumnDefault(Vdbe *v, struct space_def *def, int i, int ireg)
 		assert(def->fields != NULL && i < (int)def->field_count);
 		if (def->fields != NULL)
 			expr = def->fields[i].default_value_expr;
-		sqlite3ValueFromExpr(sqlite3VdbeDb(v), expr, affinity,
+		sqlValueFromExpr(sqlVdbeDb(v), expr, type,
 				     &pValue);
 		if (pValue) {
-			sqlite3VdbeAppendP4(v, pValue, P4_MEM);
+			sqlVdbeAppendP4(v, pValue, P4_MEM);
 		}
-#ifndef SQLITE_OMIT_FLOATING_POINT
-		if (affinity == AFFINITY_REAL) {
-			sqlite3VdbeAddOp1(v, OP_RealAffinity, ireg);
+#ifndef SQL_OMIT_FLOATING_POINT
+		if (type == FIELD_TYPE_NUMBER) {
+			sqlVdbeAddOp1(v, OP_Realify, ireg);
 		}
 #endif
 	}
@@ -73,7 +74,7 @@ sqlite3ColumnDefault(Vdbe *v, struct space_def *def, int i, int ireg)
 *            on_error   pTabList      pChanges             pWhere
  */
 void
-sqlite3Update(Parse * pParse,		/* The parser context */
+sqlUpdate(Parse * pParse,		/* The parser context */
 	      SrcList * pTabList,	/* The table in which we should change things */
 	      ExprList * pChanges,	/* Things to be changed */
 	      Expr * pWhere,		/* The WHERE clause.  May be null */
@@ -84,7 +85,7 @@ sqlite3Update(Parse * pParse,		/* The parser context */
 	int addrTop = 0;	/* VDBE instruction address of the start of the loop */
 	WhereInfo *pWInfo;	/* Information about the WHERE clause */
 	Vdbe *v;		/* The virtual database engine */
-	sqlite3 *db;		/* The database structure */
+	sql *db;		/* The database structure */
 	int *aXRef = 0;		/* aXRef[i] is the index in pChanges->a[] of the
 				 * an expression for the i-th column of the table.
 				 * aXRef[i]==-1 if the i-th column is not changed.
@@ -112,6 +113,8 @@ sqlite3Update(Parse * pParse,		/* The parser context */
 	int regNew = 0;		/* Content of the NEW.* table in triggers */
 	int regOld = 0;		/* Content of OLD.* table in triggers */
 	int regKey = 0;		/* composite PRIMARY KEY value */
+	/* Count of changed rows. Match aXRef items != -1. */
+	int upd_cols_cnt = 0;
 
 	db = pParse->db;
 	if (pParse->nErr || db->mallocFailed) {
@@ -137,7 +140,7 @@ sqlite3Update(Parse * pParse,		/* The parser context */
 		goto update_cleanup;
 	}
 	if (is_view && tmask == 0) {
-		sqlite3ErrorMsg(pParse, "cannot modify %s because it is a view",
+		sqlErrorMsg(pParse, "cannot modify %s because it is a view",
 				pTab->def->name);
 		goto update_cleanup;
 	}
@@ -166,7 +169,7 @@ sqlite3Update(Parse * pParse,		/* The parser context */
 	 */
 	bool is_pk_modified = false;
 	for (i = 0; i < pChanges->nExpr; i++) {
-		if (sqlite3ResolveExprNames(&sNC, pChanges->a[i].pExpr)) {
+		if (sqlResolveExprNames(&sNC, pChanges->a[i].pExpr)) {
 			goto update_cleanup;
 		}
 		for (j = 0; j < (int)def->field_count; j++) {
@@ -176,18 +179,19 @@ sqlite3Update(Parse * pParse,		/* The parser context */
 				    sql_space_column_is_in_pk(pTab->space, j))
 					is_pk_modified = true;
 				if (aXRef[j] != -1) {
-					sqlite3ErrorMsg(pParse,
+					sqlErrorMsg(pParse,
 							"set id list: duplicate"
 							" column name %s",
 							pChanges->a[i].zName);
 					goto update_cleanup;
 				}
 				aXRef[j] = i;
+				upd_cols_cnt++;
 				break;
 			}
 		}
 		if (j >= (int)def->field_count) {
-			sqlite3ErrorMsg(pParse, "no such column: %s",
+			sqlErrorMsg(pParse, "no such column: %s",
 					pChanges->a[i].zName);
 			goto update_cleanup;
 		}
@@ -201,10 +205,10 @@ sqlite3Update(Parse * pParse,		/* The parser context */
 	hasFK = fkey_is_required(pTab->def->id, aXRef);
 
 	/* Begin generating code. */
-	v = sqlite3GetVdbe(pParse);
+	v = sqlGetVdbe(pParse);
 	if (v == NULL)
 		goto update_cleanup;
-	sqlite3VdbeCountChanges(v);
+	sqlVdbeCountChanges(v);
 	sql_set_multi_write(pParse, true);
 
 	/* Allocate required registers. */
@@ -216,7 +220,7 @@ sqlite3Update(Parse * pParse,		/* The parser context */
 		regNewPk = ++pParse->nMem;
 	}
 	regNew = pParse->nMem + 1;
-	pParse->nMem += def->field_count;
+	pParse->nMem += def->field_count + 1;
 
 	/* If we are trying to update a view, realize that view into
 	 * an ephemeral table.
@@ -237,7 +241,7 @@ sqlite3Update(Parse * pParse,		/* The parser context */
 	/* Resolve the column names in all the expressions in the
 	 * WHERE clause.
 	 */
-	if (sqlite3ResolveExprNames(&sNC, pWhere)) {
+	if (sqlResolveExprNames(&sNC, pWhere)) {
 		goto update_cleanup;
 	}
 	/* First of nPk memory cells holding PRIMARY KEY value. */
@@ -246,23 +250,23 @@ sqlite3Update(Parse * pParse,		/* The parser context */
 	regKey = ++pParse->nMem;
 	int reg_eph = ++pParse->nMem;
 	iEph = pParse->nTab++;
-	sqlite3VdbeAddOp2(v, OP_Null, 0, iPk);
+	sqlVdbeAddOp2(v, OP_Null, 0, iPk);
 
 	/* Address of the OpenEphemeral instruction. */
-	int addrOpen = sqlite3VdbeAddOp2(v, OP_OpenTEphemeral, reg_eph,
+	int addrOpen = sqlVdbeAddOp2(v, OP_OpenTEphemeral, reg_eph,
 					 pk_part_count);
-	pWInfo = sqlite3WhereBegin(pParse, pTabList, pWhere, 0, 0,
+	pWInfo = sqlWhereBegin(pParse, pTabList, pWhere, 0, 0,
 				   WHERE_ONEPASS_DESIRED, pk_cursor);
 	if (pWInfo == 0)
 		goto update_cleanup;
-	okOnePass = sqlite3WhereOkOnePass(pWInfo, aiCurOnePass);
+	okOnePass = sqlWhereOkOnePass(pWInfo, aiCurOnePass);
 	if (is_view) {
 		for (i = 0; i < (int) pk_part_count; i++) {
-			sqlite3VdbeAddOp3(v, OP_Column, pk_cursor, i, iPk + i);
+			sqlVdbeAddOp3(v, OP_Column, pk_cursor, i, iPk + i);
 		}
 	} else {
 		for (i = 0; i < (int) pk_part_count; i++) {
-			sqlite3ExprCodeGetColumnOfTable(v, def, pk_cursor,
+			sqlExprCodeGetColumnOfTable(v, def, pk_cursor,
 							pPk->def->key_def->
 								parts[i].fieldno,
 							iPk + i);
@@ -270,50 +274,50 @@ sqlite3Update(Parse * pParse,		/* The parser context */
 	}
 
 	if (okOnePass) {
-		sqlite3VdbeChangeToNoop(v, addrOpen);
+		sqlVdbeChangeToNoop(v, addrOpen);
 		nKey = pk_part_count;
 		regKey = iPk;
 	} else {
-		const char *zAff = is_view ? 0 :
-				   sql_space_index_affinity_str(pParse->db, def,
-								pPk->def);
-		sqlite3VdbeAddOp4(v, OP_MakeRecord, iPk, pk_part_count,
-				  regKey, zAff, pk_part_count);
+		enum field_type *types = is_view ? NULL :
+					 sql_index_type_str(pParse->db,
+							    pPk->def);
+		sqlVdbeAddOp4(v, OP_MakeRecord, iPk, pk_part_count,
+				  regKey, (char *) types, P4_DYNAMIC);
 		/*
 		 * Set flag to save memory allocating one by
 		 * malloc.
 		 */
-		sqlite3VdbeChangeP5(v, 1);
-		sqlite3VdbeAddOp2(v, OP_IdxInsert, regKey, reg_eph);
+		sqlVdbeChangeP5(v, 1);
+		sqlVdbeAddOp2(v, OP_IdxInsert, regKey, reg_eph);
 	}
 	/* End the database scan loop.
 	 */
-	sqlite3WhereEnd(pWInfo);
+	sqlWhereEnd(pWInfo);
 
 
 	/* Initialize the count of updated rows
 	 */
-	if ((user_session->sql_flags & SQLITE_CountRows)
+	if ((user_session->sql_flags & SQL_CountRows)
 	    && !pParse->pTriggerTab) {
 		regRowCount = ++pParse->nMem;
-		sqlite3VdbeAddOp2(v, OP_Integer, 0, regRowCount);
+		sqlVdbeAddOp2(v, OP_Integer, 0, regRowCount);
 	}
-	labelBreak = sqlite3VdbeMakeLabel(v);
+	labelBreak = sqlVdbeMakeLabel(v);
 	/* Top of the update loop */
 	if (okOnePass) {
 		labelContinue = labelBreak;
-		sqlite3VdbeAddOp2(v, OP_IsNull, regKey, labelBreak);
+		sqlVdbeAddOp2(v, OP_IsNull, regKey, labelBreak);
 		if (!is_view) {
 			assert(pPk);
-			sqlite3VdbeAddOp4Int(v, OP_NotFound, pk_cursor,
+			sqlVdbeAddOp4Int(v, OP_NotFound, pk_cursor,
 					     labelBreak, regKey, pk_part_count);
 		}
 	} else {
-		labelContinue = sqlite3VdbeMakeLabel(v);
-		sqlite3VdbeAddOp3(v, OP_IteratorOpen, iEph, 0, reg_eph);
-		sqlite3VdbeAddOp2(v, OP_Rewind, iEph, labelBreak);
-		addrTop = sqlite3VdbeAddOp2(v, OP_RowData, iEph, regKey);
-		sqlite3VdbeAddOp4Int(v, OP_NotFound, pk_cursor, labelContinue,
+		labelContinue = sqlVdbeMakeLabel(v);
+		sqlVdbeAddOp3(v, OP_IteratorOpen, iEph, 0, reg_eph);
+		sqlVdbeAddOp2(v, OP_Rewind, iEph, labelBreak);
+		addrTop = sqlVdbeAddOp2(v, OP_RowData, iEph, regKey);
+		sqlVdbeAddOp4Int(v, OP_NotFound, pk_cursor, labelContinue,
 				     regKey, 0);
 	}
 
@@ -340,11 +344,11 @@ sqlite3Update(Parse * pParse,		/* The parser context */
 			    || (i < 32 && (oldmask & MASKBIT32(i)) != 0) ||
 				sql_space_column_is_in_pk(pTab->space, i)) {
 				testcase(oldmask != 0xffffffff && i == 31);
-				sqlite3ExprCodeGetColumnOfTable(v, def,
+				sqlExprCodeGetColumnOfTable(v, def,
 								pk_cursor, i,
 								regOld + i);
 			} else {
-				sqlite3VdbeAddOp2(v, OP_Null, 0, regOld + i);
+				sqlVdbeAddOp2(v, OP_Null, 0, regOld + i);
 			}
 		}
 
@@ -368,7 +372,7 @@ sqlite3Update(Parse * pParse,		/* The parser context */
 	for (i = 0; i < (int)def->field_count; i++) {
 		j = aXRef[i];
 		if (j >= 0) {
-			sqlite3ExprCode(pParse, pChanges->a[j].pExpr,
+			sqlExprCode(pParse, pChanges->a[j].pExpr,
 					regNew + i);
 		} else if (0 == (tmask & TRIGGER_BEFORE) || i > 31
 			   || (newmask & MASKBIT32(i))) {
@@ -379,10 +383,10 @@ sqlite3Update(Parse * pParse,		/* The parser context */
 			 */
 			testcase(i == 31);
 			testcase(i == 32);
-			sqlite3ExprCodeGetColumnToReg(pParse, def, i,
+			sqlExprCodeGetColumnToReg(pParse, def, i,
 						      pk_cursor, regNew + i);
 		} else {
-			sqlite3VdbeAddOp2(v, OP_Null, 0, regNew + i);
+			sqlVdbeAddOp2(v, OP_Null, 0, regNew + i);
 		}
 	}
 
@@ -390,7 +394,7 @@ sqlite3Update(Parse * pParse,		/* The parser context */
 	 * verified. One could argue that this is wrong.
 	 */
 	if (tmask & TRIGGER_BEFORE) {
-		sql_emit_table_affinity(v, pTab->def, regNew);
+		sql_emit_table_types(v, pTab->def, regNew);
 		vdbe_code_row_trigger(pParse, trigger, TK_UPDATE, pChanges,
 				      TRIGGER_BEFORE, pTab, regOldPk,
 				      on_error, labelContinue);
@@ -402,10 +406,10 @@ sqlite3Update(Parse * pParse,		/* The parser context */
 		 * documentation.
 		 */
 		if (!is_view) {
-			sqlite3VdbeAddOp4Int(v, OP_NotFound, pk_cursor,
+			sqlVdbeAddOp4Int(v, OP_NotFound, pk_cursor,
 					     labelContinue, regKey, nKey);
 		} else {
-			sqlite3VdbeAddOp4Int(v, OP_NotFound, pk_cursor,
+			sqlVdbeAddOp4Int(v, OP_NotFound, pk_cursor,
 					     labelContinue,
 					     regKey - pk_part_count,
 					     pk_part_count);
@@ -418,7 +422,7 @@ sqlite3Update(Parse * pParse,		/* The parser context */
 		 */
 		for (i = 0; i < (int)def->field_count; i++) {
 			if (aXRef[i] < 0) {
-				sqlite3ExprCodeGetColumnOfTable(v, def,
+				sqlExprCodeGetColumnOfTable(v, def,
 								pk_cursor, i,
 								regNew + i);
 			}
@@ -430,23 +434,66 @@ sqlite3Update(Parse * pParse,		/* The parser context */
 		vdbe_emit_constraint_checks(pParse, pTab, regNewPk + 1,
 					    on_error, labelContinue, aXRef);
 		/* Do FK constraint checks. */
-		if (hasFK)
+		if (hasFK) {
 			fkey_emit_check(pParse, pTab, regOldPk, 0, aXRef);
-		/*
-		 * Delete the index entries associated with the
-		 * current record. It can be already removed by
-		 * trigger or REPLACE conflict action.
-		 */
-		int addr1 = sqlite3VdbeAddOp4Int(v, OP_NotFound, pk_cursor, 0,
-						 regKey, nKey);
-		assert(regNew == regNewPk + 1);
-		sqlite3VdbeAddOp2(v, OP_Delete, pk_cursor, 0);
-		sqlite3VdbeJumpHere(v, addr1);
-		if (hasFK)
+		}
+		if (on_error == ON_CONFLICT_ACTION_REPLACE) {
+			/*
+			 * Delete the index entries associated with the
+			 * current record. It can be already removed by
+			 * trigger or REPLACE conflict action.
+			 */
+			int not_found_lbl =
+				sqlVdbeAddOp4Int(v, OP_NotFound, pk_cursor,
+						     0, regKey, nKey);
+			assert(regNew == regNewPk + 1);
+			sqlVdbeAddOp2(v, OP_Delete, pk_cursor, 0);
+			sqlVdbeJumpHere(v, not_found_lbl);
+		}
+		if (hasFK) {
 			fkey_emit_check(pParse, pTab, 0, regNewPk, aXRef);
-		vdbe_emit_insertion_completion(v, space, regNew,
-					       pTab->def->field_count,
-					       on_error);
+		}
+		if (on_error == ON_CONFLICT_ACTION_REPLACE) {
+			 vdbe_emit_insertion_completion(v, space, regNew,
+							pTab->def->field_count,
+							on_error);
+
+		} else {
+			int key_reg;
+			if (okOnePass) {
+				key_reg = sqlGetTempReg(pParse);
+				enum field_type *types =
+					sql_index_type_str(pParse->db,
+							   pPk->def);
+				sqlVdbeAddOp4(v, OP_MakeRecord, iPk,
+						  pk_part_count, key_reg,
+						  (char *) types, P4_DYNAMIC);
+			} else {
+				assert(nKey == 0);
+				key_reg = regKey;
+			}
+
+			/* Prepare array of changed fields. */
+			uint32_t upd_cols_sz = upd_cols_cnt * sizeof(uint32_t);
+			uint32_t *upd_cols = sqlDbMallocRaw(db, upd_cols_sz);
+			if (upd_cols == NULL)
+				goto update_cleanup;
+			upd_cols_cnt = 0;
+			for (uint32_t i = 0; i < def->field_count; i++) {
+				if (aXRef[i] == -1)
+					continue;
+				upd_cols[upd_cols_cnt++] = i;
+			}
+			int upd_cols_reg = sqlGetTempReg(pParse);
+			sqlVdbeAddOp4(v, OP_Blob, upd_cols_sz, upd_cols_reg,
+					0, (const char *)upd_cols, P4_DYNAMIC);
+			u16 pik_flags = OPFLAG_NCHANGE;
+			SET_CONFLICT_FLAG(pik_flags, on_error);
+			sqlVdbeAddOp4(v, OP_Update, regNew, key_reg,
+					  upd_cols_reg, (char *)space,
+					  P4_SPACEPTR);
+			sqlVdbeChangeP5(v, pik_flags);
+		}
 		/*
 		 * Do any ON CASCADE, SET NULL or SET DEFAULT
 		 * operations required to handle rows that refer
@@ -458,9 +505,9 @@ sqlite3Update(Parse * pParse,		/* The parser context */
 
 	/* Increment the row counter
 	 */
-	if ((user_session->sql_flags & SQLITE_CountRows)
+	if ((user_session->sql_flags & SQL_CountRows)
 	    && !pParse->pTriggerTab) {
-		sqlite3VdbeAddOp2(v, OP_AddImm, regRowCount, 1);
+		sqlVdbeAddOp2(v, OP_AddImm, regRowCount, 1);
 	}
 
 	vdbe_code_row_trigger(pParse, trigger, TK_UPDATE, pChanges,
@@ -473,23 +520,23 @@ sqlite3Update(Parse * pParse,		/* The parser context */
 	if (okOnePass) {
 		/* Nothing to do at end-of-loop for a single-pass */
 	} else {
-		sqlite3VdbeResolveLabel(v, labelContinue);
-		sqlite3VdbeAddOp2(v, OP_Next, iEph, addrTop);
+		sqlVdbeResolveLabel(v, labelContinue);
+		sqlVdbeAddOp2(v, OP_Next, iEph, addrTop);
 		VdbeCoverage(v);
 	}
-	sqlite3VdbeResolveLabel(v, labelBreak);
+	sqlVdbeResolveLabel(v, labelBreak);
 
 	/* Return the number of rows that were changed. */
-	if (user_session->sql_flags & SQLITE_CountRows &&
+	if (user_session->sql_flags & SQL_CountRows &&
 	    pParse->pTriggerTab == NULL) {
-		sqlite3VdbeAddOp2(v, OP_ResultRow, regRowCount, 1);
-		sqlite3VdbeSetNumCols(v, 1);
-		sqlite3VdbeSetColName(v, 0, COLNAME_NAME, "rows updated",
-				      SQLITE_STATIC);
+		sqlVdbeAddOp2(v, OP_ResultRow, regRowCount, 1);
+		sqlVdbeSetNumCols(v, 1);
+		sqlVdbeSetColName(v, 0, COLNAME_NAME, "rows updated",
+				      SQL_STATIC);
 	}
 
  update_cleanup:
-	sqlite3SrcListDelete(db, pTabList);
+	sqlSrcListDelete(db, pTabList);
 	sql_expr_list_delete(db, pChanges);
 	sql_expr_delete(db, pWhere, false);
 	return;

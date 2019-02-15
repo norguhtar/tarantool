@@ -13,7 +13,7 @@ test:plan(82)
 --    May you share freely, never taking more than you give.
 --
 -------------------------------------------------------------------------
--- This file implements regression tests for SQLite library.  The
+-- This file implements regression tests for sql library.  The
 -- focus of this file is testing the CAST operator.
 --
 -- $Id: cast.test,v 1.10 2008/11/06 15:33:04 drh Exp $
@@ -70,7 +70,7 @@ test:do_catchsql_test(
         SELECT CAST(x'616263' AS numeric)
     ]], {
         -- <cast-1.5>
-        1, 'Type mismatch: can not convert abc to real'
+        1, 'Type mismatch: can not convert abc to number'
         -- </cast-1.5>
     })
 
@@ -450,7 +450,7 @@ test:do_catchsql_test(
         SELECT CAST('123abc' AS numeric)
     ]], {
         -- <cast-1.45>
-        1, 'Type mismatch: can not convert 123abc to real'
+        1, 'Type mismatch: can not convert 123abc to number'
         -- </cast-1.45>
     })
 
@@ -480,7 +480,7 @@ test:do_catchsql_test(
         SELECT CAST('123.5abc' AS numeric)
     ]], {
         -- <cast-1.51>
-        1, 'Type mismatch: can not convert 123.5abc to real'
+        1, 'Type mismatch: can not convert 123.5abc to number'
         -- </cast-1.51>
     })
 
@@ -561,7 +561,7 @@ test:do_catchsql_test(
         SELECT CAST('abc' AS REAL)
     ]], {
         -- <case-1.66>
-        1, 'Type mismatch: can not convert abc to real'
+        1, 'Type mismatch: can not convert abc to number'
         -- </case-1.66>
     })
 
@@ -805,38 +805,38 @@ test:do_execsql_test(
 
 
 -- MUST_WORK_TEST prepared statements
--- Test to see if it is possible to trick SQLite into reading past 
+-- Test to see if it is possible to trick sql into reading past
 -- the end of a blob when converting it to a number.
 if 0 > 0 then
 test:do_test(
     "cast-3.32.1",
     function()
         blob = 1234567890
-        DB = sqlite3_connection_pointer("db")
-        STMT = sqlite3_prepare(DB, "SELECT CAST(? AS real)", -1, "TAIL")
-        sqlite3_bind_blob("-static", STMT, 1, blob, 5)
-        return sqlite3_step(STMT)
+        DB = sql_connection_pointer("db")
+        STMT = sql_prepare(DB, "SELECT CAST(? AS real)", -1, "TAIL")
+        sql_bind_blob("-static", STMT, 1, blob, 5)
+        return sql_step(STMT)
     end, {
         -- <cast-3.32.1>
-        "SQLITE_ROW"
+        "sql_ROW"
         -- </cast-3.32.1>
     })
 
 test:do_test(
     "cast-3.32.2",
     function()
-        return sqlite3_column_int(STMT, 0)
+        return sql_column_int(STMT, 0)
     end, {
         -- <cast-3.32.2>
         12345
         -- </cast-3.32.2>
     })
 
-test:do_sqlite3_finalize_test(
+test:do_sql_finalize_test(
     "cast-3.32.3",
     STMT, {
         -- <cast-3.32.3>
-        "SQLITE_OK"
+        "sql_OK"
         -- </cast-3.32.3>
     })
 end
@@ -875,7 +875,7 @@ test:do_test(
         ]]
     end, {
         -- <cast-4.4>
-        1, 'Type mismatch: can not convert abc to real'
+        1, 'Type mismatch: can not convert abc to number'
         -- </cast-4.4>
     })
 

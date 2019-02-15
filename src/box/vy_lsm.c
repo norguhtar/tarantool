@@ -54,14 +54,29 @@
 #include "vy_history.h"
 #include "vy_read_set.h"
 
+/*
+ * It doesn't make much sense to create too small ranges as this
+ * would make the overhead associated with file creation prominent
+ * and increase the number of open files. So we never create ranges
+ * less than 16 MB.
+ */
+static const int64_t VY_MIN_RANGE_SIZE = 16 * 1024 * 1024;
+
+/**
+ * We want a single compaction job to finish in reasonable time
+ * so we limit the range size to 2 GB.
+ */
+static const int64_t VY_MAX_RANGE_SIZE = 2LL * 1024 * 1024 * 1024;
+
 int
 vy_lsm_env_create(struct vy_lsm_env *env, const char *path,
 		  int64_t *p_generation,
 		  vy_upsert_thresh_cb upsert_thresh_cb,
 		  void *upsert_thresh_arg)
 {
-	env->key_format = tuple_format_new(&vy_tuple_format_vtab,
-					   NULL, 0, NULL, 0, NULL);
+	env->key_format = tuple_format_new(&vy_tuple_format_vtab, NULL,
+					   NULL, 0, NULL, 0, 0, NULL, false,
+					   false);
 	if (env->key_format == NULL)
 		return -1;
 	tuple_format_ref(env->key_format);
@@ -128,13 +143,6 @@ vy_lsm_new(struct vy_lsm_env *lsm_env, struct vy_cache_env *cache_env,
 	}
 	lsm->env = lsm_env;
 
-	lsm->tree = malloc(sizeof(*lsm->tree));
-	if (lsm->tree == NULL) {
-		diag_set(OutOfMemory, sizeof(*lsm->tree),
-			 "malloc", "vy_range_tree_t");
-		goto fail_tree;
-	}
-
 	struct key_def *key_def = key_def_dup(index_def->key_def);
 	if (key_def == NULL)
 		goto fail_key_def;
@@ -153,8 +161,9 @@ vy_lsm_new(struct vy_lsm_env *lsm_env, struct vy_cache_env *cache_env,
 		 */
 		lsm->disk_format = format;
 	} else {
-		lsm->disk_format = tuple_format_new(&vy_tuple_format_vtab,
-						    &cmp_def, 1, NULL, 0, NULL);
+		lsm->disk_format = tuple_format_new(&vy_tuple_format_vtab, NULL,
+						    &cmp_def, 1, NULL, 0, 0,
+						    NULL, false, false);
 		if (lsm->disk_format == NULL)
 			goto fail_format;
 	}
@@ -179,7 +188,7 @@ vy_lsm_new(struct vy_lsm_env *lsm_env, struct vy_cache_env *cache_env,
 	lsm->commit_lsn = -1;
 	vy_cache_create(&lsm->cache, cache_env, cmp_def, index_def->iid == 0);
 	rlist_create(&lsm->sealed);
-	vy_range_tree_new(lsm->tree);
+	vy_range_tree_new(&lsm->range_tree);
 	vy_range_heap_create(&lsm->range_heap);
 	rlist_create(&lsm->runs);
 	lsm->pk = pk;
@@ -188,7 +197,7 @@ vy_lsm_new(struct vy_lsm_env *lsm_env, struct vy_cache_env *cache_env,
 	lsm->mem_format = format;
 	tuple_format_ref(lsm->mem_format);
 	lsm->in_dump.pos = UINT32_MAX;
-	lsm->in_compact.pos = UINT32_MAX;
+	lsm->in_compaction.pos = UINT32_MAX;
 	lsm->space_id = index_def->space_id;
 	lsm->index_id = index_def->iid;
 	lsm->group_id = group_id;
@@ -210,8 +219,6 @@ fail_format:
 fail_cmp_def:
 	key_def_delete(key_def);
 fail_key_def:
-	free(lsm->tree);
-fail_tree:
 	free(lsm);
 fail:
 	return NULL;
@@ -234,14 +241,16 @@ vy_lsm_delete(struct vy_lsm *lsm)
 {
 	assert(lsm->refs == 0);
 	assert(lsm->in_dump.pos == UINT32_MAX);
-	assert(lsm->in_compact.pos == UINT32_MAX);
+	assert(lsm->in_compaction.pos == UINT32_MAX);
 	assert(vy_lsm_read_set_empty(&lsm->read_set));
 	assert(lsm->env->lsm_count > 0);
 
 	lsm->env->lsm_count--;
-	lsm->env->disk_stat.compact.queue -=
-			lsm->stat.disk.compact.queue.bytes;
-
+	lsm->env->compaction_queue_size -=
+			lsm->stat.disk.compaction.queue.bytes;
+	if (lsm->index_id == 0)
+		lsm->env->compacted_data_size -=
+			lsm->stat.disk.last_level_count.bytes;
 	if (lsm->pk != NULL)
 		vy_lsm_unref(lsm->pk);
 
@@ -254,7 +263,7 @@ vy_lsm_delete(struct vy_lsm *lsm)
 	rlist_foreach_entry_safe(run, &lsm->runs, in_lsm, next_run)
 		vy_lsm_remove_run(lsm, run);
 
-	vy_range_tree_iter(lsm->tree, NULL, vy_range_tree_free_cb, NULL);
+	vy_range_tree_iter(&lsm->range_tree, NULL, vy_range_tree_free_cb, NULL);
 	vy_range_heap_destroy(&lsm->range_heap);
 	tuple_format_unref(lsm->disk_format);
 	key_def_delete(lsm->cmp_def);
@@ -263,7 +272,6 @@ vy_lsm_delete(struct vy_lsm *lsm)
 	vy_lsm_stat_destroy(&lsm->stat);
 	vy_cache_destroy(&lsm->cache);
 	tuple_format_unref(lsm->mem_format);
-	free(lsm->tree);
 	TRASH(lsm);
 	free(lsm);
 }
@@ -349,6 +357,7 @@ vy_lsm_recover_run(struct vy_lsm *lsm, struct vy_run_recovery_info *run_info,
 		return NULL;
 
 	run->dump_lsn = run_info->dump_lsn;
+	run->dump_count = run_info->dump_count;
 	if (vy_run_recover(run, lsm->env->path,
 			   lsm->space_id, lsm->index_id) != 0 &&
 	    (!force_recovery ||
@@ -611,8 +620,8 @@ vy_lsm_recover(struct vy_lsm *lsm, struct vy_recovery *recovery,
 	 * does not have holes or overlaps.
 	 */
 	struct vy_range *range, *prev = NULL;
-	for (range = vy_range_tree_first(lsm->tree); range != NULL;
-	     prev = range, range = vy_range_tree_next(lsm->tree, range)) {
+	for (range = vy_range_tree_first(&lsm->range_tree); range != NULL;
+	     prev = range, range = vy_range_tree_next(&lsm->range_tree, range)) {
 		if (prev == NULL && range->begin != NULL) {
 			diag_set(ClientError, ER_INVALID_VYLOG_FILE,
 				 tt_sprintf("Range %lld is leftmost but "
@@ -634,6 +643,7 @@ vy_lsm_recover(struct vy_lsm *lsm, struct vy_recovery *recovery,
 					    (long long)range->id));
 			return -1;
 		}
+		vy_range_update_dumps_per_compaction(range);
 		vy_lsm_acct_range(lsm, range);
 	}
 	if (prev == NULL) {
@@ -661,13 +671,38 @@ vy_lsm_generation(struct vy_lsm *lsm)
 }
 
 int
-vy_lsm_compact_priority(struct vy_lsm *lsm)
+vy_lsm_compaction_priority(struct vy_lsm *lsm)
 {
 	struct heap_node *n = vy_range_heap_top(&lsm->range_heap);
 	if (n == NULL)
 		return 0;
 	struct vy_range *range = container_of(n, struct vy_range, heap_node);
-	return range->compact_priority;
+	return range->compaction_priority;
+}
+
+int64_t
+vy_lsm_range_size(struct vy_lsm *lsm)
+{
+	/* Use the configured range size if available. */
+	if (lsm->opts.range_size > 0)
+		return lsm->opts.range_size;
+	/*
+	 * Ideally, we want to compact roughly the same amount of
+	 * data after each dump so as to avoid IO bursts caused by
+	 * simultaneous major compaction of a bunch of ranges,
+	 * because such IO bursts can lead to a deviation of the
+	 * LSM tree from the configured shape and, as a result,
+	 * increased read amplification. To achieve that, we need
+	 * to have at least as many ranges as the number of dumps
+	 * it takes to trigger major compaction in a range. We
+	 * create four times more than that for better smoothing.
+	 */
+	int range_count = 4 * vy_lsm_dumps_per_compaction(lsm);
+	int64_t range_size = range_count == 0 ? 0 :
+		lsm->stat.disk.last_level_count.bytes / range_count;
+	range_size = MAX(range_size, VY_MIN_RANGE_SIZE);
+	range_size = MIN(range_size, VY_MAX_RANGE_SIZE);
+	return range_size;
 }
 
 void
@@ -691,11 +726,11 @@ vy_lsm_add_run(struct vy_lsm *lsm, struct vy_run *run)
 
 	/* Data size is consistent with space.bsize. */
 	if (lsm->index_id == 0)
-		env->disk_stat.data += run->count.bytes;
+		env->disk_data_size += run->count.bytes;
 	/* Index size is consistent with index.bsize. */
-	env->disk_stat.index += bloom_size + page_index_size;
+	env->disk_index_size += bloom_size + page_index_size;
 	if (lsm->index_id > 0)
-		env->disk_stat.index += run->count.bytes;
+		env->disk_index_size += run->count.bytes;
 }
 
 void
@@ -720,11 +755,11 @@ vy_lsm_remove_run(struct vy_lsm *lsm, struct vy_run *run)
 
 	/* Data size is consistent with space.bsize. */
 	if (lsm->index_id == 0)
-		env->disk_stat.data -= run->count.bytes;
+		env->disk_data_size -= run->count.bytes;
 	/* Index size is consistent with index.bsize. */
-	env->disk_stat.index -= bloom_size + page_index_size;
+	env->disk_index_size -= bloom_size + page_index_size;
 	if (lsm->index_id > 0)
-		env->disk_stat.index -= run->count.bytes;
+		env->disk_index_size -= run->count.bytes;
 }
 
 void
@@ -732,7 +767,7 @@ vy_lsm_add_range(struct vy_lsm *lsm, struct vy_range *range)
 {
 	assert(range->heap_node.pos == UINT32_MAX);
 	vy_range_heap_insert(&lsm->range_heap, &range->heap_node);
-	vy_range_tree_insert(lsm->tree, range);
+	vy_range_tree_insert(&lsm->range_tree, range);
 	lsm->range_count++;
 }
 
@@ -741,7 +776,7 @@ vy_lsm_remove_range(struct vy_lsm *lsm, struct vy_range *range)
 {
 	assert(range->heap_node.pos != UINT32_MAX);
 	vy_range_heap_delete(&lsm->range_heap, &range->heap_node);
-	vy_range_tree_remove(lsm->tree, range);
+	vy_range_tree_remove(&lsm->range_tree, range);
 	lsm->range_count--;
 }
 
@@ -749,44 +784,58 @@ void
 vy_lsm_acct_range(struct vy_lsm *lsm, struct vy_range *range)
 {
 	histogram_collect(lsm->run_hist, range->slice_count);
-	vy_disk_stmt_counter_add(&lsm->stat.disk.compact.queue,
-				 &range->compact_queue);
-	lsm->env->disk_stat.compact.queue += range->compact_queue.bytes;
+	lsm->sum_dumps_per_compaction += range->dumps_per_compaction;
+	vy_disk_stmt_counter_add(&lsm->stat.disk.compaction.queue,
+				 &range->compaction_queue);
+	lsm->env->compaction_queue_size += range->compaction_queue.bytes;
+	if (!rlist_empty(&range->slices)) {
+		struct vy_slice *slice = rlist_last_entry(&range->slices,
+						struct vy_slice, in_range);
+		vy_disk_stmt_counter_add(&lsm->stat.disk.last_level_count,
+					 &slice->count);
+		if (lsm->index_id == 0)
+			lsm->env->compacted_data_size += slice->count.bytes;
+	}
 }
 
 void
 vy_lsm_unacct_range(struct vy_lsm *lsm, struct vy_range *range)
 {
 	histogram_discard(lsm->run_hist, range->slice_count);
-	vy_disk_stmt_counter_sub(&lsm->stat.disk.compact.queue,
-				 &range->compact_queue);
-	lsm->env->disk_stat.compact.queue -= range->compact_queue.bytes;
+	lsm->sum_dumps_per_compaction -= range->dumps_per_compaction;
+	vy_disk_stmt_counter_sub(&lsm->stat.disk.compaction.queue,
+				 &range->compaction_queue);
+	lsm->env->compaction_queue_size -= range->compaction_queue.bytes;
+	if (!rlist_empty(&range->slices)) {
+		struct vy_slice *slice = rlist_last_entry(&range->slices,
+						struct vy_slice, in_range);
+		vy_disk_stmt_counter_sub(&lsm->stat.disk.last_level_count,
+					 &slice->count);
+		if (lsm->index_id == 0)
+			lsm->env->compacted_data_size -= slice->count.bytes;
+	}
 }
 
 void
-vy_lsm_acct_dump(struct vy_lsm *lsm,
-		 const struct vy_stmt_counter *in,
-		 const struct vy_disk_stmt_counter *out)
+vy_lsm_acct_dump(struct vy_lsm *lsm, double time,
+		 const struct vy_stmt_counter *input,
+		 const struct vy_disk_stmt_counter *output)
 {
 	lsm->stat.disk.dump.count++;
-	vy_stmt_counter_add(&lsm->stat.disk.dump.in, in);
-	vy_disk_stmt_counter_add(&lsm->stat.disk.dump.out, out);
-
-	lsm->env->disk_stat.dump.in += in->bytes;
-	lsm->env->disk_stat.dump.out += out->bytes;
+	lsm->stat.disk.dump.time += time;
+	vy_stmt_counter_add(&lsm->stat.disk.dump.input, input);
+	vy_disk_stmt_counter_add(&lsm->stat.disk.dump.output, output);
 }
 
 void
-vy_lsm_acct_compaction(struct vy_lsm *lsm,
-		       const struct vy_disk_stmt_counter *in,
-		       const struct vy_disk_stmt_counter *out)
+vy_lsm_acct_compaction(struct vy_lsm *lsm, double time,
+		       const struct vy_disk_stmt_counter *input,
+		       const struct vy_disk_stmt_counter *output)
 {
-	lsm->stat.disk.compact.count++;
-	vy_disk_stmt_counter_add(&lsm->stat.disk.compact.in, in);
-	vy_disk_stmt_counter_add(&lsm->stat.disk.compact.out, out);
-
-	lsm->env->disk_stat.compact.in += in->bytes;
-	lsm->env->disk_stat.compact.out += out->bytes;
+	lsm->stat.disk.compaction.count++;
+	lsm->stat.disk.compaction.time += time;
+	vy_disk_stmt_counter_add(&lsm->stat.disk.compaction.input, input);
+	vy_disk_stmt_counter_add(&lsm->stat.disk.compaction.output, output);
 }
 
 int
@@ -1016,7 +1065,8 @@ vy_lsm_split_range(struct vy_lsm *lsm, struct vy_range *range)
 	struct tuple_format *key_format = lsm->env->key_format;
 
 	const char *split_key_raw;
-	if (!vy_range_needs_split(range, &lsm->opts, &split_key_raw))
+	if (!vy_range_needs_split(range, vy_lsm_range_size(lsm),
+				  &split_key_raw))
 		return false;
 
 	/* Split a range in two parts. */
@@ -1061,7 +1111,8 @@ vy_lsm_split_range(struct vy_lsm *lsm, struct vy_range *range)
 				vy_range_add_slice(part, new_slice);
 		}
 		part->needs_compaction = range->needs_compaction;
-		vy_range_update_compact_priority(part, &lsm->opts);
+		vy_range_update_compaction_priority(part, &lsm->opts);
+		vy_range_update_dumps_per_compaction(part);
 	}
 
 	/*
@@ -1123,8 +1174,8 @@ bool
 vy_lsm_coalesce_range(struct vy_lsm *lsm, struct vy_range *range)
 {
 	struct vy_range *first, *last;
-	if (!vy_range_needs_coalesce(range, lsm->tree, &lsm->opts,
-				     &first, &last))
+	if (!vy_range_needs_coalesce(range, &lsm->range_tree,
+				     vy_lsm_range_size(lsm), &first, &last))
 		return false;
 
 	struct vy_range *result = vy_range_new(vy_log_next_id(),
@@ -1133,7 +1184,7 @@ vy_lsm_coalesce_range(struct vy_lsm *lsm, struct vy_range *range)
 		goto fail_range;
 
 	struct vy_range *it;
-	struct vy_range *end = vy_range_tree_next(lsm->tree, last);
+	struct vy_range *end = vy_range_tree_next(&lsm->range_tree, last);
 
 	/*
 	 * Log change in metadata.
@@ -1142,7 +1193,8 @@ vy_lsm_coalesce_range(struct vy_lsm *lsm, struct vy_range *range)
 	vy_log_insert_range(lsm->id, result->id,
 			    tuple_data_or_null(result->begin),
 			    tuple_data_or_null(result->end));
-	for (it = first; it != end; it = vy_range_tree_next(lsm->tree, it)) {
+	for (it = first; it != end;
+	     it = vy_range_tree_next(&lsm->range_tree, it)) {
 		struct vy_slice *slice;
 		rlist_foreach_entry(slice, &it->slices, in_range)
 			vy_log_delete_slice(slice->id);
@@ -1162,7 +1214,7 @@ vy_lsm_coalesce_range(struct vy_lsm *lsm, struct vy_range *range)
 	 */
 	it = first;
 	while (it != end) {
-		struct vy_range *next = vy_range_tree_next(lsm->tree, it);
+		struct vy_range *next = vy_range_tree_next(&lsm->range_tree, it);
 		vy_lsm_unacct_range(lsm, it);
 		vy_lsm_remove_range(lsm, it);
 		rlist_splice(&result->slices, &it->slices);
@@ -1178,7 +1230,8 @@ vy_lsm_coalesce_range(struct vy_lsm *lsm, struct vy_range *range)
 	 * we don't need to compact the resulting range as long
 	 * as it fits the configured LSM tree shape.
 	 */
-	vy_range_update_compact_priority(result, &lsm->opts);
+	vy_range_update_compaction_priority(result, &lsm->opts);
+	vy_range_update_dumps_per_compaction(result);
 	vy_lsm_acct_range(lsm, result);
 	vy_lsm_add_range(lsm, result);
 	lsm->range_tree_version++;
@@ -1202,11 +1255,11 @@ vy_lsm_force_compaction(struct vy_lsm *lsm)
 	struct vy_range *range;
 	struct vy_range_tree_iterator it;
 
-	vy_range_tree_ifirst(lsm->tree, &it);
+	vy_range_tree_ifirst(&lsm->range_tree, &it);
 	while ((range = vy_range_tree_inext(&it)) != NULL) {
 		vy_lsm_unacct_range(lsm, range);
 		range->needs_compaction = true;
-		vy_range_update_compact_priority(range, &lsm->opts);
+		vy_range_update_compaction_priority(range, &lsm->opts);
 		vy_lsm_acct_range(lsm, range);
 	}
 

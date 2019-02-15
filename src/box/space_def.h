@@ -59,6 +59,11 @@ struct space_opts {
 	 */
 	bool is_temporary;
 	/**
+	 * This flag is set if space is ephemeral and hence
+	 * its format might be re-used.
+	 */
+	bool is_ephemeral;
+	/**
 	 * If the space is a view, then it can't feature any
 	 * indexes, and must have SQL statement. Moreover,
 	 * this flag can't be changed after space creation.
@@ -168,6 +173,15 @@ space_def_new(uint32_t id, uint32_t uid, uint32_t exact_field_count,
 	      const char *engine_name, uint32_t engine_len,
 	      const struct space_opts *opts, const struct field_def *fields,
 	      uint32_t field_count);
+
+/**
+ * Create a new ephemeral space definition.
+ * @param field_count Number of fields in the space.
+ *
+ * @retval Space definition.
+ */
+struct space_def *
+space_def_new_ephemeral(uint32_t field_count);
 
 /**
  * Size of the space_def.

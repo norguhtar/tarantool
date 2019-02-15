@@ -821,23 +821,12 @@ memtx_engine_abort_checkpoint(struct engine *engine)
 	memtx->checkpoint = NULL;
 }
 
-static int
+static void
 memtx_engine_collect_garbage(struct engine *engine, const struct vclock *vclock)
 {
 	struct memtx_engine *memtx = (struct memtx_engine *)engine;
-	/*
-	 * We recover the checkpoint list by scanning the snapshot
-	 * directory so deletion of an xlog file or a file that
-	 * belongs to another engine without the corresponding snap
-	 * file would result in a corrupted checkpoint on the list.
-	 * That said, we have to abort garbage collection if we
-	 * fail to delete a snap file.
-	 */
-	if (xdir_collect_garbage(&memtx->snap_dir, vclock_sum(vclock),
-				 XDIR_GC_USE_COIO) != 0)
-		return -1;
-
-	return 0;
+	xdir_collect_garbage(&memtx->snap_dir, vclock_sum(vclock),
+			     XDIR_GC_ASYNC);
 }
 
 static int
@@ -994,6 +983,12 @@ memtx_engine_gc_f(va_list va)
 	struct memtx_engine *memtx = va_arg(va, struct memtx_engine *);
 	while (!fiber_is_cancelled()) {
 		bool stop;
+		struct errinj *delay = errinj(ERRINJ_MEMTX_DELAY_GC,
+					      ERRINJ_BOOL);
+		if (delay != NULL && delay->bparam) {
+			while (delay->bparam)
+				fiber_sleep(0.001);
+		}
 		memtx_engine_run_gc(memtx, &stop);
 		if (stop) {
 			fiber_yield_timeout(TIMEOUT_INFINITY);
@@ -1316,6 +1311,10 @@ memtx_index_def_change_requires_rebuild(struct index *index,
 		if (old_part->fieldno != new_part->fieldno)
 			return true;
 		if (old_part->coll != new_part->coll)
+			return true;
+		if (json_path_cmp(old_part->path, old_part->path_len,
+				  new_part->path, new_part->path_len,
+				  TUPLE_INDEX_BASE) != 0)
 			return true;
 	}
 	return false;

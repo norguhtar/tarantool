@@ -13,7 +13,7 @@ test:plan(11)
 --    May you share freely, never taking more than you give.
 --
 ---------------------------------------------------------------------------
--- This file implements regression tests for SQLite library.  The
+-- This file implements regression tests for sql library.  The
 -- focus of this script is testing correlated subqueries
 --
 --
@@ -132,7 +132,7 @@ test:do_execsql_test(
     2.2,
     [[
         SELECT * 
-        FROM (SELECT * FROM t4 ORDER BY a LIMIT -1 OFFSET 1) 
+        FROM (SELECT * FROM t4 ORDER BY a LIMIT 1000000 OFFSET 1)
         LIMIT (SELECT a FROM t5)
     ]], {
         -- <2.2>
@@ -141,7 +141,7 @@ test:do_execsql_test(
     })
 
 -----------------------------------------------------------------------------
--- Ticket http://www.sqlite.org/src/info/d11a6e908f (2014-09-20)
+-- Ticket http://www.sql.org/src/info/d11a6e908f (2014-09-20)
 -- Query planner fault on three-way nested join with compound inner SELECT 
 --
 test:do_execsql_test(

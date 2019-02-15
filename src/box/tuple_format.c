@@ -34,11 +34,108 @@
 #include "tuple_format.h"
 #include "coll_id_cache.h"
 
+#include "third_party/PMurHash.h"
+
 /** Global table of tuple formats */
 struct tuple_format **tuple_formats;
 static intptr_t recycled_format_ids = FORMAT_ID_NIL;
 
 static uint32_t formats_size = 0, formats_capacity = 0;
+static uint64_t formats_epoch = 0;
+
+/**
+ * Find in format1::fields the field by format2_field's JSON path.
+ * Routine uses fiber region for temporal path allocation and
+ * panics on failure.
+ */
+static struct tuple_field *
+tuple_format1_field_by_format2_field(struct tuple_format *format1,
+				     struct tuple_field *format2_field)
+{
+	struct region *region = &fiber()->gc;
+	size_t region_svp = region_used(region);
+	uint32_t path_len = json_tree_snprint_path(NULL, 0,
+				&format2_field->token, TUPLE_INDEX_BASE);
+	char *path = region_alloc(region, path_len + 1);
+	if (path == NULL)
+		panic("Can not allocate memory for path");
+	json_tree_snprint_path(path, path_len + 1, &format2_field->token,
+			       TUPLE_INDEX_BASE);
+	struct tuple_field *format1_field =
+		json_tree_lookup_path_entry(&format1->fields,
+					    &format1->fields.root, path,
+					    path_len, TUPLE_INDEX_BASE,
+					    struct tuple_field, token);
+	region_truncate(region, region_svp);
+	return format1_field;
+}
+
+static int
+tuple_format_cmp(const struct tuple_format *format1,
+		 const struct tuple_format *format2)
+{
+	struct tuple_format *a = (struct tuple_format *)format1;
+	struct tuple_format *b = (struct tuple_format *)format2;
+	if (a->exact_field_count != b->exact_field_count)
+		return a->exact_field_count - b->exact_field_count;
+	if (a->total_field_count != b->total_field_count)
+		return a->total_field_count - b->total_field_count;
+
+	struct tuple_field *field_a;
+	json_tree_foreach_entry_preorder(field_a, &a->fields.root,
+					 struct tuple_field, token) {
+		struct tuple_field *field_b =
+			tuple_format1_field_by_format2_field(b, field_a);
+		if (field_a->type != field_b->type)
+			return (int)field_a->type - (int)field_b->type;
+		if (field_a->coll_id != field_b->coll_id)
+			return (int)field_a->coll_id - (int)field_b->coll_id;
+		if (field_a->nullable_action != field_b->nullable_action)
+			return (int)field_a->nullable_action -
+				(int)field_b->nullable_action;
+		if (field_a->is_key_part != field_b->is_key_part)
+			return (int)field_a->is_key_part -
+				(int)field_b->is_key_part;
+	}
+
+	return 0;
+}
+
+static uint32_t
+tuple_format_hash(struct tuple_format *format)
+{
+#define TUPLE_FIELD_MEMBER_HASH(field, member, h, carry, size) \
+	PMurHash32_Process(&h, &carry, &field->member, \
+			   sizeof(field->member)); \
+	size += sizeof(field->member);
+
+	uint32_t h = 13;
+	uint32_t carry = 0;
+	uint32_t size = 0;
+	struct tuple_field *f;
+	json_tree_foreach_entry_preorder(f, &format->fields.root,
+					 struct tuple_field, token) {
+		TUPLE_FIELD_MEMBER_HASH(f, type, h, carry, size)
+		TUPLE_FIELD_MEMBER_HASH(f, coll_id, h, carry, size)
+		TUPLE_FIELD_MEMBER_HASH(f, nullable_action, h, carry, size)
+		TUPLE_FIELD_MEMBER_HASH(f, is_key_part, h, carry, size)
+	}
+#undef TUPLE_FIELD_MEMBER_HASH
+	return PMurHash32_Result(h, carry, size);
+}
+
+#define MH_SOURCE 1
+#define mh_name _tuple_format
+#define mh_key_t struct tuple_format *
+#define mh_node_t struct tuple_format *
+#define mh_arg_t void *
+#define mh_hash(a, arg) ((*(a))->hash)
+#define mh_hash_key(a, arg) ((a)->hash)
+#define mh_cmp(a, b, arg) (tuple_format_cmp(*(a), *(b)))
+#define mh_cmp_key(a, b, arg) (tuple_format_cmp((a), *(b)))
+#include "salad/mhash.h"
+
+static struct mh_tuple_format_t *tuple_formats_hash = NULL;
 
 static struct tuple_field *
 tuple_field_new(void)
@@ -69,9 +166,14 @@ static const char *
 tuple_field_path(const struct tuple_field *field)
 {
 	assert(field->token.parent != NULL);
-	assert(field->token.parent->parent == NULL);
-	assert(field->token.type == JSON_TOKEN_NUM);
-	return int2str(field->token.num + TUPLE_INDEX_BASE);
+	if (field->token.parent->parent == NULL) {
+		/* Top-level field, no need to format the path. */
+		return int2str(field->token.num + TUPLE_INDEX_BASE);
+	}
+	char *path = tt_static_buf();
+	json_tree_snprint_path(path, TT_STATIC_BUF_LEN, &field->token,
+			       TUPLE_INDEX_BASE);
+	return path;
 }
 
 /**
@@ -92,18 +194,109 @@ tuple_format_field_by_id(struct tuple_format *format, uint32_t id)
 	return NULL;
 }
 
+/**
+ * Given a field number and a path, add the corresponding field
+ * to the tuple format, allocating intermediate fields if
+ * necessary.
+ *
+ * Return a pointer to the leaf field on success, NULL on memory
+ * allocation error or type/nullability mistmatch error, diag
+ * message is set.
+ */
+static struct tuple_field *
+tuple_format_add_field(struct tuple_format *format, uint32_t fieldno,
+		       const char *path, uint32_t path_len, char **path_pool)
+{
+	struct tuple_field *field = NULL;
+	struct tuple_field *parent = tuple_format_field(format, fieldno);
+	assert(parent != NULL);
+	if (path == NULL)
+		return parent;
+	field = tuple_field_new();
+	if (field == NULL)
+		goto fail;
+
+	/*
+	 * Retrieve path_len memory chunk from the path_pool and
+	 * copy path data there. This is necessary in order to
+	 * ensure that each new format::tuple_field refer format
+	 * memory.
+	 */
+	memcpy(*path_pool, path, path_len);
+	path = *path_pool;
+	*path_pool += path_len;
+
+	int rc = 0;
+	uint32_t token_count = 0;
+	struct json_tree *tree = &format->fields;
+	struct json_lexer lexer;
+	json_lexer_create(&lexer, path, path_len, TUPLE_INDEX_BASE);
+	while ((rc = json_lexer_next_token(&lexer, &field->token)) == 0 &&
+	       field->token.type != JSON_TOKEN_END) {
+		enum field_type expected_type =
+			field->token.type == JSON_TOKEN_STR ?
+			FIELD_TYPE_MAP : FIELD_TYPE_ARRAY;
+		if (field_type1_contains_type2(parent->type, expected_type)) {
+			parent->type = expected_type;
+		} else {
+			diag_set(ClientError, ER_INDEX_PART_TYPE_MISMATCH,
+				 tuple_field_path(parent),
+				 field_type_strs[parent->type],
+				 field_type_strs[expected_type]);
+			goto fail;
+		}
+		struct tuple_field *next =
+			json_tree_lookup_entry(tree, &parent->token,
+					       &field->token,
+					       struct tuple_field, token);
+		if (next == NULL) {
+			field->id = format->total_field_count++;
+			rc = json_tree_add(tree, &parent->token, &field->token);
+			if (rc != 0) {
+				diag_set(OutOfMemory, sizeof(struct json_token),
+					 "json_tree_add", "tree");
+				goto fail;
+			}
+			next = field;
+			field = tuple_field_new();
+			if (field == NULL)
+				goto fail;
+		}
+		parent->is_key_part = true;
+		parent = next;
+		token_count++;
+	}
+	/*
+	 * The path has already been verified by the
+	 * key_def_decode_parts function.
+	 */
+	assert(rc == 0 && field->token.type == JSON_TOKEN_END);
+	assert(parent != NULL);
+	/* Update tree depth information. */
+	format->fields_depth = MAX(format->fields_depth, token_count + 1);
+end:
+	tuple_field_delete(field);
+	return parent;
+fail:
+	parent = NULL;
+	goto end;
+}
+
 static int
 tuple_format_use_key_part(struct tuple_format *format, uint32_t field_count,
 			  const struct key_part *part, bool is_sequential,
-			  int *current_slot)
+			  int *current_slot, char **path_pool)
 {
 	assert(part->fieldno < tuple_format_field_count(format));
-	struct tuple_field *field = tuple_format_field(format, part->fieldno);
+	struct tuple_field *field =
+		tuple_format_add_field(format, part->fieldno, part->path,
+				       part->path_len, path_pool);
+	if (field == NULL)
+		return -1;
 	/*
-		* If a field is not present in the space format,
-		* inherit nullable action of the first key part
-		* referencing it.
-		*/
+	 * If a field is not present in the space format, inherit
+	 * nullable action of the first key part referencing it.
+	 */
 	if (part->fieldno >= field_count && !field->is_key_part)
 		field->nullable_action = part->nullable_action;
 	/*
@@ -158,7 +351,8 @@ tuple_format_use_key_part(struct tuple_format *format, uint32_t field_count,
 	 * simply accessible, so we don't store an offset for it.
 	 */
 	if (field->offset_slot == TUPLE_OFFSET_SLOT_NIL &&
-	    is_sequential == false && part->fieldno > 0) {
+	    is_sequential == false &&
+	    (part->fieldno > 0 || part->path != NULL)) {
 		*current_slot = *current_slot - 1;
 		field->offset_slot = *current_slot;
 	}
@@ -203,6 +397,11 @@ tuple_format_create(struct tuple_format *format, struct key_def * const *keys,
 
 	int current_slot = 0;
 
+	/*
+	 * Set pointer to reserved area in the format chunk
+	 * allocated with tuple_format_alloc call.
+	 */
+	char *path_pool = (char *)format + sizeof(struct tuple_format);
 	/* extract field type info */
 	for (uint16_t key_no = 0; key_no < key_count; ++key_no) {
 		const struct key_def *key_def = keys[key_no];
@@ -213,7 +412,8 @@ tuple_format_create(struct tuple_format *format, struct key_def * const *keys,
 		for (; part < parts_end; part++) {
 			if (tuple_format_use_key_part(format, field_count, part,
 						      is_sequential,
-						      &current_slot) != 0)
+						      &current_slot,
+						      &path_pool) != 0)
 				return -1;
 		}
 	}
@@ -236,6 +436,7 @@ tuple_format_create(struct tuple_format *format, struct key_def * const *keys,
 			 "malloc", "required field bitmap");
 		return -1;
 	}
+	format->min_tuple_size = mp_sizeof_array(format->index_field_count);
 	struct tuple_field *field;
 	json_tree_foreach_entry_preorder(field, &format->fields.root,
 					 struct tuple_field, token) {
@@ -247,7 +448,46 @@ tuple_format_create(struct tuple_format *format, struct key_def * const *keys,
 		if (json_token_is_leaf(&field->token) &&
 		    !tuple_field_is_nullable(field))
 			bit_set(format->required_fields, field->id);
+
+		/*
+		 * Update format::min_tuple_size by field.
+		 * Skip fields not involved in index.
+		 */
+		if (!field->is_key_part)
+			continue;
+		if (field->token.type == JSON_TOKEN_NUM) {
+			/*
+			 * Account a gap between omitted array
+			 * items.
+			 */
+			struct json_token **neighbors =
+				field->token.parent->children;
+			for (int i = field->token.sibling_idx - 1; i >= 0; i--) {
+				if (neighbors[i] != NULL &&
+				    json_tree_entry(neighbors[i],
+						    struct tuple_field,
+						    token)->is_key_part)
+					break;
+				format->min_tuple_size += mp_sizeof_nil();
+			}
+		} else {
+			/* Account a key string for map member. */
+			assert(field->token.type == JSON_TOKEN_STR);
+			format->min_tuple_size +=
+				mp_sizeof_str(field->token.len);
+		}
+		int max_child_idx = field->token.max_child_idx;
+		if (json_token_is_leaf(&field->token)) {
+			format->min_tuple_size += mp_sizeof_nil();
+		} else if (field->type == FIELD_TYPE_ARRAY) {
+			format->min_tuple_size +=
+				mp_sizeof_array(max_child_idx + 1);
+		} else if (field->type == FIELD_TYPE_MAP) {
+			format->min_tuple_size +=
+				mp_sizeof_map(max_child_idx + 1);
+		}
 	}
+	format->hash = tuple_format_hash(format);
 	return 0;
 }
 
@@ -276,7 +516,12 @@ tuple_format_register(struct tuple_format *format)
 			formats_capacity = new_capacity;
 			tuple_formats = formats;
 		}
-		if (formats_size == FORMAT_ID_MAX + 1) {
+		uint32_t formats_size_max = FORMAT_ID_MAX + 1;
+		struct errinj *inj = errinj(ERRINJ_TUPLE_FORMAT_COUNT,
+					    ERRINJ_INT);
+		if (inj != NULL && inj->iparam > 0)
+			formats_size_max = inj->iparam;
+		if (formats_size >= formats_size_max) {
 			diag_set(ClientError, ER_TUPLE_FORMAT_LIMIT,
 				 (unsigned) formats_capacity);
 			return -1;
@@ -317,6 +562,8 @@ static struct tuple_format *
 tuple_format_alloc(struct key_def * const *keys, uint16_t key_count,
 		   uint32_t space_field_count, struct tuple_dictionary *dict)
 {
+	/* Size of area to store JSON paths data. */
+	uint32_t path_pool_size = 0;
 	uint32_t index_field_count = 0;
 	/* find max max field no */
 	for (uint16_t key_no = 0; key_no < key_count; ++key_no) {
@@ -326,13 +573,15 @@ tuple_format_alloc(struct key_def * const *keys, uint16_t key_count,
 		for (; part < pend; part++) {
 			index_field_count = MAX(index_field_count,
 						part->fieldno + 1);
+			path_pool_size += part->path_len;
 		}
 	}
 	uint32_t field_count = MAX(space_field_count, index_field_count);
 
-	struct tuple_format *format = malloc(sizeof(struct tuple_format));
+	uint32_t allocation_size = sizeof(struct tuple_format) + path_pool_size;
+	struct tuple_format *format = malloc(allocation_size);
 	if (format == NULL) {
-		diag_set(OutOfMemory, sizeof(struct tuple_format), "malloc",
+		diag_set(OutOfMemory, allocation_size, "malloc",
 			 "tuple format");
 		return NULL;
 	}
@@ -368,11 +617,14 @@ tuple_format_alloc(struct key_def * const *keys, uint16_t key_count,
 	}
 	format->total_field_count = field_count;
 	format->required_fields = NULL;
+	format->fields_depth = 1;
+	format->min_tuple_size = 0;
 	format->refs = 0;
 	format->id = FORMAT_ID_NIL;
 	format->index_field_count = index_field_count;
 	format->exact_field_count = 0;
 	format->min_field_count = 0;
+	format->epoch = 0;
 	return format;
 error:
 	tuple_format_destroy_fields(format);
@@ -389,37 +641,119 @@ tuple_format_destroy(struct tuple_format *format)
 	tuple_dictionary_unref(format->dict);
 }
 
+/**
+ * Try to reuse given format. This is only possible for formats
+ * of ephemeral spaces, since we need to be sure that shared
+ * dictionary will never be altered. If it can, then alter can
+ * affect another space, which shares a format with one which is
+ * altered.
+ * @param p_format Double pointer to format. It is updated with
+ * 		   hashed value, if corresponding format was found
+ * 		   in hash table
+ * @retval Returns true if format was found in hash table, false
+ *	   otherwise.
+ *
+ */
+static bool
+tuple_format_reuse(struct tuple_format **p_format)
+{
+	struct tuple_format *format = *p_format;
+	if (!format->is_ephemeral)
+		return false;
+	/*
+	 * These fields do not participate in hashing.
+	 * Make sure they're unset.
+	 */
+	assert(format->dict->name_count == 0);
+	assert(format->is_temporary);
+	mh_int_t key = mh_tuple_format_find(tuple_formats_hash, format,
+					    NULL);
+	if (key != mh_end(tuple_formats_hash)) {
+		struct tuple_format **entry = mh_tuple_format_node(
+			tuple_formats_hash, key);
+		tuple_format_destroy(format);
+		free(format);
+		*p_format = *entry;
+		return true;
+	}
+	return false;
+}
+
+/**
+ * See justification, why ephemeral space's formats are
+ * only feasible for hasing.
+ * @retval 0 on success, even if format wasn't added to hash
+ * 	   -1 in case of error.
+ */
+static int
+tuple_format_add_to_hash(struct tuple_format *format)
+{
+	if(!format->is_ephemeral)
+		return 0;
+	assert(format->dict->name_count == 0);
+	assert(format->is_temporary);
+	mh_int_t key = mh_tuple_format_put(tuple_formats_hash,
+					   (const struct tuple_format **)&format,
+					   NULL, NULL);
+	if (key == mh_end(tuple_formats_hash)) {
+		diag_set(OutOfMemory, 0, "tuple_format_add_to_hash",
+			 "tuple formats hash entry");
+		return -1;
+	}
+	return 0;
+}
+
+static void
+tuple_format_remove_from_hash(struct tuple_format *format)
+{
+	mh_int_t key = mh_tuple_format_find(tuple_formats_hash, format, NULL);
+	if (key != mh_end(tuple_formats_hash))
+		mh_tuple_format_del(tuple_formats_hash, key, NULL);
+}
+
 void
 tuple_format_delete(struct tuple_format *format)
 {
+	tuple_format_remove_from_hash(format);
 	tuple_format_deregister(format);
 	tuple_format_destroy(format);
 	free(format);
 }
 
 struct tuple_format *
-tuple_format_new(struct tuple_format_vtab *vtab, struct key_def * const *keys,
-		 uint16_t key_count, const struct field_def *space_fields,
-		 uint32_t space_field_count, struct tuple_dictionary *dict)
+tuple_format_new(struct tuple_format_vtab *vtab, void *engine,
+		 struct key_def * const *keys, uint16_t key_count,
+		 const struct field_def *space_fields,
+		 uint32_t space_field_count, uint32_t exact_field_count,
+		 struct tuple_dictionary *dict, bool is_temporary,
+		 bool is_ephemeral)
 {
 	struct tuple_format *format =
 		tuple_format_alloc(keys, key_count, space_field_count, dict);
 	if (format == NULL)
 		return NULL;
 	format->vtab = *vtab;
-	format->engine = NULL;
-	format->is_temporary = false;
-	if (tuple_format_register(format) < 0) {
-		tuple_format_destroy(format);
-		free(format);
-		return NULL;
-	}
+	format->engine = engine;
+	format->is_temporary = is_temporary;
+	format->is_ephemeral = is_ephemeral;
+	format->exact_field_count = exact_field_count;
+	format->epoch = ++formats_epoch;
 	if (tuple_format_create(format, keys, key_count, space_fields,
-				space_field_count) < 0) {
-		tuple_format_delete(format);
-		return NULL;
+				space_field_count) < 0)
+		goto err;
+	if (tuple_format_reuse(&format))
+		return format;
+	if (tuple_format_register(format) < 0)
+		goto err;
+	if (tuple_format_add_to_hash(format) < 0) {
+		tuple_format_deregister(format);
+		goto err;
 	}
 	return format;
+err:
+	tuple_format_destroy(format);
+	free(format);
+	return NULL;
 }
 
 bool
@@ -428,15 +762,16 @@ tuple_format1_can_store_format2_tuples(struct tuple_format *format1,
 {
 	if (format1->exact_field_count != format2->exact_field_count)
 		return false;
-	uint32_t format1_field_count = tuple_format_field_count(format1);
-	uint32_t format2_field_count = tuple_format_field_count(format2);
-	for (uint32_t i = 0; i < format1_field_count; ++i) {
-		struct tuple_field *field1 = tuple_format_field(format1, i);
+	struct tuple_field *field1;
+	json_tree_foreach_entry_preorder(field1, &format1->fields.root,
+					 struct tuple_field, token) {
+		struct tuple_field *field2 =
+			tuple_format1_field_by_format2_field(format2, field1);
 		/*
 		 * The field has a data type in format1, but has
 		 * no data type in format2.
 		 */
-		if (i >= format2_field_count) {
+		if (field2 == NULL) {
 			/*
 			 * The field can get a name added
 			 * for it, and this doesn't require a data
@@ -452,7 +787,6 @@ tuple_format1_can_store_format2_tuples(struct tuple_format *format1,
 			else
 				return false;
 		}
-		struct tuple_field *field2 = tuple_format_field(format2, i);
 		if (! field_type1_contains_type2(field1->type, field2->type))
 			return false;
 		/*
@@ -510,52 +844,122 @@ tuple_init_field_map(struct tuple_format *format, uint32_t *field_map,
 	 */
 	if (field_count == 0) {
 		/* Empty tuple, nothing to do. */
-		goto skip;
+		goto finish;
 	}
-	/* first field is simply accessible, so we do not store offset to it */
-	struct tuple_field *field = tuple_format_field(format, 0);
-	if (validate &&
-	    !field_mp_type_is_compatible(field->type, mp_typeof(*pos),
-					 tuple_field_is_nullable(field))) {
-		diag_set(ClientError, ER_FIELD_TYPE, tuple_field_path(field),
-			 field_type_strs[field->type]);
-		goto error;
-	}
-	if (required_fields != NULL)
-		bit_clear(required_fields, field->id);
-	mp_next(&pos);
-	/* other fields...*/
-	uint32_t i = 1;
 	uint32_t defined_field_count = MIN(field_count, validate ?
 					   tuple_format_field_count(format) :
 					   format->index_field_count);
-	if (field_count < format->index_field_count) {
+	/*
+	 * Nullify field map to be able to detect by 0,
+	 * which key fields are absent in tuple_field().
+	 */
+	memset((char *)field_map - format->field_map_size, 0,
+		format->field_map_size);
+	/*
+	 * Prepare mp stack of the size equal to the maximum depth
+	 * of the indexed field in the format::fields tree
+	 * (fields_depth) to carry out a simultaneous parsing of
+	 * the tuple and tree traversal to process type
+	 * validations and field map initialization.
+	 */
+	uint32_t frames_sz = format->fields_depth * sizeof(struct mp_frame);
+	struct mp_frame *frames = region_alloc(region, frames_sz);
+	if (frames == NULL) {
+		diag_set(OutOfMemory, frames_sz, "region", "frames");
+		goto error;
+	}
+	struct mp_stack stack;
+	mp_stack_create(&stack, format->fields_depth, frames);
+	mp_stack_push(&stack, MP_ARRAY, defined_field_count);
+	struct tuple_field *field;
+	struct json_token *parent = &format->fields.root;
+	while (true) {
+		int idx;
+		while ((idx = mp_stack_advance(&stack)) == -1) {
+			/*
+			 * If the elements of the current frame
+			 * are over, pop this frame out of stack
+			 * and climb one position in the
+			 * format::fields tree to match the
+			 * changed JSON path to the data in the
+			 * tuple.
+			 */
+			mp_stack_pop(&stack);
+			if (mp_stack_is_empty(&stack))
+				goto finish;
+			parent = parent->parent;
+		}
 		/*
-		 * Nullify field map to be able to detect by 0,
-		 * which key fields are absent in tuple_field().
+		 * Use the top frame of the stack and the
+		 * current data offset to prepare the JSON token
+		 * for the subsequent format::fields lookup.
 		 */
-		memset((char *)field_map - format->field_map_size, 0,
-		       format->field_map_size);
-	}
-	for (; i < defined_field_count; ++i) {
-		field = tuple_format_field(format, i);
-		if (validate &&
-		    !field_mp_type_is_compatible(field->type, mp_typeof(*pos),
-						 tuple_field_is_nullable(field))) {
-			diag_set(ClientError, ER_FIELD_TYPE,
-				 tuple_field_path(field),
-				 field_type_strs[field->type]);
-			goto error;
+		struct json_token token;
+		switch (mp_stack_type(&stack)) {
+		case MP_ARRAY:
+			token.type = JSON_TOKEN_NUM;
+			token.num = idx;
+			break;
+		case MP_MAP:
+			if (mp_typeof(*pos) != MP_STR) {
+				/*
+				 * JSON path support only string
+				 * keys for map. Skip this entry.
+				 */
+				mp_next(&pos);
+				mp_next(&pos);
+				continue;
+			}
+			token.type = JSON_TOKEN_STR;
+			token.str = mp_decode_str(&pos, (uint32_t *)&token.len);
+			break;
+		default:
+			unreachable();
 		}
-		if (field->offset_slot != TUPLE_OFFSET_SLOT_NIL) {
-			field_map[field->offset_slot] =
-				(uint32_t) (pos - tuple);
+		/*
+		 * Perform lookup for a field in format::fields,
+		 * that represents the field metadata by JSON path
+		 * corresponding to the current position in the
+		 * tuple.
+		 */
+		enum mp_type type = mp_typeof(*pos);
+		assert(parent != NULL);
+		field = json_tree_lookup_entry(&format->fields, parent, &token,
+					       struct tuple_field, token);
+		if (field != NULL) {
+			bool is_nullable = tuple_field_is_nullable(field);
+			if (validate &&
+			    !field_mp_type_is_compatible(field->type, type,
+							 is_nullable) != 0) {
+				diag_set(ClientError, ER_FIELD_TYPE,
+					 tuple_field_path(field),
+					 field_type_strs[field->type]);
+				goto error;
+			}
+			if (field->offset_slot != TUPLE_OFFSET_SLOT_NIL)
+				field_map[field->offset_slot] = pos - tuple;
+			if (required_fields != NULL)
+				bit_clear(required_fields, field->id);
 		}
-		if (required_fields != NULL)
-			bit_clear(required_fields, field->id);
-		mp_next(&pos);
+		/*
+		 * If the current position of the data in tuple
+		 * matches the container type (MP_MAP or MP_ARRAY)
+		 * and the format::fields tree has such a record,
+		 * prepare a new stack frame because it needs to
+		 * be analyzed in the next iterations.
+		 */
+		if ((type == MP_ARRAY || type == MP_MAP) &&
+		    !mp_stack_is_full(&stack) && field != NULL) {
+			uint32_t size = type == MP_ARRAY ?
+					mp_decode_array(&pos) :
+					mp_decode_map(&pos);
+			mp_stack_push(&stack, type, size);
+			parent = &field->token;
+		} else {
+			mp_next(&pos);
+		}
 	}
-skip:
+finish:
 	/*
 	 * Check the required field bitmap for missing fields.
 	 */
@@ -603,6 +1007,18 @@ tuple_format_min_field_count(struct key_def * const *keys, uint16_t key_count,
 	return min_field_count;
 }
 
+int
+tuple_format_init()
+{
+	tuple_formats_hash = mh_tuple_format_new();
+	if (tuple_formats_hash == NULL) {
+		diag_set(OutOfMemory, sizeof(struct mh_tuple_format_t), "malloc",
+			 "tuple format hash");
+		return -1;
+	}
+	return 0;
+}
+
 /** Destroy tuple format subsystem and free resourses */
 void
 tuple_format_free()
@@ -622,6 +1038,7 @@ tuple_format_free()
 		}
 	}
 	free(tuple_formats);
+	mh_tuple_format_delete(tuple_formats_hash);
 }
 
 void
@@ -636,187 +1053,3 @@ box_tuple_format_unref(box_tuple_format_t *format)
 	tuple_format_unref(format);
 }
 
-/**
- * Propagate @a field to MessagePack(field)[index].
- * @param[in][out] field Field to propagate.
- * @param index 0-based index to propagate to.
- *
- * @retval  0 Success, the index was found.
- * @retval -1 Not found.
- */
-static inline int
-tuple_field_go_to_index(const char **field, uint64_t index)
-{
-	enum mp_type type = mp_typeof(**field);
-	if (type == MP_ARRAY) {
-		uint32_t count = mp_decode_array(field);
-		if (index >= count)
-			return -1;
-		for (; index > 0; --index)
-			mp_next(field);
-		return 0;
-	} else if (type == MP_MAP) {
-		index += TUPLE_INDEX_BASE;
-		uint64_t count = mp_decode_map(field);
-		for (; count > 0; --count) {
-			type = mp_typeof(**field);
-			if (type == MP_UINT) {
-				uint64_t value = mp_decode_uint(field);
-				if (value == index)
-					return 0;
-			} else if (type == MP_INT) {
-				int64_t value = mp_decode_int(field);
-				if (value >= 0 && (uint64_t)value == index)
-					return 0;
-			} else {
-				/* Skip key. */
-				mp_next(field);
-			}
-			/* Skip value. */
-			mp_next(field);
-		}
-	}
-	return -1;
-}
-
-/**
- * Propagate @a field to MessagePack(field)[key].
- * @param[in][out] field Field to propagate.
- * @param key Key to propagate to.
- * @param len Length of @a key.
- *
- * @retval  0 Success, the index was found.
- * @retval -1 Not found.
- */
-static inline int
-tuple_field_go_to_key(const char **field, const char *key, int len)
-{
-	enum mp_type type = mp_typeof(**field);
-	if (type != MP_MAP)
-		return -1;
-	uint64_t count = mp_decode_map(field);
-	for (; count > 0; --count) {
-		type = mp_typeof(**field);
-		if (type == MP_STR) {
-			uint32_t value_len;
-			const char *value = mp_decode_str(field, &value_len);
-			if (value_len == (uint)len &&
-			    memcmp(value, key, len) == 0)
-				return 0;
-		} else {
-			/* Skip key. */
-			mp_next(field);
-		}
-		/* Skip value. */
-		mp_next(field);
-	}
-	return -1;
-}
-
-/**
- * Retrieve msgpack data by JSON path.
- * @param data Pointer to msgpack with data.
- * @param path The path to process.
- * @param path_len The length of the @path.
- * @retval 0 On success.
- * @retval >0 On path parsing error, invalid character position.
- */
-static int
-tuple_field_go_to_path(const char **data, const char *path, uint32_t path_len)
-{
-	int rc;
-	struct json_lexer lexer;
-	struct json_token token;
-	json_lexer_create(&lexer, path, path_len, TUPLE_INDEX_BASE);
-	while ((rc = json_lexer_next_token(&lexer, &token)) == 0) {
-		switch (token.type) {
-		case JSON_TOKEN_NUM:
-			rc = tuple_field_go_to_index(data, token.num);
-			break;
-		case JSON_TOKEN_STR:
-			rc = tuple_field_go_to_key(data, token.str, token.len);
-			break;
-		default:
-			assert(token.type == JSON_TOKEN_END);
-			return 0;
-		}
-		if (rc != 0) {
-			*data = NULL;
-			return 0;
-		}
-	}
-	return rc;
-}
-
-int
-tuple_field_raw_by_path(struct tuple_format *format, const char *tuple,
-                        const uint32_t *field_map, const char *path,
-                        uint32_t path_len, uint32_t path_hash,
-                        const char **field)
-{
-	assert(path_len > 0);
-	uint32_t fieldno;
-	/*
-	 * It is possible, that a field has a name as
-	 * well-formatted JSON. For example 'a.b.c.d' or '[1]' can
-	 * be field name. To save compatibility at first try to
-	 * use the path as a field name.
-	 */
-	if (tuple_fieldno_by_name(format->dict, path, path_len, path_hash,
-				  &fieldno) == 0) {
-		*field = tuple_field_raw(format, tuple, field_map, fieldno);
-		return 0;
-	}
-	struct json_lexer lexer;
-	struct json_token token;
-	json_lexer_create(&lexer, path, path_len, TUPLE_INDEX_BASE);
-	int rc = json_lexer_next_token(&lexer, &token);
-	if (rc != 0)
-		goto error;
-	switch(token.type) {
-	case JSON_TOKEN_NUM: {
-		int index = token.num;
-		*field = tuple_field_raw(format, tuple, field_map, index);
-		if (*field == NULL)
-			return 0;
-		break;
-	}
-	case JSON_TOKEN_STR: {
-		/* First part of a path is a field name. */
-		uint32_t name_hash;
-		if (path_len == (uint32_t) token.len) {
-			name_hash = path_hash;
-		} else {
-			/*
-			 * If a string is "field....", then its
-			 * precalculated juajit hash can not be
-			 * used. A tuple dictionary hashes only
-			 * name, not path.
-			 */
-			name_hash = field_name_hash(token.str, token.len);
-		}
-		*field = tuple_field_raw_by_name(format, tuple, field_map,
-						 token.str, token.len,
-						 name_hash);
-		if (*field == NULL)
-			return 0;
-		break;
-	}
-	default:
-		assert(token.type == JSON_TOKEN_END);
-		*field = NULL;
-		return 0;
-	}
-	rc = tuple_field_go_to_path(field, path + lexer.offset,
-				    path_len - lexer.offset);
-	if (rc == 0)
-		return 0;
-	/* Setup absolute error position. */
-	rc += lexer.offset;
-
-error:
-	assert(rc > 0);
-	diag_set(ClientError, ER_ILLEGAL_PARAMS,
-		 tt_sprintf("error in path on position %d", rc));
-	return -1;
-}

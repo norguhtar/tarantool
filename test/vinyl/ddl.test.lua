@@ -3,7 +3,6 @@ test_run = require('test_run').new()
 
 -- sanity checks
 space = box.schema.space.create('test', {engine = 'vinyl' })
-space:create_index('pk', {range_size = 0})
 space:create_index('pk', {page_size = 0})
 space:create_index('pk', {page_size = 8192, range_size = 4096})
 space:create_index('pk', {run_count_per_level = 0})
@@ -36,7 +35,7 @@ space:delete{2}
 pk:alter{parts = {2, 'unsigned'}} -- error: mem/run not empty
 box.snapshot()
 -- wait for compaction to complete
-while pk:stat().disk.compact.count == 0 do fiber.sleep(0.01) end
+while pk:stat().disk.compaction.count == 0 do fiber.sleep(0.01) end
 pk:alter{parts = {2, 'unsigned'}} -- success: space is empty now
 space:replace{1, 2}
 -- gh-3508 - Altering primary index of a vinyl space doesn't work as expected

@@ -57,7 +57,7 @@ box.cfg{vinyl_cache = vinyl_cache}
 -- Compact the primary index to generate deferred DELETEs.
 box.snapshot()
 pk:compact()
-while pk:stat().disk.compact.count == 0 do fiber.sleep(0.001) end
+while pk:stat().disk.compaction.count == 0 do fiber.sleep(0.001) end
 pk:stat().rows -- 5 new REPLACEs
 i1:stat().rows -- 10 old REPLACE + 5 new REPLACEs + 10 deferred DELETEs
 i2:stat().rows -- ditto
@@ -87,9 +87,9 @@ i2:stat().rows -- ditto
 -- Check that they cleanup garbage statements.
 box.snapshot()
 i1:compact()
-while i1:stat().disk.compact.count == 0 do fiber.sleep(0.001) end
+while i1:stat().disk.compaction.count == 0 do fiber.sleep(0.001) end
 i2:compact()
-while i2:stat().disk.compact.count == 0 do fiber.sleep(0.001) end
+while i2:stat().disk.compaction.count == 0 do fiber.sleep(0.001) end
 i1:stat().rows -- 5 new REPLACEs
 i2:stat().rows -- ditto
 box.stat.reset()
@@ -151,7 +151,7 @@ box.stat.vinyl().memory.tx
 
 box.snapshot()
 sk:compact()
-while sk:stat().disk.compact.count == 0 do fiber.sleep(0.001) end
+while sk:stat().disk.compaction.count == 0 do fiber.sleep(0.001) end
 sk:stat().run_count -- 0
 
 s:drop()
@@ -201,12 +201,12 @@ sk:stat().rows -- 10 old REPLACEs + 5 new REPLACEs
 -- Compact the primary index to generate deferred DELETEs.
 box.snapshot()
 pk:compact()
-while pk:stat().disk.compact.count == 0 do fiber.sleep(0.001) end
+while pk:stat().disk.compaction.count == 0 do fiber.sleep(0.001) end
 
 -- Compact the secondary index to cleanup garbage.
 box.snapshot()
 sk:compact()
-while sk:stat().disk.compact.count == 0 do fiber.sleep(0.001) end
+while sk:stat().disk.compaction.count == 0 do fiber.sleep(0.001) end
 
 sk:select()
 
@@ -234,7 +234,7 @@ box.snapshot()
 
 -- Generate deferred DELETEs.
 pk:compact()
-while pk:stat().disk.compact.count == 0 do fiber.sleep(0.001) end
+while pk:stat().disk.compaction.count == 0 do fiber.sleep(0.001) end
 
 sk:select() -- [1, 10, 'c']
 box.snapshot()
@@ -252,17 +252,20 @@ test_run:cmd("start server test with args='1048576'")
 test_run:cmd("switch test")
 
 fiber = require('fiber')
-digest = require('digest')
 
 s = box.schema.space.create('test', {engine = 'vinyl'})
-pk = s:create_index('pk', {run_count_per_level = 10})
-sk = s:create_index('sk', {run_count_per_level = 10, parts = {2, 'unsigned', 3, 'string'}, unique = false})
+pk = s:create_index('pk', {run_count_per_level = 10, run_size_ratio = 2})
+sk = s:create_index('sk', {run_count_per_level = 10, run_size_ratio = 2, parts = {2, 'unsigned', 3, 'string'}, unique = false})
 
 -- Write a run big enough to prevent major compaction from kicking in
 -- (run_count_per_level is ignored on the last level - see gh-3657).
 dummy_rows = 100
-for i = 1, dummy_rows do s:replace{i + 1000, i + 1000, digest.urandom(100)} end
+pad = string.rep('z', 50 * 1024)
+for i = 1, dummy_rows do s:replace{i + 1000, i + 1000, pad} end
 box.snapshot()
+pk:compact()
+sk:compact()
+while box.stat.vinyl().scheduler.compaction_queue > 0 do fiber.sleep(0.001) end
 
 pad = string.rep('x', 10 * 1024)
 for i = 1, 120 do s:replace{i, i, pad} end
@@ -280,7 +283,7 @@ box.stat.reset()
 -- Deferred DELETEs won't fit in memory and trigger dump
 -- of the secondary index.
 pk:compact()
-while pk:stat().disk.compact.count == 0 do fiber.sleep(0.001) end
+while pk:stat().disk.compaction.count == 0 do fiber.sleep(0.001) end
 
 sk:stat().disk.dump.count -- 1
 

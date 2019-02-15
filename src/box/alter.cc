@@ -187,12 +187,8 @@ index_opts_decode(struct index_opts *opts, const char *map,
 			  BOX_INDEX_FIELD_OPTS, "distance must be either "\
 			  "'euclid' or 'manhattan'");
 	}
-	if (opts->range_size <= 0) {
-		tnt_raise(ClientError, ER_WRONG_INDEX_OPTIONS,
-			  BOX_INDEX_FIELD_OPTS,
-			  "range_size must be greater than 0");
-	}
-	if (opts->page_size <= 0 || opts->page_size > opts->range_size) {
+	if (opts->page_size <= 0 || (opts->range_size > 0 &&
+				     opts->page_size > opts->range_size)) {
 		tnt_raise(ClientError, ER_WRONG_INDEX_OPTIONS,
 			  BOX_INDEX_FIELD_OPTS,
 			  "page_size must be greater than 0 and "
@@ -268,7 +264,7 @@ index_def_new_from_tuple(struct tuple *tuple, struct space *space)
 	});
 	if (key_def_decode_parts(part_def, part_count, &parts,
 				 space->def->fields,
-				 space->def->field_count) != 0)
+				 space->def->field_count, &fiber()->gc) != 0)
 		diag_raise();
 	key_def = key_def_new(part_def, part_count);
 	if (key_def == NULL)
@@ -1506,14 +1502,14 @@ update_view_references(struct Select *select, int update_value,
 		uint32_t space_id;
 		if (schema_find_id(BOX_SPACE_ID, 2, space_name,
 				   strlen(space_name), &space_id) != 0) {
-			sqlite3SrcListDelete(sql_get(), list);
+			sqlSrcListDelete(sql_get(), list);
 			return -1;
 		}
 		if (space_id == BOX_ID_NIL) {
 			if (! suppress_error) {
 				assert(not_found_space != NULL);
 				*not_found_space = tt_sprintf("%s", space_name);
-				sqlite3SrcListDelete(sql_get(), list);
+				sqlSrcListDelete(sql_get(), list);
 				return -1;
 			}
 			continue;
@@ -1522,7 +1518,7 @@ update_view_references(struct Select *select, int update_value,
 		assert(space->def->view_ref_count > 0 || update_value > 0);
 		space->def->view_ref_count += update_value;
 	}
-	sqlite3SrcListDelete(sql_get(), list);
+	sqlSrcListDelete(sql_get(), list);
 	return 0;
 }
 
@@ -3733,7 +3729,7 @@ fkey_grab_by_name(struct rlist *list, const char *fkey_name)
 }
 
 /**
- * FIXME: as SQLite legacy temporary we use such mask throught
+ * FIXME: as sql legacy temporary we use such mask throught
  * SQL code. It should be replaced later with regular
  * mask from column_mask.h
  */

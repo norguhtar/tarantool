@@ -46,8 +46,12 @@ errinj.info()
     state: false
   ERRINJ_WAL_FALLOCATE:
     state: 0
+  ERRINJ_RELAY_EXIT_DELAY:
+    state: 0
   ERRINJ_SNAP_COMMIT_DELAY:
     state: false
+  ERRINJ_TUPLE_FORMAT_COUNT:
+    state: -1
   ERRINJ_TUPLE_ALLOC:
     state: false
   ERRINJ_VY_RUN_WRITE_DELAY:
@@ -92,8 +96,8 @@ errinj.info()
     state: false
   ERRINJ_VY_POINT_ITER_WAIT:
     state: false
-  ERRINJ_RELAY_EXIT_DELAY:
-    state: 0
+  ERRINJ_MEMTX_DELAY_GC:
+    state: false
   ERRINJ_IPROTO_TX_DELAY:
     state: false
   ERRINJ_BUILD_INDEX:
@@ -179,6 +183,63 @@ space:get{2}
 errinj.set("ERRINJ_WAL_IO", false)
 ---
 - ok
+...
+space:update(1, {{'=', 2, 2}})
+---
+- [1, 2]
+...
+space:truncate()
+---
+...
+-- Check that WAL vclock isn't promoted on failed write.
+lsn1 = box.info.vclock[box.info.id]
+---
+...
+errinj.set("ERRINJ_WAL_WRITE_PARTIAL", 0)
+---
+- ok
+...
+space:insert{1}
+---
+- error: Failed to write to disk
+...
+errinj.set("ERRINJ_WAL_WRITE_PARTIAL", -1)
+---
+- ok
+...
+space:insert{1}
+---
+- [1]
+...
+-- Check vclock was promoted only one time
+box.info.vclock[box.info.id] == lsn1 + 1
+---
+- true
+...
+errinj.set("ERRINJ_WAL_WRITE_PARTIAL", 0)
+---
+- ok
+...
+space:update(1, {{'=', 2, 2}})
+---
+- error: Failed to write to disk
+...
+space:get{1}
+---
+- [1]
+...
+errinj.set("ERRINJ_WAL_WRITE_PARTIAL", -1)
+---
+- ok
+...
+space:update(1, {{'=', 2, 2}})
+---
+- [1, 2]
+...
+-- Check vclock was promoted only two times
+box.info.vclock[box.info.id] == lsn1 + 2
+---
+- true
 ...
 space:truncate()
 ---

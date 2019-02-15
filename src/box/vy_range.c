@@ -241,6 +241,7 @@ vy_range_add_slice(struct vy_range *range, struct vy_slice *slice)
 	rlist_add_entry(&range->slices, slice, in_range);
 	range->slice_count++;
 	vy_disk_stmt_counter_add(&range->count, &slice->count);
+	range->version++;
 }
 
 void
@@ -250,6 +251,7 @@ vy_range_add_slice_before(struct vy_range *range, struct vy_slice *slice,
 	rlist_add_tail(&next_slice->in_range, &slice->in_range);
 	range->slice_count++;
 	vy_disk_stmt_counter_add(&range->count, &slice->count);
+	range->version++;
 }
 
 void
@@ -260,6 +262,7 @@ vy_range_remove_slice(struct vy_range *range, struct vy_slice *slice)
 	rlist_del_entry(slice, in_range);
 	range->slice_count--;
 	vy_disk_stmt_counter_sub(&range->count, &slice->count);
+	range->version++;
 }
 
 /**
@@ -282,18 +285,18 @@ vy_range_remove_slice(struct vy_range *range, struct vy_slice *slice)
  * ratio.
  *
  * Given a range, this function computes the maximal level that needs
- * to be compacted and sets @compact_priority to the number of runs in
- * this level and all preceding levels.
+ * to be compacted and sets @compaction_priority to the number of runs
+ * in this level and all preceding levels.
  */
 void
-vy_range_update_compact_priority(struct vy_range *range,
-				 const struct index_opts *opts)
+vy_range_update_compaction_priority(struct vy_range *range,
+				    const struct index_opts *opts)
 {
 	assert(opts->run_count_per_level > 0);
 	assert(opts->run_size_ratio > 1);
 
-	range->compact_priority = 0;
-	vy_disk_stmt_counter_reset(&range->compact_queue);
+	range->compaction_priority = 0;
+	vy_disk_stmt_counter_reset(&range->compaction_queue);
 
 	if (range->slice_count <= 1) {
 		/* Nothing to compact. */
@@ -302,8 +305,8 @@ vy_range_update_compact_priority(struct vy_range *range,
 	}
 
 	if (range->needs_compaction) {
-		range->compact_priority = range->slice_count;
-		range->compact_queue = range->count;
+		range->compaction_priority = range->slice_count;
+		range->compaction_queue = range->count;
 		return;
 	}
 
@@ -318,21 +321,41 @@ vy_range_update_compact_priority(struct vy_range *range,
 	uint32_t level_run_count = 0;
 	/*
 	 * The target (perfect) size of a run at the current level.
-	 * For the first level, it's the size of the newest run.
-	 * For lower levels it's computed as first level run size
-	 * times run_size_ratio.
+	 * Calculated recurrently: the size of the next level equals
+	 * the size of the previous level times run_size_ratio.
+	 *
+	 * For the last level we want it to be slightly greater
+	 * than the size of the last (biggest, oldest) run so that
+	 * all newer runs are at least run_size_ratio times smaller,
+	 * because in conjunction with the fact that we never store
+	 * more than one run at the last level, this will keep space
+	 * amplification below 2 provided run_count_per_level is not
+	 * greater than (run_size_ratio - 1).
+	 *
+	 * So to calculate the target size of the first level, we
+	 * divide the size of the oldest run by run_size_ratio until
+	 * it exceeds the size of the newest run. Note, DIV_ROUND_UP
+	 * is important here, because if we used integral division,
+	 * then after descending to the last level we would get a
+	 * value slightly less than the last run size, not slightly
+	 * greater, as we wanted to, which could increase space
+	 * amplification by run_count_per_level in the worse case
+	 * scenario.
 	 */
-	uint64_t target_run_size = 0;
+	uint64_t target_run_size;
 
+	uint64_t size;
 	struct vy_slice *slice;
+	slice = rlist_last_entry(&range->slices, struct vy_slice, in_range);
+	size = slice->count.bytes;
+	slice = rlist_first_entry(&range->slices, struct vy_slice, in_range);
+	do {
+		target_run_size = size;
+		size = DIV_ROUND_UP(target_run_size, opts->run_size_ratio);
+	} while (size > (uint64_t)MAX(slice->count.bytes, 1));
+
 	rlist_foreach_entry(slice, &range->slices, in_range) {
-		uint64_t size = slice->count.bytes_compressed;
-		/*
-		 * The size of the first level is defined by
-		 * the size of the most recent run.
-		 */
-		if (target_run_size == 0)
-			target_run_size = size;
+		size = slice->count.bytes;
 		level_run_count++;
 		total_run_count++;
 		vy_disk_stmt_counter_add(&total_stmt_count, &slice->count);
@@ -365,16 +388,34 @@ vy_range_update_compact_priority(struct vy_range *range,
 			 * we find an appropriate level for it.
 			 */
 		}
-		if (level_run_count > opts->run_count_per_level) {
+		/*
+		 * Since all ranges constituting an LSM tree have
+		 * the same configuration, they tend to get compacted
+		 * simultaneously, leading to IO load spikes and, as
+		 * a result, distortion of the LSM tree shape and
+		 * increased read amplification. To prevent this from
+		 * happening, we constantly randomize compaction pace
+		 * among ranges by deferring compaction at each LSM
+		 * tree level with some fixed small probability.
+		 *
+		 * Note, we can't use rand() directly here, because
+		 * this function is called on every memory dump and
+		 * scans all LSM tree levels. Instead we use the
+		 * value of rand() from the slice creation time.
+		 */
+		uint32_t max_run_count = opts->run_count_per_level;
+		if (slice->seed < RAND_MAX / 10)
+			max_run_count++;
+		if (level_run_count > max_run_count) {
 			/*
 			 * The number of runs at the current level
 			 * exceeds the configured maximum. Arrange
 			 * for compaction. We compact all runs at
 			 * this level and upper levels.
 			 */
-			range->compact_priority = total_run_count;
-			range->compact_queue = total_stmt_count;
-			est_new_run_size = total_stmt_count.bytes_compressed;
+			range->compaction_priority = total_run_count;
+			range->compaction_queue = total_stmt_count;
+			est_new_run_size = total_stmt_count.bytes;
 		}
 	}
 
@@ -383,8 +424,20 @@ vy_range_update_compact_priority(struct vy_range *range,
 		 * Do not store more than one run at the last level
 		 * to keep space amplification low.
 		 */
-		range->compact_priority = total_run_count;
-		range->compact_queue = total_stmt_count;
+		range->compaction_priority = total_run_count;
+		range->compaction_queue = total_stmt_count;
+	}
+}
+
+void
+vy_range_update_dumps_per_compaction(struct vy_range *range)
+{
+	if (!rlist_empty(&range->slices)) {
+		struct vy_slice *slice = rlist_last_entry(&range->slices,
+						struct vy_slice, in_range);
+		range->dumps_per_compaction = slice->run->dump_count;
+	} else {
+		range->dumps_per_compaction = 0;
 	}
 }
 
@@ -402,7 +455,7 @@ vy_range_update_compact_priority(struct vy_range *range,
  *   4/3 * range_size.
  */
 bool
-vy_range_needs_split(struct vy_range *range, const struct index_opts *opts,
+vy_range_needs_split(struct vy_range *range, int64_t range_size,
 		     const char **p_split_key)
 {
 	struct vy_slice *slice;
@@ -416,7 +469,7 @@ vy_range_needs_split(struct vy_range *range, const struct index_opts *opts,
 	slice = rlist_last_entry(&range->slices, struct vy_slice, in_range);
 
 	/* The range is too small to be split. */
-	if (slice->count.bytes_compressed < opts->range_size * 4 / 3)
+	if (slice->count.bytes < range_size * 4 / 3)
 		return false;
 
 	/* Find the median key in the oldest run (approximately). */
@@ -472,15 +525,15 @@ vy_range_needs_split(struct vy_range *range, const struct index_opts *opts,
  */
 bool
 vy_range_needs_coalesce(struct vy_range *range, vy_range_tree_t *tree,
-			const struct index_opts *opts,
-			struct vy_range **p_first, struct vy_range **p_last)
+			int64_t range_size, struct vy_range **p_first,
+			struct vy_range **p_last)
 {
 	struct vy_range *it;
 
 	/* Size of the coalesced range. */
-	uint64_t total_size = range->count.bytes_compressed;
+	uint64_t total_size = range->count.bytes;
 	/* Coalesce ranges until total_size > max_size. */
-	uint64_t max_size = opts->range_size / 2;
+	uint64_t max_size = range_size / 2;
 
 	/*
 	 * We can't coalesce a range that was scheduled for dump
@@ -493,7 +546,7 @@ vy_range_needs_coalesce(struct vy_range *range, vy_range_tree_t *tree,
 	for (it = vy_range_tree_next(tree, range);
 	     it != NULL && !vy_range_is_scheduled(it);
 	     it = vy_range_tree_next(tree, it)) {
-		uint64_t size = it->count.bytes_compressed;
+		uint64_t size = it->count.bytes;
 		if (total_size + size > max_size)
 			break;
 		total_size += size;
@@ -502,7 +555,7 @@ vy_range_needs_coalesce(struct vy_range *range, vy_range_tree_t *tree,
 	for (it = vy_range_tree_prev(tree, range);
 	     it != NULL && !vy_range_is_scheduled(it);
 	     it = vy_range_tree_prev(tree, it)) {
-		uint64_t size = it->count.bytes_compressed;
+		uint64_t size = it->count.bytes;
 		if (total_size + size > max_size)
 			break;
 		total_size += size;

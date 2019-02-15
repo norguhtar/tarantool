@@ -143,6 +143,18 @@ struct tuple_format {
 	void *engine;
 	/** Identifier */
 	uint16_t id;
+	/**
+	 * Hash computed from this format. Does not include the
+	 * tuple dictionary. Used only for sharing formats among
+	 * ephemeral spaces.
+	 */
+	uint32_t hash;
+	/**
+	 * Counter that grows incrementally on space rebuild
+	 * used for caching offset slot in key_part, for more
+	 * details see key_part::offset_slot_cache.
+	 */
+	uint64_t epoch;
 	/** Reference counter */
 	int refs;
 	/**
@@ -151,6 +163,11 @@ struct tuple_format {
 	 * in progress.
 	 */
 	bool is_temporary;
+	/**
+	 * This format belongs to ephemeral space and thus might
+	 * be shared with other ephemeral spaces.
+	 */
+	bool is_ephemeral;
 	/**
 	 * Size of field map of tuple in bytes.
 	 * \sa struct tuple
@@ -186,6 +203,15 @@ struct tuple_format {
 	 */
 	struct tuple_dictionary *dict;
 	/**
+	 * The size of a minimal tuple conforming to the format
+	 * and filled with nils.
+	 */
+	uint32_t min_tuple_size;
+	/**
+	 * A maximum depth of format::fields subtree.
+	 */
+	uint32_t fields_depth;
+	/**
 	 * Fields comprising the format, organized in a tree.
 	 * First level nodes correspond to tuple fields.
 	 * Deeper levels define indexed JSON paths within
@@ -207,18 +233,36 @@ tuple_format_field_count(struct tuple_format *format)
 }
 
 /**
+ * Return meta information of a tuple field given a format,
+ * field index and path.
+ */
+static inline struct tuple_field *
+tuple_format_field_by_path(struct tuple_format *format, uint32_t fieldno,
+			   const char *path, uint32_t path_len)
+{
+	assert(fieldno < tuple_format_field_count(format));
+	struct json_token token;
+	token.type = JSON_TOKEN_NUM;
+	token.num = fieldno;
+	struct tuple_field *root =
+		json_tree_lookup_entry(&format->fields, &format->fields.root,
+				       &token, struct tuple_field, token);
+	assert(root != NULL);
+	if (path == NULL)
+		return root;
+	return json_tree_lookup_path_entry(&format->fields, &root->token,
+					   path, path_len, TUPLE_INDEX_BASE,
+					   struct tuple_field, token);
+}
+
+/**
  * Return meta information of a top-level tuple field given
  * a format and a field index.
  */
 static inline struct tuple_field *
 tuple_format_field(struct tuple_format *format, uint32_t fieldno)
 {
-	assert(fieldno < tuple_format_field_count(format));
-	struct json_token token;
-	token.type = JSON_TOKEN_NUM;
-	token.num = fieldno;
-	return json_tree_lookup_entry(&format->fields, &format->fields.root,
-				      &token, struct tuple_field, token);
+	return tuple_format_field_by_path(format, fieldno, NULL, 0);
 }
 
 extern struct tuple_format **tuple_formats;
@@ -258,18 +302,25 @@ tuple_format_unref(struct tuple_format *format)
 /**
  * Allocate, construct and register a new in-memory tuple format.
  * @param vtab Virtual function table for specific engines.
+ * @param engine Pointer to storage engine.
  * @param keys Array of key_defs of a space.
  * @param key_count The number of keys in @a keys array.
  * @param space_fields Array of fields, defined in a space format.
  * @param space_field_count Length of @a space_fields.
+ * @param exact_field_count Exact field count for format.
+ * @param is_temporary Set if format belongs to temporary space.
+ * @param is_ephemeral Set if format belongs to ephemeral space.
  *
  * @retval not NULL Tuple format.
  * @retval     NULL Memory error.
  */
 struct tuple_format *
-tuple_format_new(struct tuple_format_vtab *vtab, struct key_def * const *keys,
-		 uint16_t key_count, const struct field_def *space_fields,
-		 uint32_t space_field_count, struct tuple_dictionary *dict);
+tuple_format_new(struct tuple_format_vtab *vtab, void *engine,
+		 struct key_def * const *keys, uint16_t key_count,
+		 const struct field_def *space_fields,
+		 uint32_t space_field_count, uint32_t exact_field_count,
+		 struct tuple_dictionary *dict, bool is_temporary,
+		 bool is_ephemeral);
 
 /**
  * Check, if @a format1 can store any tuples of @a format2. For
@@ -356,103 +407,11 @@ tuple_init_field_map(struct tuple_format *format, uint32_t *field_map,
 		     const char *tuple, bool validate);
 
 /**
- * Get a field at the specific position in this MessagePack array.
- * Returns a pointer to MessagePack data.
- * @param format tuple format
- * @param tuple a pointer to MessagePack array
- * @param field_map a pointer to the LAST element of field map
- * @param field_no the index of field to return
- *
- * @returns field data if field exists or NULL
- * @sa tuple_init_field_map()
- */
-static inline const char *
-tuple_field_raw(struct tuple_format *format, const char *tuple,
-		const uint32_t *field_map, uint32_t field_no)
-{
-	if (likely(field_no < format->index_field_count)) {
-		/* Indexed field */
-
-		if (field_no == 0) {
-			mp_decode_array(&tuple);
-			return tuple;
-		}
-
-		int32_t offset_slot = tuple_format_field(format,
-					field_no)->offset_slot;
-		if (offset_slot != TUPLE_OFFSET_SLOT_NIL) {
-			if (field_map[offset_slot] != 0)
-				return tuple + field_map[offset_slot];
-			else
-				return NULL;
-		}
-	}
-	ERROR_INJECT(ERRINJ_TUPLE_FIELD, return NULL);
-	uint32_t field_count = mp_decode_array(&tuple);
-	if (unlikely(field_no >= field_count))
-		return NULL;
-	for (uint32_t k = 0; k < field_no; k++)
-		mp_next(&tuple);
-	return tuple;
-}
-
-/**
- * Get tuple field by its name.
- * @param format Tuple format.
- * @param tuple MessagePack tuple's body.
- * @param field_map Tuple field map.
- * @param name Field name.
- * @param name_len Length of @a name.
- * @param name_hash Hash of @a name.
- *
- * @retval not NULL MessagePack field.
- * @retval     NULL No field with @a name.
- */
-static inline const char *
-tuple_field_raw_by_name(struct tuple_format *format, const char *tuple,
-			const uint32_t *field_map, const char *name,
-			uint32_t name_len, uint32_t name_hash)
-{
-	uint32_t fieldno;
-	if (tuple_fieldno_by_name(format->dict, name, name_len, name_hash,
-				  &fieldno) != 0)
-		return NULL;
-	return tuple_field_raw(format, tuple, field_map, fieldno);
-}
-
-/**
- * Get tuple field by its path.
- * @param format Tuple format.
- * @param tuple MessagePack tuple's body.
- * @param field_map Tuple field map.
- * @param path Field path.
- * @param path_len Length of @a path.
- * @param path_hash Hash of @a path.
- * @param[out] field Found field, or NULL, if not found.
- *
- * @retval  0 Success.
- * @retval -1 Error in JSON path.
+ * Initialize tuple format subsystem.
+ * @retval 0 on success, -1 otherwise.
  */
 int
-tuple_field_raw_by_path(struct tuple_format *format, const char *tuple,
-                        const uint32_t *field_map, const char *path,
-                        uint32_t path_len, uint32_t path_hash,
-                        const char **field);
-
-/**
- * Get a tuple field pointed to by an index part.
- * @param format Tuple format.
- * @param tuple A pointer to MessagePack array.
- * @param field_map A pointer to the LAST element of field map.
- * @param part Index part to use.
- * @retval Field data if the field exists or NULL.
- */
-static inline const char *
-tuple_field_by_part_raw(struct tuple_format *format, const char *data,
-			const uint32_t *field_map, struct key_part *part)
-{
-	return tuple_field_raw(format, data, field_map, part->fieldno);
-}
+tuple_format_init();
 
 #if defined(__cplusplus)
 } /* extern "C" */

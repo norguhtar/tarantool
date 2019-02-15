@@ -13,7 +13,7 @@ test:plan(118)
 --    May you share freely, never taking more than you give.
 --
 -------------------------------------------------------------------------
--- This file implements regression tests for SQLite library. Specifically,
+-- This file implements regression tests for sql library. Specifically,
 -- it tests that ticket [80e031a00f45dca877ed92b225209cfa09280f4f] has been
 -- resolved.  That ticket is about IN and NOT IN operators with empty-set
 -- right-hand sides.  Such expressions should always return TRUE or FALSE
@@ -31,7 +31,7 @@ test:plan(118)
 -- result of IN is false and the result of NOT IN is true, regardless of
 -- the left operand and even if the left operand is NULL.
 --
--- EVIDENCE-OF: R-13595-45863 Note that SQLite allows the parenthesized
+-- EVIDENCE-OF: R-13595-45863 Note that sql allows the parenthesized
 -- list of scalar values on the right-hand side of an IN or NOT IN
 -- operator to be an empty list but most other SQL database database
 -- engines and the SQL92 standard require the list to contain at least
@@ -346,7 +346,7 @@ test:do_catchsql_test(
         SELECT 'hello' IN t1
     ]], {
         -- <tkt-80e031a00f.27>
-        1, 'Type mismatch: can not convert hello to numeric'
+        1, 'Type mismatch: can not convert hello to number'
         -- </tkt-80e031a00f.27>
     })
 
@@ -356,7 +356,7 @@ test:do_catchsql_test(
         SELECT 'hello' NOT IN t1
     ]], {
         -- <tkt-80e031a00f.28>
-        1, 'Type mismatch: can not convert hello to numeric'
+        1, 'Type mismatch: can not convert hello to number'
         -- </tkt-80e031a00f.28>
     })
 
@@ -380,23 +380,23 @@ test:do_execsql_test(
         -- </tkt-80e031a00f.30>
     })
 
-test:do_execsql_test(
+test:do_catchsql_test(
     "tkt-80e031a00f.31",
     [[
         SELECT x'303132' IN t1
     ]], {
         -- <tkt-80e031a00f.31>
-        0
+        1, 'Type mismatch: can not convert 012 to number'
         -- </tkt-80e031a00f.31>
     })
 
-test:do_execsql_test(
+test:do_catchsql_test(
     "tkt-80e031a00f.32",
     [[
         SELECT x'303132' NOT IN t1
     ]], {
         -- <tkt-80e031a00f.32>
-        1
+        1, 'Type mismatch: can not convert 012 to number'
         -- </tkt-80e031a00f.32>
     })
 

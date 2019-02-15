@@ -194,10 +194,11 @@ space_new(struct space_def *def, struct rlist *key_list)
 struct space *
 space_new_ephemeral(struct space_def *def, struct rlist *key_list)
 {
+	assert(def->opts.is_temporary);
+	assert(def->opts.is_ephemeral);
 	struct space *space = space_new(def, key_list);
 	if (space == NULL)
 		return NULL;
-	space->def->opts.is_temporary = true;
 	space->vtab->init_ephemeral_space(space);
 	return space;
 }
