@@ -1,4 +1,4 @@
---- help (en_US)
+--- help (en_US) 1.10
 
 return {
     tutorial = {
@@ -157,7 +157,7 @@ Tarantool instruction that means <don’t execute
 every time I type Enter; wait until I type a
 special string called the "delimiter".>
 More in the Tarantool manual:
-http://tarantool.org/doc/book/administration.html#requests
+https://tarantool.io/en/doc/<version>/reference/reference_lua/console/#console-delimiter
 
 Request #6 is:
 
@@ -170,7 +170,8 @@ console.delimiter("")!
 but you’ll see "!" in following exercises.
 
 You'll need a custom delimiter only in the trial console at
-http://try.tarantool.org. Tarantool console in production is smarter.
+https://tarantool.io/en/try-dev/.
+Tarantool console in production is smarter.
 It can tell when a multi-line request has not ended (for example,
 if it sees that a function declaration does not have an end keyword,
 as we'll be writing on the next screen).
@@ -253,24 +254,24 @@ Obviously it will work, so just type <tutorial("next")!> now.
 ]];
 
 [[
-Tutorial -- Screen #10 -- Packages
-==================================
+Tutorial -- Screen #10 -- Modules
+=================================
 
-Many developers have gone to the trouble of making
-packages of functions (sometimes called "modules")
-that have a general utility.
+Many developers have gone to the trouble of making modules,
+i.e. distributable packages of functions that have a general
+utility. In the Lua world, modules are called "rocks".
 More in the Luarocks list: http://luarocks.org/
 
-Most packages have to be "required", with the syntax
-variable_name = require("package-name")
+Most modules have to be "required", with the syntax
+variable_name = require("module-name")
 which should look familiar because earlier you said
 console = require("console")
 
 At this point, if you just say the variable_name,
-you’ll see a list of the package’s members and
+you’ll see a list of the module’s members and
 functions. If then you use a "." operator as in
-package-variable-name.function_name()
-you’ll invoke a package’s function.
+variable_name.function_name()
+you’ll invoke a module’s function.
 (At a different level you’ll have to use a ":"
 operator, as you’ll see in later examples.)
 
@@ -287,8 +288,8 @@ More on fibers on the next screen, so type <tutorial("next")!> now.
 ]];
 
 [[
-Tutorial -- Screen #11 -- The fiber package
-===========================================
+Tutorial -- Screen #11 -- The fiber module
+==========================================
 
 Make a function that will run like a daemon in the
 background until you cancel it. For this you need
@@ -298,7 +299,7 @@ tasks each get a slice, but they have to yield
 occasionally so that other tasks get a chance.
 That’s what a properly designed fiber will do.
 More in the Tarantool manual:
-http://tarantool.org/doc/reference/reference_lua/fiber.html
+https://tarantool.io/en/doc/<version>/reference/reference_lua/fiber/
 
 Request #11 is:
 
@@ -324,8 +325,8 @@ times and notice how the value mysteriously increases.
 ]];
 
 [[
-Tutorial -- Screen #12 -- The socket package
-============================================
+Tutorial -- Screen #12 -- The socket module
+===========================================
 
 Connect to the Internet and send a message to Tarantool's web-site.
 
@@ -334,8 +335,8 @@ Request #12 is:
 function socket_get ()
 local socket, sock, result
 socket = require("socket")
-sock = socket.tcp_connect("tarantool.org", 80)
-sock:send("GET / HTTP/1.0\r\nHost: tarantool.org\r\n\r\n")
+sock = socket.tcp_connect("tarantool.io", 80)
+sock:send("GET / HTTP/1.0\r\nHost: tarantool.io\r\n\r\n")
 result = sock:read(17)
 sock:close()
 return result
@@ -344,17 +345,17 @@ socket_get()!
 --------------------------------
 
 Briefly these requests are opening a socket
-and sending a "GET" request to tarantool.org’s server.
+and sending a "GET" request to tarantool.io’s server.
 The response will be short, for example
 "- "HTTP/1.1 302 OK\r\n""
 but it shows you’ve gotten in touch with a distant server.
 More in the Tarantool manual:
-http://tarantool.org/doc/reference/reference_lua/socket.html
+https://tarantool.io/en/doc/<version>/reference/reference_lua/socket/
 ]];
 
 [[
-Tutorial -- Screen #13 -- The box package
-=========================================
+Tutorial -- Screen #13 -- The box module
+========================================
 
 So far you’ve seen Tarantool in action as a
 Lua application server. Henceforth you’ll see
@@ -367,7 +368,7 @@ and grant read/write access to you, but here
 you’re the "admin" user -- you have administrative
 powers -- so you can start manipulating data immediately.
 More in the Tarantool manual:
-http://tarantool.org/doc/book/box/index.html
+https://tarantool.io/en/doc/<version>/book/box/box_space/#box-space-replace
 
 Request #13 is:
 
@@ -389,11 +390,11 @@ To understand the description, you just have to know that:
 ** tuples are collections of fields, as are Lua tables
 (vaguely like rows in an SQL DBMS)
 ** spaces are where Tarantool stores sets of tuples
-(vaguely like databases in an SQL DBMS)
+(vaguely like tables in an SQL DBMS)
 ** indexes are objects that make lookups of tuples faster
 (vaguely like indexes in an SQL DBMS)
 Much of the description doesn’t matter right now; it’s
-enough if you see that package box gets a space which is
+enough if you see that module box gets a space which is
 named tutor, and it has one index on the first field.
 ]];
 
@@ -443,7 +444,7 @@ That’s all you need to replace the rest of the fields with
 new values. The syntax of box.replace(), pared down, is:
 box.space.tutor:replace{primary-key-field, other-fields}
 More in the Tarantool manual:
-http://tarantool.org/doc/book/box/box_space.html#lua-function.space_object.replace
+https://tarantool.io/en/doc/<version>/book/box/box_space/#box-space-replace
 Tarantool by default keeps database changes in memory,
 but box.replace() will cause a write to a log, and log
 information can later be consolidated with another box
@@ -472,7 +473,7 @@ But you’ve been confined to a space and an index
 that Tarantool started with.
 Suppose that you want to create your own.
 More in the Tarantool manual:
-http://tarantool.org/doc/getting_started.html#starting-tarantool-and-making-your-first-database
+https://tarantool.io/en/doc/<version>/book/getting_started/using_docker/#creating-a-database
 
 Request #16 is:
 
@@ -496,7 +497,7 @@ Indexes can be declared to be "unique", which
 is important because some combination of the
 fields must be unique, for identification purposes.
 More in the Tarantool manual:
-https://tarantool.org/doc/book/box/data_model.html#index
+https://tarantool.io/en/doc/<version>/book/box/data_model/#index
 
 Request #17 is:
 
@@ -562,17 +563,17 @@ Tutorial -- Screen #20 -- The bigger Tutorials
 ==============================================
 
 You can continue to type in whatever Lua instructions,
-package requires, and database-manipulations you want,
+module requires, and database-manipulations you want,
 here on this screen. But to really get into Tarantool,
 you should download it so that you can be your own
 administrator and create your own permanent databases. The
-Tarantool manual has three significant tutorials:
+Tarantool manual has three significant Lua tutorials:
 
 Insert one million tuples with a Lua stored procedure,
 Sum a JSON field for all tuples, and
 Indexed pattern search.
 
-See http://tarantool.org/en/doc/tutorials/lua_tutorials.html
+See https://tarantool.io/en/doc/<version>/tutorials/lua_tutorials/
 
 Request #20 is:
 

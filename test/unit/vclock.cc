@@ -249,11 +249,10 @@ test_tostring_one(uint32_t count, const int64_t *lsns, const char *res)
 		if (lsns[node_id] > 0)
 			vclock_follow(&vclock, node_id, lsns[node_id]);
 	}
-	char *str = vclock_to_string(&vclock);
+	const char *str = vclock_to_string(&vclock);
 	int result = strcmp(str, res);
 	if (result)
 		diag("\n!!!new result!!! %s\n", str);
-	free(str);
 	return !result;
 }
 
@@ -308,7 +307,7 @@ test_fromstring_one(const char *str, uint32_t count, const int64_t *lsns)
 	vclock_create(&check);
 	for (uint32_t node_id = 0; node_id < count; node_id++) {
 		if (lsns[node_id] >= 0)
-			check.lsn[node_id] = lsns[node_id];
+			vclock_follow(&check, node_id, lsns[node_id]);
 	}
 
 	return (rc != 0 || vclock_compare(&vclock, &check) != 0);

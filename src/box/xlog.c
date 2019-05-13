@@ -89,6 +89,14 @@ enum {
 	XLOG_TX_COMPRESS_THRESHOLD = 2 * 1024,
 };
 
+const struct xlog_opts xlog_opts_default = {
+	.rate_limit = 0,
+	.sync_interval = 0,
+	.free_cache = false,
+	.sync_is_async = false,
+	.no_compression = false,
+};
+
 /* {{{ struct xlog_meta */
 
 enum {
@@ -151,20 +159,12 @@ xlog_meta_format(const struct xlog_meta *meta, char *buf, int size)
 		meta->filetype, v13, PACKAGE_VERSION,
 		tt_uuid_str(&meta->instance_uuid));
 	if (vclock_is_set(&meta->vclock)) {
-		char *vstr = vclock_to_string(&meta->vclock);
-		if (vstr == NULL)
-			return -1;
-		SNPRINT(total, snprintf, buf, size,
-			VCLOCK_KEY ": %s\n", vstr);
-		free(vstr);
+		SNPRINT(total, snprintf, buf, size, VCLOCK_KEY ": %s\n",
+			vclock_to_string(&meta->vclock));
 	}
 	if (vclock_is_set(&meta->prev_vclock)) {
-		char *vstr = vclock_to_string(&meta->prev_vclock);
-		if (vstr == NULL)
-			return -1;
-		SNPRINT(total, snprintf, buf, size,
-			PREV_VCLOCK_KEY ": %s\n", vstr);
-		free(vstr);
+		SNPRINT(total, snprintf, buf, size, PREV_VCLOCK_KEY ": %s\n",
+			vclock_to_string(&meta->prev_vclock));
 	}
 	SNPRINT(total, snprintf, buf, size, "\n");
 	assert(total > 0);
@@ -325,14 +325,12 @@ xlog_meta_parse(struct xlog_meta *meta, const char **data,
 
 /* {{{ struct xdir */
 
-/* sync snapshot every 16MB */
-#define SNAP_SYNC_INTERVAL	(1 << 24)
-
 void
-xdir_create(struct xdir *dir, const char *dirname,
-	    enum xdir_type type, const struct tt_uuid *instance_uuid)
+xdir_create(struct xdir *dir, const char *dirname, enum xdir_type type,
+	    const struct tt_uuid *instance_uuid, const struct xlog_opts *opts)
 {
 	memset(dir, 0, sizeof(*dir));
+	dir->opts = *opts;
 	vclockset_new(&dir->index);
 	/* Default mode. */
 	dir->mode = 0660;
@@ -344,10 +342,8 @@ xdir_create(struct xdir *dir, const char *dirname,
 		dir->filetype = "SNAP";
 		dir->filename_ext = ".snap";
 		dir->suffix = INPROGRESS;
-		dir->sync_interval = SNAP_SYNC_INTERVAL;
 		break;
 	case XLOG:
-		dir->sync_is_async = true;
 		dir->filetype = "XLOG";
 		dir->filename_ext = ".xlog";
 		dir->suffix = NONE;
@@ -663,7 +659,25 @@ xdir_format_filename(struct xdir *dir, int64_t signature,
 	return filename;
 }
 
-int
+static void
+xdir_say_gc(int result, int errorno, const char *filename)
+{
+	if (result == 0) {
+		say_info("removed %s", filename);
+	} else if (errorno != ENOENT) {
+		errno = errorno;
+		say_syserror("error while removing %s", filename);
+	}
+}
+
+static int
+xdir_complete_gc(eio_req *req)
+{
+	xdir_say_gc(req->result, req->errorno, EIO_PATH(req));
+	return 0;
+}
+
+void
 xdir_collect_garbage(struct xdir *dir, int64_t signature, unsigned flags)
 {
 	struct vclock *vclock;
@@ -671,29 +685,16 @@ xdir_collect_garbage(struct xdir *dir, int64_t signature, unsigned flags)
 	       vclock_sum(vclock) < signature) {
 		char *filename = xdir_format_filename(dir, vclock_sum(vclock),
 						      NONE);
-		int rc;
-		if (flags & XDIR_GC_USE_COIO)
-			rc = coio_unlink(filename);
+		if (flags & XDIR_GC_ASYNC)
+			eio_unlink(filename, 0, xdir_complete_gc, NULL);
 		else
-			rc = unlink(filename);
-		if (rc < 0) {
-			if (errno != ENOENT) {
-				say_syserror("error while removing %s",
-					     filename);
-				diag_set(SystemError,
-					 "failed to unlink file '%s'",
-					 filename);
-				return -1;
-			}
-		} else
-			say_info("removed %s", filename);
+			xdir_say_gc(unlink(filename), errno, filename);
 		vclockset_remove(&dir->index, vclock);
 		free(vclock);
 
 		if (flags & XDIR_GC_REMOVE_ONE)
 			break;
 	}
-	return 0;
 }
 
 void
@@ -764,19 +765,21 @@ xlog_rename(struct xlog *l)
 }
 
 static int
-xlog_init(struct xlog *xlog)
+xlog_init(struct xlog *xlog, const struct xlog_opts *opts)
 {
 	memset(xlog, 0, sizeof(*xlog));
-	xlog->sync_interval = SNAP_SYNC_INTERVAL;
+	xlog->opts = *opts;
 	xlog->sync_time = ev_monotonic_time();
 	xlog->is_autocommit = true;
 	obuf_create(&xlog->obuf, &cord()->slabc, XLOG_TX_AUTOCOMMIT_THRESHOLD);
 	obuf_create(&xlog->zbuf, &cord()->slabc, XLOG_TX_AUTOCOMMIT_THRESHOLD);
-	xlog->zctx = ZSTD_createCCtx();
-	if (xlog->zctx == NULL) {
-		diag_set(ClientError, ER_COMPRESSION,
-			 "failed to create context");
-		return -1;
+	if (!opts->no_compression) {
+		xlog->zctx = ZSTD_createCCtx();
+		if (xlog->zctx == NULL) {
+			diag_set(ClientError, ER_COMPRESSION,
+				 "failed to create context");
+			return -1;
+		}
 	}
 	return 0;
 }
@@ -802,7 +805,7 @@ xlog_destroy(struct xlog *xlog)
 
 int
 xlog_create(struct xlog *xlog, const char *name, int flags,
-	    const struct xlog_meta *meta)
+	    const struct xlog_meta *meta, const struct xlog_opts *opts)
 {
 	char meta_buf[XLOG_META_LEN_MAX];
 	int meta_len;
@@ -817,7 +820,7 @@ xlog_create(struct xlog *xlog, const char *name, int flags,
 		goto err;
 	}
 
-	if (xlog_init(xlog) != 0)
+	if (xlog_init(xlog, opts) != 0)
 		goto err;
 
 	xlog->meta = *meta;
@@ -870,7 +873,7 @@ err:
 }
 
 int
-xlog_open(struct xlog *xlog, const char *name)
+xlog_open(struct xlog *xlog, const char *name, const struct xlog_opts *opts)
 {
 	char magic[sizeof(log_magic_t)];
 	char meta_buf[XLOG_META_LEN_MAX];
@@ -878,7 +881,7 @@ xlog_open(struct xlog *xlog, const char *name)
 	int meta_len;
 	int rc;
 
-	if (xlog_init(xlog) != 0)
+	if (xlog_init(xlog, opts) != 0)
 		goto err;
 
 	strncpy(xlog->filename, name, PATH_MAX);
@@ -985,16 +988,9 @@ xdir_create_xlog(struct xdir *dir, struct xlog *xlog,
 			 vclock, prev_vclock);
 
 	char *filename = xdir_format_filename(dir, signature, NONE);
-	if (xlog_create(xlog, filename, dir->open_wflags, &meta) != 0)
+	if (xlog_create(xlog, filename, dir->open_wflags, &meta,
+			&dir->opts) != 0)
 		return -1;
-
-	/* Inherit xdir settings. */
-	xlog->sync_is_async = dir->sync_is_async;
-	xlog->sync_interval = dir->sync_interval;
-
-	/* free file cache if dir should be synced */
-	xlog->free_cache = dir->sync_interval != 0 ? true: false;
-	xlog->rate_limit = 0;
 
 	/* Rename xlog file */
 	if (dir->suffix != INPROGRESS && xlog_rename(xlog)) {
@@ -1211,7 +1207,8 @@ xlog_tx_write(struct xlog *log)
 		return 0;
 	ssize_t written;
 
-	if (obuf_size(&log->obuf) >= XLOG_TX_COMPRESS_THRESHOLD) {
+	if (!log->opts.no_compression &&
+	    obuf_size(&log->obuf) >= XLOG_TX_COMPRESS_THRESHOLD) {
 		written = xlog_tx_write_zstd(log);
 	} else {
 		written = xlog_tx_write_plain(log);
@@ -1241,16 +1238,16 @@ xlog_tx_write(struct xlog *log)
 	log->offset += written;
 	log->rows += log->tx_rows;
 	log->tx_rows = 0;
-	if ((log->sync_interval && log->offset >=
-	    (off_t)(log->synced_size + log->sync_interval)) ||
-	    (log->rate_limit && log->offset >=
-	    (off_t)(log->synced_size + log->rate_limit))) {
+	if ((log->opts.sync_interval && log->offset >=
+	    (off_t)(log->synced_size + log->opts.sync_interval)) ||
+	    (log->opts.rate_limit && log->offset >=
+	    (off_t)(log->synced_size + log->opts.rate_limit))) {
 		off_t sync_from = SYNC_ROUND_DOWN(log->synced_size);
 		size_t sync_len = SYNC_ROUND_UP(log->offset) -
 				  sync_from;
-		if (log->rate_limit > 0) {
+		if (log->opts.rate_limit > 0) {
 			double throttle_time;
-			throttle_time = (double)sync_len / log->rate_limit -
+			throttle_time = (double)sync_len / log->opts.rate_limit -
 					(ev_monotonic_time() - log->sync_time);
 			if (throttle_time > 0)
 				ev_sleep(throttle_time);
@@ -1265,7 +1262,7 @@ xlog_tx_write(struct xlog *log)
 		fdatasync(log->fd);
 #endif /* HAVE_SYNC_FILE_RANGE */
 		log->sync_time = ev_monotonic_time();
-		if (log->free_cache) {
+		if (log->opts.free_cache) {
 #ifdef HAVE_POSIX_FADVISE
 			/** free page cache */
 			if (posix_fadvise(log->fd, sync_from, sync_len,
@@ -1414,7 +1411,7 @@ sync_cb(eio_req *req)
 int
 xlog_sync(struct xlog *l)
 {
-	if (l->sync_is_async) {
+	if (l->opts.sync_is_async) {
 		int fd = dup(l->fd);
 		if (fd == -1) {
 			say_syserror("%s: dup() failed", l->filename);
@@ -1804,7 +1801,7 @@ xlog_tx_cursor_next_row(struct xlog_tx_cursor *tx_cursor,
 	/* Return row from xlog tx buffer */
 	int rc = xrow_header_decode(xrow,
 				    (const char **)&tx_cursor->rows.rpos,
-				    (const char *)tx_cursor->rows.wpos);
+				    (const char *)tx_cursor->rows.wpos, false);
 	if (rc != 0) {
 		diag_set(XlogError, "can't parse row");
 		/* Discard remaining row data */

@@ -84,15 +84,48 @@ mp_decode_vclock(const char **data, struct vclock *vclock)
 	return 0;
 }
 
+/**
+ * If log_level is 'verbose' or greater,
+ * dump the corrupted row contents in hex to the log.
+ *
+ * The format is similar to the xxd utility.
+ */
+void dump_row_hex(const char *start, const char *end) {
+	if (!say_log_level_is_enabled(S_VERBOSE))
+		return;
+
+	char *buf = tt_static_buf();
+	const char *buf_end = buf + TT_STATIC_BUF_LEN;
+
+	say_verbose("Got a corrupted row:");
+	for (const char *cur = start; cur < end;) {
+		char *pos = buf;
+		pos += snprintf(pos, buf_end - pos, "%08lX: ", cur - start);
+		for (size_t i = 0; i < 16; ++i) {
+			pos += snprintf(pos, buf_end - pos, "%02X ", (unsigned char)*cur++);
+			if (cur >= end || pos == buf_end)
+				break;
+		}
+		*pos = '\0';
+		say_verbose("%s", buf);
+	}
+}
+
+#define xrow_on_decode_err(start, end, what, desc_str) do {\
+	diag_set(ClientError, what, desc_str);\
+	dump_row_hex(start, end);\
+} while (0);
+
 int
 xrow_header_decode(struct xrow_header *header, const char **pos,
-		   const char *end)
+		   const char *end, bool end_is_exact)
 {
 	memset(header, 0, sizeof(struct xrow_header));
 	const char *tmp = *pos;
+	const char * const start = *pos;
 	if (mp_check(&tmp, end) != 0) {
 error:
-		diag_set(ClientError, ER_INVALID_MSGPACK, "packet header");
+		xrow_on_decode_err(start, end, ER_INVALID_MSGPACK, "packet header");
 		return -1;
 	}
 
@@ -139,12 +172,16 @@ error:
 	if (*pos < end && header->type != IPROTO_NOP) {
 		const char *body = *pos;
 		if (mp_check(pos, end)) {
-			diag_set(ClientError, ER_INVALID_MSGPACK, "packet body");
+			xrow_on_decode_err(start, end, ER_INVALID_MSGPACK, "packet body");
 			return -1;
 		}
 		header->bodycnt = 1;
 		header->body[0].iov_base = (void *) body;
 		header->body[0].iov_len = *pos - body;
+	}
+	if (end_is_exact && *pos < end) {
+		xrow_on_decode_err(start,end, ER_INVALID_MSGPACK, "packet body");
+		return -1;
 	}
 	return 0;
 }
@@ -155,14 +192,11 @@ error:
 static inline int
 xrow_decode_uuid(const char **pos, struct tt_uuid *out)
 {
-	if (mp_typeof(**pos) != MP_STR) {
-error:
-		diag_set(ClientError, ER_INVALID_MSGPACK, "UUID");
+	if (mp_typeof(**pos) != MP_STR)
 		return -1;
-	}
 	uint32_t len = mp_decode_strl(pos);
 	if (tt_uuid_from_strl(*pos, len, out) != 0)
-		goto error;
+		return -1;
 	*pos += len;
 	return 0;
 }
@@ -485,7 +519,8 @@ xrow_decode_dml(struct xrow_header *row, struct request *request,
 
 	if (mp_typeof(*data) != MP_MAP || mp_check_map(data, end) > 0) {
 error:
-		diag_set(ClientError, ER_INVALID_MSGPACK, "packet body");
+		xrow_on_decode_err(row->body[0].iov_base, end, ER_INVALID_MSGPACK,
+				   "packet body");
 		return -1;
 	}
 
@@ -544,44 +579,54 @@ error:
 		}
 	}
 	if (data != end) {
-		diag_set(ClientError, ER_INVALID_MSGPACK, "packet end");
+		xrow_on_decode_err(row->body[0].iov_base, end, ER_INVALID_MSGPACK,
+				   "packet end");
 		return -1;
 	}
 done:
 	if (key_map) {
 		enum iproto_key key = (enum iproto_key) bit_ctz_u64(key_map);
-		diag_set(ClientError, ER_MISSING_REQUEST_FIELD,
-			 iproto_key_name(key));
+		xrow_on_decode_err(row->body[0].iov_base, end,
+				   ER_MISSING_REQUEST_FIELD, iproto_key_name(key));
 		return -1;
 	}
 	return 0;
+}
+
+static int
+request_snprint(char *buf, int size, const struct request *request)
+{
+	int total = 0;
+	SNPRINT(total, snprintf, buf, size, "{type: '%s', "
+			"replica_id: %u, lsn: %lld, "
+			"space_id: %u, index_id: %u",
+			iproto_type_name(request->type),
+			(unsigned) request->header->replica_id,
+			(long long) request->header->lsn,
+			(unsigned) request->space_id,
+			(unsigned) request->index_id);
+	if (request->key != NULL) {
+		SNPRINT(total, snprintf, buf, size, ", key: ");
+		SNPRINT(total, mp_snprint, buf, size, request->key);
+	}
+	if (request->tuple != NULL) {
+		SNPRINT(total, snprintf, buf, size, ", tuple: ");
+		SNPRINT(total, mp_snprint, buf, size, request->tuple);
+	}
+	if (request->ops != NULL) {
+		SNPRINT(total, snprintf, buf, size, ", ops: ");
+		SNPRINT(total, mp_snprint, buf, size, request->ops);
+	}
+	SNPRINT(total, snprintf, buf, size, "}");
+	return total;
 }
 
 const char *
 request_str(const struct request *request)
 {
 	char *buf = tt_static_buf();
-	char *end = buf + TT_STATIC_BUF_LEN;
-	char *pos = buf;
-	pos += snprintf(pos, end - pos, "{type: '%s', lsn: %lld, "\
-			"space_id: %u, index_id: %u",
-			iproto_type_name(request->type),
-			(long long) request->header->lsn,
-			(unsigned) request->space_id,
-			(unsigned) request->index_id);
-	if (request->key != NULL) {
-		pos += snprintf(pos, end - pos, ", key: ");
-		pos += mp_snprint(pos, end - pos, request->key);
-	}
-	if (request->tuple != NULL) {
-		pos += snprintf(pos, end - pos, ", tuple: ");
-		pos += mp_snprint(pos, end - pos, request->tuple);
-	}
-	if (request->ops != NULL) {
-		pos += snprintf(pos, end - pos, ", ops: ");
-		pos += mp_snprint(pos, end - pos, request->ops);
-	}
-	pos += snprintf(pos, end - pos, "}");
+	if (request_snprint(buf, TT_STATIC_BUF_LEN, request) < 0)
+		return "<failed to format request>";
 	return buf;
 }
 
@@ -689,7 +734,8 @@ xrow_decode_call(const struct xrow_header *row, struct call_request *request)
 
 	if (mp_typeof(*data) != MP_MAP || mp_check_map(data, end) > 0) {
 error:
-		diag_set(ClientError, ER_INVALID_MSGPACK, "packet body");
+		xrow_on_decode_err(row->body[0].iov_base, end, ER_INVALID_MSGPACK,
+				   "packet body");
 		return -1;
 	}
 
@@ -728,20 +774,21 @@ error:
 		}
 	}
 	if (data != end) {
-		diag_set(ClientError, ER_INVALID_MSGPACK, "packet end");
+		xrow_on_decode_err(row->body[0].iov_base, end, ER_INVALID_MSGPACK,
+				   "packet end");
 		return -1;
 	}
 	if (row->type == IPROTO_EVAL) {
 		if (request->expr == NULL) {
-			diag_set(ClientError, ER_MISSING_REQUEST_FIELD,
-				 iproto_key_name(IPROTO_EXPR));
+			xrow_on_decode_err(row->body[0].iov_base, end, ER_MISSING_REQUEST_FIELD,
+					   iproto_key_name(IPROTO_EXPR));
 			return -1;
 		}
 	} else if (request->name == NULL) {
 		assert(row->type == IPROTO_CALL_16 ||
 		       row->type == IPROTO_CALL);
-		diag_set(ClientError, ER_MISSING_REQUEST_FIELD,
-			 iproto_key_name(IPROTO_FUNCTION_NAME));
+		xrow_on_decode_err(row->body[0].iov_base, end, ER_MISSING_REQUEST_FIELD,
+				   iproto_key_name(IPROTO_FUNCTION_NAME));
 		return -1;
 	}
 	if (request->args == NULL) {
@@ -768,7 +815,8 @@ xrow_decode_auth(const struct xrow_header *row, struct auth_request *request)
 
 	if (mp_typeof(*data) != MP_MAP || mp_check_map(data, end) > 0) {
 error:
-		diag_set(ClientError, ER_INVALID_MSGPACK, "packet body");
+		xrow_on_decode_err(row->body[0].iov_base, end, ER_INVALID_MSGPACK,
+				   "packet body");
 		return -1;
 	}
 
@@ -800,17 +848,18 @@ error:
 		}
 	}
 	if (data != end) {
-		diag_set(ClientError, ER_INVALID_MSGPACK, "packet end");
+		xrow_on_decode_err(row->body[0].iov_base, end, ER_INVALID_MSGPACK,
+				   "packet end");
 		return -1;
 	}
 	if (request->user_name == NULL) {
-		diag_set(ClientError, ER_MISSING_REQUEST_FIELD,
-			  iproto_key_name(IPROTO_USER_NAME));
+		xrow_on_decode_err(row->body[0].iov_base, end, ER_MISSING_REQUEST_FIELD,
+				   iproto_key_name(IPROTO_USER_NAME));
 		return -1;
 	}
 	if (request->scramble == NULL) {
-		diag_set(ClientError, ER_MISSING_REQUEST_FIELD,
-			 iproto_key_name(IPROTO_TUPLE));
+		xrow_on_decode_err(row->body[0].iov_base, end, ER_MISSING_REQUEST_FIELD,
+				   iproto_key_name(IPROTO_TUPLE));
 		return -1;
 	}
 	return 0;
@@ -960,7 +1009,8 @@ xrow_decode_ballot(struct xrow_header *row, struct ballot *ballot)
 	}
 	return 0;
 err:
-	diag_set(ClientError, ER_INVALID_MSGPACK, "packet body");
+	xrow_on_decode_err(row->body[0].iov_base, end, ER_INVALID_MSGPACK,
+			   "packet body");
 	return -1;
 }
 
@@ -1005,11 +1055,12 @@ xrow_decode_subscribe(struct xrow_header *row, struct tt_uuid *replicaset_uuid,
 		return -1;
 	}
 	assert(row->bodycnt == 1);
-	const char *data = (const char *) row->body[0].iov_base;
+	const char * const data = (const char *) row->body[0].iov_base;
 	const char *end = data + row->body[0].iov_len;
 	const char *d = data;
 	if (mp_check(&d, end) != 0 || mp_typeof(*data) != MP_MAP) {
-		diag_set(ClientError, ER_INVALID_MSGPACK, "request body");
+		xrow_on_decode_err(data, end, ER_INVALID_MSGPACK,
+				   "request body");
 		return -1;
 	}
 
@@ -1026,21 +1077,27 @@ xrow_decode_subscribe(struct xrow_header *row, struct tt_uuid *replicaset_uuid,
 		case IPROTO_CLUSTER_UUID:
 			if (replicaset_uuid == NULL)
 				goto skip;
-			if (xrow_decode_uuid(&d, replicaset_uuid) != 0)
+			if (xrow_decode_uuid(&d, replicaset_uuid) != 0) {
+				xrow_on_decode_err(data, end, ER_INVALID_MSGPACK,
+						   "UUID");
 				return -1;
+			}
 			break;
 		case IPROTO_INSTANCE_UUID:
 			if (instance_uuid == NULL)
 				goto skip;
-			if (xrow_decode_uuid(&d, instance_uuid) != 0)
+			if (xrow_decode_uuid(&d, instance_uuid) != 0) {
+				xrow_on_decode_err(data, end, ER_INVALID_MSGPACK,
+						   "UUID");
 				return -1;
+			}
 			break;
 		case IPROTO_VCLOCK:
 			if (vclock == NULL)
 				goto skip;
 			if (mp_decode_vclock(&d, vclock) != 0) {
-				diag_set(ClientError, ER_INVALID_MSGPACK,
-					 "invalid VCLOCK");
+				xrow_on_decode_err(data, end, ER_INVALID_MSGPACK,
+						   "invalid VCLOCK");
 				return -1;
 			}
 			break;
@@ -1048,8 +1105,8 @@ xrow_decode_subscribe(struct xrow_header *row, struct tt_uuid *replicaset_uuid,
 			if (version_id == NULL)
 				goto skip;
 			if (mp_typeof(*d) != MP_UINT) {
-				diag_set(ClientError, ER_INVALID_MSGPACK,
-					 "invalid VERSION");
+				xrow_on_decode_err(data, end, ER_INVALID_MSGPACK,
+						   "invalid VERSION");
 				return -1;
 			}
 			*version_id = mp_decode_uint(&d);

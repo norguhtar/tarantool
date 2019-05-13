@@ -79,6 +79,38 @@ local function test_http_client(test, url, opts)
     test:is(r.status, 200, 'request')
 end
 
+--
+-- gh-3955: Check that httpc module doesn't redefine http headers
+--          set explicitly by the caller.
+--
+local function test_http_client_headers_redefine(test, url, opts)
+    test:plan(9)
+    local opts = table.deepcopy(opts)
+    -- Test defaults
+    opts.headers = {['Connection'] = nil, ['Accept'] = nil}
+    local r = client.post(url, nil, opts)
+    test:is(r.status, 200, 'simple 200')
+    test:is(r.headers['connection'], 'close', 'Default Connection header')
+    test:is(r.headers['accept'], '*/*', 'Default Accept header for POST request')
+    -- Test that in case of conflicting headers, user variant is
+    -- prefered
+    opts.headers={['Connection'] = 'close'}
+    opts.keepalive_idle = 2
+    opts.keepalive_interval = 1
+    local r = client.get(url, opts)
+    test:is(r.status, 200, 'simple 200')
+    test:is(r.headers['connection'], 'close', 'Redefined Connection header')
+    test:is(r.headers['keep_alive'], 'timeout=2',
+            'Automatically set Keep-Alive header')
+    -- Test that user-defined Connection and Acept headers
+    -- are used
+    opts.headers={['Connection'] = 'Keep-Alive', ['Accept'] = 'text/html'}
+    local r = client.get(url, opts)
+    test:is(r.status, 200, 'simple 200')
+    test:is(r.headers['accept'], 'text/html', 'Redefined Accept header')
+    test:is(r.headers['connection'], 'Keep-Alive', 'Redefined Connection header')
+end
+
 local function test_cancel_and_errinj(test, url, opts)
     test:plan(3)
     local ch = fiber.channel(1)
@@ -205,8 +237,82 @@ local function test_errors(test)
     test:is(r.status, 595, "GET: response on bad url")
 end
 
+-- gh-3679 allow only headers can be converted to string
+local function test_request_headers(test, url, opts)
+    local exp_err = 'headers must be string or table with "__tostring"'
+    local cases = {
+        {
+            'string header',
+            opts = {headers = {aaa = 'aaa'}},
+            exp_err = nil,
+        },
+        {
+            'header with __tostring() metamethod',
+            opts = {headers = {aaa = setmetatable({}, {
+                __tostring = function(self)
+                    return 'aaa'
+                end})}},
+            exp_err = nil,
+            postrequest_check = function(opts)
+                assert(type(opts.headers.aaa) == 'table',
+                    '"aaa" header was modified in http_client')
+            end,
+        },
+        {
+            'boolean header',
+            opts = {headers = {aaa = true}},
+            exp_err = exp_err,
+        },
+        {
+            'number header',
+            opts = {headers = {aaa = 10}},
+            exp_err = exp_err,
+        },
+        {
+            'cdata header (box.NULL)',
+            opts = {headers = {aaa = box.NULL}},
+            exp_err = exp_err,
+        },
+        {
+            'cdata<uint64_t> header',
+            opts = {headers = {aaa = 10ULL}},
+            exp_err = exp_err,
+        },
+        {
+            'table header w/o metatable',
+            opts = {headers = {aaa = {}}},
+            exp_err = exp_err,
+        },
+        {
+            'table header w/o __tostring() metamethod',
+            opts = {headers = {aaa = setmetatable({}, {})}},
+            exp_err = exp_err,
+        },
+    }
+    test:plan(#cases)
+
+    local http = client:new()
+
+    for _, case in ipairs(cases) do
+        local opts = merge(table.copy(opts), case.opts)
+        local ok, err = pcall(http.get, http, url, opts)
+        if case.postrequest_check ~= nil then
+            case.postrequest_check(opts)
+        end
+        if case.exp_err == nil then
+            -- expect success
+            test:ok(ok, case[1])
+        else
+            -- expect fail
+            assert(type(err) == 'string')
+            err = err:gsub('^builtin/[a-z._]+.lua:[0-9]+: ', '')
+            test:is_deeply({ok, err}, {false, case.exp_err}, case[1])
+        end
+    end
+end
+
 local function test_headers(test, url, opts)
-    test:plan(19)
+    test:plan(21)
     local http = client:new()
     local r = http:get(url .. 'headers', opts)
     test:is(type(r.headers["set-cookie"]), 'string', "set-cookie check")
@@ -231,6 +337,25 @@ local function test_headers(test, url, opts)
     local r = http:get(url .. 'headers', opts)
     test:is(r.headers["very_very_very_long_headers_name1"], "true", "truncated max_header_name_length")
     opts["max_header_name_length"] = nil
+
+    -- Send large headers.
+    local MAX_HEADER_NAME = 8192
+    local hname = 'largeheader'
+
+    -- "${hname}: ${hvalue}" is 8192 bytes length
+    local hvalue = string.rep('x', MAX_HEADER_NAME - hname:len() - 2)
+    local headers = {[hname] = hvalue}
+    local r = http:post(url, nil, merge(opts, {headers = headers}))
+    test:is(r.headers[hname], hvalue, '8192 bytes header: success')
+
+    -- "${hname}: ${hvalue}" is 8193 bytes length
+    local exp_err = 'header is too large'
+    local hvalue = string.rep('x', MAX_HEADER_NAME - hname:len() - 1)
+    local headers = {[hname] = hvalue}
+    local ok, err = pcall(http.post, http, url, nil,
+                          merge(opts, {headers = headers}))
+    test:is_deeply({ok, tostring(err)}, {false, exp_err},
+                   '8193 KiB header: error')
 end
 
 local function test_special_methods(test, url, opts)
@@ -397,12 +522,15 @@ local function test_concurrent(test, url, opts)
 end
 
 function run_tests(test, sock_family, sock_addr)
-    test:plan(9)
+    test:plan(11)
     local server, url, opts = start_server(test, sock_family, sock_addr)
     test:test("http.client", test_http_client, url, opts)
+    test:test("http.client headers redefine", test_http_client_headers_redefine,
+              url, opts)
     test:test("cancel and errinj", test_cancel_and_errinj, url .. 'long_query', opts)
     test:test("basic http post/get", test_post_and_get, url, opts)
     test:test("errors", test_errors)
+    test:test("request_headers", test_request_headers, url, opts)
     test:test("headers", test_headers, url, opts)
     test:test("special methods", test_special_methods, url, opts)
     if sock_family == 'AF_UNIX' and jit.os ~= "Linux" then

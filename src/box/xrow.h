@@ -103,14 +103,16 @@ xrow_header_encode(const struct xrow_header *header, uint64_t sync,
  * @param header[out] xrow to fill
  * @param pos[inout] the start of a packet
  * @param end the end of a packet
- *
+ * @param end_is_exact if set, raise an error in case the packet
+ *                     ends before @end
  * @retval 0 on success
  * @retval -1 on error (check diag)
- * @post *pos == end on success
+ * @post *pos <= end on success
+ * @post *pos == end on success if @end_is_exact is set
  */
 int
-xrow_header_decode(struct xrow_header *header,
-		   const char **pos, const char *end);
+xrow_header_decode(struct xrow_header *header, const char **pos,
+		   const char *end, bool end_is_exact);
 
 /**
  * DML request.
@@ -550,7 +552,7 @@ vclock_follow_xrow(struct vclock* vclock, const struct xrow_header *row)
 {
 	assert(row);
 	assert(row->replica_id < VCLOCK_MAX);
-	if (row->lsn <= vclock->lsn[row->replica_id]) {
+	if (row->lsn <= vclock_get(vclock, row->replica_id)) {
 		struct request req;
 		const char *req_str = "n/a";
 		if (xrow_decode_dml((struct xrow_header *)row, &req, 0) == 0)
@@ -559,7 +561,7 @@ vclock_follow_xrow(struct vclock* vclock, const struct xrow_header *row)
 		panic("LSN for %u is used twice or COMMIT order is broken: "
 		      "confirmed: %lld, new: %lld, req: %s",
 		      (unsigned) row->replica_id,
-		      (long long) vclock->lsn[row->replica_id],
+		      (long long) vclock_get(vclock, row->replica_id),
 		      (long long) row->lsn,
 		      req_str);
 	}
@@ -572,9 +574,9 @@ vclock_follow_xrow(struct vclock* vclock, const struct xrow_header *row)
 /** @copydoc xrow_header_decode. */
 static inline void
 xrow_header_decode_xc(struct xrow_header *header, const char **pos,
-		      const char *end)
+		      const char *end, bool end_is_exact)
 {
-	if (xrow_header_decode(header, pos, end) < 0)
+	if (xrow_header_decode(header, pos, end, end_is_exact) < 0)
 		diag_raise();
 }
 

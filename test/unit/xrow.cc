@@ -208,7 +208,7 @@ test_xrow_header_encode_decode()
 	char buffer[2048];
 	char *pos = mp_encode_uint(buffer, 300);
 	is(xrow_header_decode(&header, (const char **) &pos,
-			      buffer + 100), -1, "bad msgpack end");
+			      buffer + 100, true), -1, "bad msgpack end");
 
 	header.type = 100;
 	header.replica_id = 200;
@@ -227,7 +227,7 @@ test_xrow_header_encode_decode()
 	begin += fixheader_len;
 	const char *end = (const char *)vec[0].iov_base;
 	end += vec[0].iov_len;
-	is(xrow_header_decode(&decoded_header, &begin, end), 0,
+	is(xrow_header_decode(&decoded_header, &begin, end, true), 0,
 	   "header decode");
 	is(header.type, decoded_header.type, "decoded type");
 	is(header.replica_id, decoded_header.replica_id, "decoded replica_id");
@@ -244,6 +244,7 @@ test_request_str()
 {
 	plan(1);
 	struct xrow_header header;
+	header.replica_id = 5;
 	header.lsn = 100;
 	struct request request;
 	request.header = &header;
@@ -263,7 +264,8 @@ test_request_str()
 	request.ops = pos;
 	pos = mp_encode_array(pos, 1);
 	pos = mp_encode_uint(pos, 400);
-	is(strcmp("{type: 'SELECT', lsn: 100, space_id: 512, index_id: 1, "\
+	is(strcmp("{type: 'SELECT', replica_id: 5, lsn: 100, "
+		  "space_id: 512, index_id: 1, "
 		  "key: [200], tuple: [300], ops: [400]}",
 		  request_str(&request)), 0, "request_str");
 

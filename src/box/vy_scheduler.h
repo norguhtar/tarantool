@@ -41,6 +41,7 @@
 #define HEAP_FORWARD_DECLARATION
 #include "salad/heap.h"
 #include "salad/stailq.h"
+#include "vy_stat.h"
 
 #if defined(__cplusplus)
 extern "C" {
@@ -75,7 +76,7 @@ struct vy_scheduler {
 	/** Pool of threads for performing background dumps. */
 	struct vy_worker_pool dump_pool;
 	/** Pool of threads for performing background compactions. */
-	struct vy_worker_pool compact_pool;
+	struct vy_worker_pool compaction_pool;
 	/** Queue of processed tasks, linked by vy_task::in_processed. */
 	struct stailq processed_tasks;
 	/**
@@ -85,9 +86,9 @@ struct vy_scheduler {
 	heap_t dump_heap;
 	/**
 	 * Heap of LSM trees, ordered by compaction priority,
-	 * linked by vy_lsm::in_compact.
+	 * linked by vy_lsm::in_compaction.
 	 */
-	heap_t compact_heap;
+	heap_t compaction_heap;
 	/** Last error seen by the scheduler. */
 	struct diag diag;
 	/**
@@ -139,6 +140,8 @@ struct vy_scheduler {
 	double dump_start;
 	/** Signaled on dump round completion. */
 	struct fiber_cond dump_cond;
+	/** Scheduler statistics. */
+	struct vy_scheduler_stat stat;
 	/**
 	 * Function called by the scheduler upon dump round
 	 * completion. It is supposed to free memory released
@@ -182,6 +185,12 @@ vy_scheduler_start(struct vy_scheduler *scheduler);
  */
 void
 vy_scheduler_destroy(struct vy_scheduler *scheduler);
+
+/**
+ * Reset scheduler statistics (called by box.stat.reset).
+ */
+void
+vy_scheduler_reset_stat(struct vy_scheduler *scheduler);
 
 /**
  * Add an LSM tree to scheduler dump/compaction queues.

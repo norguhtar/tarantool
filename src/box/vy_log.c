@@ -84,6 +84,7 @@ enum vy_log_key {
 	VY_LOG_KEY_MODIFY_LSN		= 13,
 	VY_LOG_KEY_DROP_LSN		= 14,
 	VY_LOG_KEY_GROUP_ID		= 15,
+	VY_LOG_KEY_DUMP_COUNT		= 16,
 };
 
 /** vy_log_key -> human readable name. */
@@ -104,6 +105,7 @@ static const char *vy_log_key_name[] = {
 	[VY_LOG_KEY_MODIFY_LSN]		= "modify_lsn",
 	[VY_LOG_KEY_DROP_LSN]		= "drop_lsn",
 	[VY_LOG_KEY_GROUP_ID]		= "group_id",
+	[VY_LOG_KEY_DUMP_COUNT]		= "dump_count",
 };
 
 /** vy_log_type -> human readable name. */
@@ -202,22 +204,16 @@ vy_log_filename(int64_t signature)
 }
 
 /**
- * Return the lsn of the checkpoint that was taken
- * before the given lsn.
+ * Return the vclock of the checkpoint that was taken
+ * before the given vclock.
  */
-static int64_t
-vy_log_prev_checkpoint(int64_t lsn)
+static const struct vclock *
+vy_log_prev_checkpoint(const struct vclock *vclock)
 {
-	int64_t ret = -1;
-	for (struct vclock *vclock = vclockset_last(&vy_log.dir.index);
-	     vclock != NULL;
-	     vclock = vclockset_prev(&vy_log.dir.index, vclock)) {
-		if (vclock_sum(vclock) < lsn) {
-			ret = vclock_sum(vclock);
-			break;
-		}
-	}
-	return ret;
+	struct vclock *prev = vclockset_psearch(&vy_log.dir.index, vclock);
+	if (prev != NULL && vclock_sum(prev) == vclock_sum(vclock))
+		prev = vclockset_prev(&vy_log.dir.index, prev);
+	return prev;
 }
 
 /** An snprint-style function to print a log record. */
@@ -291,6 +287,10 @@ vy_log_record_snprint(char *buf, int size, const struct vy_log_record *record)
 		SNPRINT(total, snprintf, buf, size, "%s=%"PRIi64", ",
 			vy_log_key_name[VY_LOG_KEY_GC_LSN],
 			record->gc_lsn);
+	if (record->dump_count > 0)
+		SNPRINT(total, snprintf, buf, size, "%s=%"PRIu32", ",
+			vy_log_key_name[VY_LOG_KEY_DUMP_COUNT],
+			record->dump_count);
 	SNPRINT(total, snprintf, buf, size, "}");
 	return total;
 }
@@ -417,6 +417,11 @@ vy_log_record_encode(const struct vy_log_record *record,
 		size += mp_sizeof_uint(record->gc_lsn);
 		n_keys++;
 	}
+	if (record->dump_count > 0) {
+		size += mp_sizeof_uint(VY_LOG_KEY_DUMP_COUNT);
+		size += mp_sizeof_uint(record->dump_count);
+		n_keys++;
+	}
 	size += mp_sizeof_map(n_keys);
 
 	/*
@@ -498,6 +503,10 @@ vy_log_record_encode(const struct vy_log_record *record,
 	if (record->gc_lsn > 0) {
 		pos = mp_encode_uint(pos, VY_LOG_KEY_GC_LSN);
 		pos = mp_encode_uint(pos, record->gc_lsn);
+	}
+	if (record->dump_count > 0) {
+		pos = mp_encode_uint(pos, VY_LOG_KEY_DUMP_COUNT);
+		pos = mp_encode_uint(pos, record->dump_count);
 	}
 	assert(pos == tuple + size);
 
@@ -626,14 +635,12 @@ vy_log_record_decode(struct vy_log_record *record,
 		case VY_LOG_KEY_GC_LSN:
 			record->gc_lsn = mp_decode_uint(&pos);
 			break;
-		case VY_LOG_KEY_TRUNCATE_COUNT:
-			/* Not used anymore, ignore. */
+		case VY_LOG_KEY_DUMP_COUNT:
+			record->dump_count = mp_decode_uint(&pos);
 			break;
 		default:
-			diag_set(ClientError, ER_INVALID_VYLOG_FILE,
-				 tt_sprintf("Bad record: unknown key %u",
-					    (unsigned)key));
-			goto fail;
+			mp_next(&pos); /* unknown key, ignore */
+			break;
 		}
 	}
 	if (record->type == VY_LOG_CREATE_LSM) {
@@ -725,7 +732,8 @@ err:
 void
 vy_log_init(const char *dir)
 {
-	xdir_create(&vy_log.dir, dir, VYLOG, &INSTANCE_UUID);
+	xdir_create(&vy_log.dir, dir, VYLOG, &INSTANCE_UUID,
+		    &xlog_opts_default);
 	latch_create(&vy_log.latch);
 	region_create(&vy_log.pool, cord_slab_cache());
 	stailq_create(&vy_log.tx);
@@ -816,7 +824,7 @@ vy_log_open(struct xlog *xlog)
 	 */
 	const char *path = vy_log_filename(vclock_sum(&vy_log.last_checkpoint));
 	if (access(path, F_OK) == 0)
-		return xlog_open(xlog, path);
+		return xlog_open(xlog, path, &vy_log.dir.opts);
 
 	if (errno != ENOENT) {
 		diag_set(SystemError, "failed to access file '%s'", path);
@@ -1071,14 +1079,16 @@ fail:
 }
 
 void
-vy_log_collect_garbage(int64_t signature)
+vy_log_collect_garbage(const struct vclock *vclock)
 {
 	/*
 	 * Always keep the previous file, because
 	 * it is still needed for backups.
 	 */
-	signature = vy_log_prev_checkpoint(signature);
-	xdir_collect_garbage(&vy_log.dir, signature, XDIR_GC_USE_COIO);
+	vclock = vy_log_prev_checkpoint(vclock);
+	if (vclock == NULL)
+		return;
+	xdir_collect_garbage(&vy_log.dir, vclock_sum(vclock), XDIR_GC_ASYNC);
 }
 
 int64_t
@@ -1094,10 +1104,10 @@ vy_log_backup_path(const struct vclock *vclock)
 	 * Use the previous log file, because the current one
 	 * contains records written after the last checkpoint.
 	 */
-	int64_t lsn = vy_log_prev_checkpoint(vclock_sum(vclock));
-	if (lsn < 0)
+	vclock = vy_log_prev_checkpoint(vclock);
+	if (vclock == NULL)
 		return NULL;
-	const char *path = vy_log_filename(lsn);
+	const char *path = vy_log_filename(vclock_sum(vclock));
 	if (access(path, F_OK) == -1 && errno == ENOENT)
 		return NULL; /* vinyl not used */
 	return path;
@@ -1562,6 +1572,7 @@ vy_recovery_do_create_run(struct vy_recovery *recovery, int64_t run_id)
 	run->id = run_id;
 	run->dump_lsn = -1;
 	run->gc_lsn = -1;
+	run->dump_count = 0;
 	run->is_incomplete = false;
 	run->is_dropped = false;
 	run->data = NULL;
@@ -1616,7 +1627,7 @@ vy_recovery_prepare_run(struct vy_recovery *recovery, int64_t lsm_id,
  */
 static int
 vy_recovery_create_run(struct vy_recovery *recovery, int64_t lsm_id,
-		       int64_t run_id, int64_t dump_lsn)
+		       int64_t run_id, int64_t dump_lsn, uint32_t dump_count)
 {
 	struct vy_lsm_recovery_info *lsm;
 	lsm = vy_recovery_lookup_lsm(recovery, lsm_id);
@@ -1641,6 +1652,7 @@ vy_recovery_create_run(struct vy_recovery *recovery, int64_t lsm_id,
 			return -1;
 	}
 	run->dump_lsn = dump_lsn;
+	run->dump_count = dump_count;
 	run->is_incomplete = false;
 	rlist_move_entry(&lsm->runs, run, in_lsm);
 	return 0;
@@ -2002,7 +2014,8 @@ vy_recovery_process_record(struct vy_recovery *recovery,
 		break;
 	case VY_LOG_CREATE_RUN:
 		rc = vy_recovery_create_run(recovery, record->lsm_id,
-					    record->run_id, record->dump_lsn);
+					    record->run_id, record->dump_lsn,
+					    record->dump_count);
 		break;
 	case VY_LOG_DROP_RUN:
 		rc = vy_recovery_drop_run(recovery, record->run_id,
@@ -2089,9 +2102,10 @@ vy_recovery_build_index_id_hash(struct vy_recovery *recovery)
 		/*
 		 * If there's no LSM tree for these space_id/index_id
 		 * or it was dropped, simply replace it with the latest
-		 * LSM tree version.
+		 * committed LSM tree version.
 		 */
-		if (hashed_lsm == NULL || hashed_lsm->drop_lsn >= 0) {
+		if (hashed_lsm == NULL ||
+		    (hashed_lsm->drop_lsn >= 0 && lsm->create_lsn >= 0)) {
 			struct mh_i64ptr_node_t node;
 			node.key = vy_recovery_index_id_hash(space_id, index_id);
 			node.val = lsm;
@@ -2352,6 +2366,7 @@ vy_log_append_lsm(struct xlog *xlog, struct vy_lsm_recovery_info *lsm)
 		} else {
 			record.type = VY_LOG_CREATE_RUN;
 			record.dump_lsn = run->dump_lsn;
+			record.dump_count = run->dump_count;
 		}
 		record.lsm_id = lsm->id;
 		record.run_id = run->id;

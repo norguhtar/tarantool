@@ -265,10 +265,17 @@ struct rmean *rmean_net;
 enum rmean_net_name {
 	IPROTO_SENT,
 	IPROTO_RECEIVED,
+	IPROTO_CONNECTIONS,
+	IPROTO_REQUESTS,
 	IPROTO_LAST,
 };
 
-const char *rmean_net_strings[IPROTO_LAST] = { "SENT", "RECEIVED" };
+const char *rmean_net_strings[IPROTO_LAST] = {
+	"SENT",
+	"RECEIVED",
+	"CONNECTIONS",
+	"REQUESTS",
+};
 
 static void
 tx_process_destroy(struct cmsg *m);
@@ -503,6 +510,7 @@ iproto_msg_new(struct iproto_connection *con)
 		return NULL;
 	}
 	msg->connection = con;
+	rmean_collect(rmean_net, IPROTO_REQUESTS, 1);
 	return msg;
 }
 
@@ -648,8 +656,18 @@ iproto_connection_input_buffer(struct iproto_connection *con)
 			to_read = mp_decode_uint(&pos);
 	}
 
-	if (ibuf_unused(old_ibuf) >= to_read)
+	if (ibuf_unused(old_ibuf) >= to_read) {
+		/*
+		 * If all read data is discarded, move read
+		 * position to the start of the buffer, to
+		 * reduce chances of unaccounted growth of the
+		 * buffer as read position is shifted to the
+		 * end of the buffer.
+		 */
+		if (ibuf_used(old_ibuf) == 0)
+			ibuf_reset(old_ibuf);
 		return old_ibuf;
+	}
 
 	/*
 	 * Reuse the buffer if all requests are processed
@@ -667,6 +685,11 @@ iproto_connection_input_buffer(struct iproto_connection *con)
 		 * and becomes available for reuse.
 		 */
 		return NULL;
+	}
+	/* Update buffer size if readahead has changed. */
+	if (new_ibuf->start_capacity != iproto_readahead) {
+		ibuf_destroy(new_ibuf);
+		ibuf_create(new_ibuf, cord_slab_cache(), iproto_readahead);
 	}
 
 	ibuf_reserve_xc(new_ibuf, to_read + con->parse_size);
@@ -1020,6 +1043,7 @@ iproto_connection_new(int fd)
 	con->is_destroy_sent = false;
 	con->tx.is_push_pending = false;
 	con->tx.is_push_sent = false;
+	rmean_collect(rmean_net, IPROTO_CONNECTIONS, 1);
 	return con;
 }
 
@@ -1138,9 +1162,18 @@ iproto_msg_decode(struct iproto_msg *msg, const char **pos, const char *reqend,
 {
 	uint8_t type;
 
-	if (xrow_header_decode(&msg->header, pos, reqend))
+	/*
+	 * nginx_upstream_module may send garbage at the end of
+	 * packet, this is a workaround until nginx upstream is
+	 * fixed.
+	 */
+	if (xrow_header_decode(&msg->header, pos, reqend, false))
 		goto error;
-	assert(*pos == reqend);
+	/*
+	 * Skip trash at the end of msgpack packet, workaround
+	 * for the same broken nginx_upstream_module
+	 */
+	*pos = reqend;
 
 	type = msg->header.type;
 
@@ -2055,6 +2088,18 @@ iproto_mem_used(void)
 	return slab_cache_used(&net_cord.slabc) + slab_cache_used(&net_slabc);
 }
 
+size_t
+iproto_connection_count(void)
+{
+	return mempool_count(&iproto_connection_pool);
+}
+
+size_t
+iproto_request_count(void)
+{
+	return mempool_count(&iproto_msg_pool);
+}
+
 void
 iproto_reset_stat(void)
 {
@@ -2074,4 +2119,18 @@ iproto_set_msg_max(int new_iproto_msg_max)
 	cfg_msg.iproto_msg_max = new_iproto_msg_max;
 	iproto_do_cfg(&cfg_msg);
 	cpipe_set_max_input(&net_pipe, new_iproto_msg_max / 2);
+}
+
+void
+iproto_free()
+{
+	tt_pthread_cancel(net_cord.id);
+	tt_pthread_join(net_cord.id, NULL);
+	/*
+	* Close socket descriptor to prevent hot standby instance
+	* failing to bind in case it tries to bind before socket
+	* is closed by OS.
+	*/
+	if (evio_service_is_active(&binary))
+		close(binary.ev.fd);
 }

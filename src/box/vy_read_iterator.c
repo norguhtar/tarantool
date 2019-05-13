@@ -208,7 +208,7 @@ vy_read_iterator_is_exact_match(struct vy_read_iterator *itr,
 	return itr->last_stmt == NULL && stmt != NULL &&
 		(type == ITER_EQ || type == ITER_REQ ||
 		 type == ITER_GE || type == ITER_LE) &&
-		tuple_field_count(key) >= cmp_def->part_count &&
+		vy_stmt_is_full_key(key, cmp_def) &&
 		vy_stmt_compare(stmt, key, cmp_def) == 0;
 }
 
@@ -445,7 +445,7 @@ vy_read_iterator_advance(struct vy_read_iterator *itr)
 {
 	if (itr->last_stmt != NULL && (itr->iterator_type == ITER_EQ ||
 				       itr->iterator_type == ITER_REQ) &&
-	    tuple_field_count(itr->key) >= itr->lsm->cmp_def->part_count) {
+	    vy_stmt_is_full_key(itr->key, itr->lsm->cmp_def)) {
 		/*
 		 * There may be one statement at max satisfying
 		 * EQ with a full key.
@@ -500,6 +500,17 @@ rescan_disk:
 			break;
 	}
 	vy_read_iterator_unpin_slices(itr);
+	/*
+	 * The transaction could have been aborted while we were
+	 * reading disk. We must stop now and return an error as
+	 * this function could be called by a DML request that
+	 * was aborted by a DDL operation: failing will prevent
+	 * it from dereferencing a destroyed space.
+	 */
+	if (itr->tx != NULL && itr->tx->state == VINYL_TX_ABORT) {
+		diag_set(ClientError, ER_TRANSACTION_CONFLICT);
+		return -1;
+	}
 	/*
 	 * The list of in-memory indexes and/or the range tree could
 	 * have been modified by dump/compaction while we were fetching
@@ -678,7 +689,7 @@ vy_read_iterator_open(struct vy_read_iterator *itr, struct vy_lsm *lsm,
 	itr->key = key;
 	itr->read_view = rv;
 
-	if (tuple_field_count(key) == 0) {
+	if (vy_stmt_is_empty_key(key)) {
 		/*
 		 * Strictly speaking, a GT/LT iterator should return
 		 * nothing if the key is empty, because every key is
@@ -720,7 +731,7 @@ vy_read_iterator_restore(struct vy_read_iterator *itr)
 
 	itr->mem_list_version = itr->lsm->mem_list_version;
 	itr->range_tree_version = itr->lsm->range_tree_version;
-	itr->curr_range = vy_range_tree_find_by_key(itr->lsm->tree,
+	itr->curr_range = vy_range_tree_find_by_key(&itr->lsm->range_tree,
 			itr->iterator_type, itr->last_stmt ?: itr->key);
 	itr->range_version = itr->curr_range->version;
 
@@ -751,8 +762,9 @@ vy_read_iterator_next_range(struct vy_read_iterator *itr)
 
 	assert(range != NULL);
 	while (true) {
-		range = dir > 0 ? vy_range_tree_next(itr->lsm->tree, range) :
-				  vy_range_tree_prev(itr->lsm->tree, range);
+		range = dir > 0 ?
+			vy_range_tree_next(&itr->lsm->range_tree, range) :
+			vy_range_tree_prev(&itr->lsm->range_tree, range);
 		assert(range != NULL);
 
 		if (itr->last_stmt == NULL)
@@ -842,13 +854,9 @@ vy_read_iterator_track_read(struct vy_read_iterator *itr, struct tuple *stmt)
 NODISCARD int
 vy_read_iterator_next(struct vy_read_iterator *itr, struct tuple **result)
 {
-	ev_tstamp start_time = ev_monotonic_now(loop());
+	assert(itr->tx == NULL || itr->tx->state == VINYL_TX_READY);
 
-	struct vy_lsm *lsm = itr->lsm;
 	struct tuple *stmt;
-
-	if (itr->last_stmt == NULL)
-		lsm->stat.lookup++; /* first iteration */
 next_key:
 	if (vy_read_iterator_advance(itr) != 0)
 		return -1;
@@ -879,20 +887,6 @@ next_key:
 	assert(stmt == NULL ||
 	       vy_stmt_type(stmt) == IPROTO_INSERT ||
 	       vy_stmt_type(stmt) == IPROTO_REPLACE);
-
-	if (stmt != NULL)
-		vy_stmt_counter_acct_tuple(&lsm->stat.get, stmt);
-
-	ev_tstamp latency = ev_monotonic_now(loop()) - start_time;
-	latency_collect(&lsm->stat.latency, latency);
-
-	if (latency > lsm->env->too_long_threshold) {
-		say_warn_ratelimited("%s: select(%s, %s) => %s "
-				     "took too long: %.3f sec",
-				     vy_lsm_name(lsm), tuple_str(itr->key),
-				     iterator_type_strs[itr->iterator_type],
-				     vy_stmt_str(stmt), latency);
-	}
 
 	*result = stmt;
 	return 0;

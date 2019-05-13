@@ -218,6 +218,11 @@ process_nop(struct request *request)
 void
 box_set_ro(bool ro)
 {
+	if (ro == is_ro)
+		return; /* nothing to do */
+	if (ro)
+		engine_switch_to_ro();
+
 	is_ro = ro;
 	fiber_cond_broadcast(&ro_cond);
 }
@@ -248,6 +253,8 @@ box_set_orphan(bool orphan)
 {
 	if (is_orphan == orphan)
 		return; /* nothing to do */
+	if (orphan)
+		engine_switch_to_ro();
 
 	is_orphan = orphan;
 	fiber_cond_broadcast(&ro_cond);
@@ -577,11 +584,7 @@ box_check_vinyl_options(void)
 		tnt_raise(ClientError, ER_CFG, "vinyl_write_threads",
 			  "must be greater than or equal to 2");
 	}
-	if (range_size <= 0) {
-		tnt_raise(ClientError, ER_CFG, "vinyl_range_size",
-			  "must be greater than 0");
-	}
-	if (page_size <= 0 || page_size > range_size) {
+	if (page_size <= 0 || (range_size > 0 && page_size > range_size)) {
 		tnt_raise(ClientError, ER_CFG, "vinyl_page_size",
 			  "must be greater than 0 and less than "
 			  "or equal to vinyl_range_size");
@@ -1187,21 +1190,25 @@ box_upsert(uint32_t space_id, uint32_t index_id, const char *tuple,
 static void
 space_truncate(struct space *space)
 {
-	char tuple_buf[32];
+	size_t buf_size = 3 * mp_sizeof_array(UINT32_MAX) +
+			  4 * mp_sizeof_uint(UINT64_MAX) + mp_sizeof_str(1);
+	char *buf = (char *)region_alloc_xc(&fiber()->gc, buf_size);
+
+	char *tuple_buf = buf;
 	char *tuple_buf_end = tuple_buf;
 	tuple_buf_end = mp_encode_array(tuple_buf_end, 2);
 	tuple_buf_end = mp_encode_uint(tuple_buf_end, space_id(space));
 	tuple_buf_end = mp_encode_uint(tuple_buf_end, 1);
-	assert(tuple_buf_end < tuple_buf + sizeof(tuple_buf));
+	assert(tuple_buf_end < buf + buf_size);
 
-	char ops_buf[128];
+	char *ops_buf = tuple_buf_end;
 	char *ops_buf_end = ops_buf;
 	ops_buf_end = mp_encode_array(ops_buf_end, 1);
 	ops_buf_end = mp_encode_array(ops_buf_end, 3);
 	ops_buf_end = mp_encode_str(ops_buf_end, "+", 1);
 	ops_buf_end = mp_encode_uint(ops_buf_end, 1);
 	ops_buf_end = mp_encode_uint(ops_buf_end, 1);
-	assert(ops_buf_end < ops_buf + sizeof(ops_buf));
+	assert(ops_buf_end < buf + buf_size);
 
 	if (box_upsert(BOX_TRUNCATE_ID, 0, tuple_buf, tuple_buf_end,
 		       ops_buf, ops_buf_end, 0, NULL) != 0)
@@ -1481,6 +1488,9 @@ box_process_join(struct ev_io *io, struct xrow_header *header)
 	row.sync = header->sync;
 	coio_write_xrow(io, &row);
 
+	say_info("joining replica %s at %s",
+		 tt_uuid_str(&instance_uuid), sio_socketname(io->fd));
+
 	/*
 	 * Initial stream: feed replica with dirty data from engines.
 	 */
@@ -1605,6 +1615,12 @@ box_process_subscribe(struct ev_io *io, struct xrow_header *header)
 	row.sync = header->sync;
 	coio_write_xrow(io, &row);
 
+	say_info("subscribed replica %s at %s",
+		 tt_uuid_str(&replica_uuid), sio_socketname(io->fd));
+	say_info("remote vclock %s local vclock %s",
+		 vclock_to_string(&replica_clock),
+		 vclock_to_string(&current_vclock));
+
 	/*
 	 * Process SUBSCRIBE request via replication relay
 	 * Send current recovery vector clock as a marker
@@ -1640,7 +1656,7 @@ box_set_replicaset_uuid(const struct tt_uuid *replicaset_uuid)
 	else
 		tt_uuid_create(&uu);
 	/* Save replica set UUID in _schema */
-	if (boxk(IPROTO_REPLACE, BOX_SCHEMA_ID, "[%s%s]", "cluster",
+	if (boxk(IPROTO_INSERT, BOX_SCHEMA_ID, "[%s%s]", "cluster",
 		 tt_uuid_str(&uu)))
 		diag_raise();
 }
@@ -1661,11 +1677,12 @@ box_free(void)
 		tuple_free();
 		port_free();
 #endif
+		iproto_free();
 		replication_free();
 		sequence_free();
 		gc_free();
 		engine_shutdown();
-		wal_thread_stop();
+		wal_free();
 	}
 }
 
@@ -1705,6 +1722,9 @@ engine_init()
 	box_set_vinyl_timeout();
 }
 
+static int
+do_checkpoint();
+
 /**
  * Initialize the first replica of a new replica set.
  */
@@ -1714,10 +1734,6 @@ bootstrap_master(const struct tt_uuid *replicaset_uuid)
 	engine_bootstrap_xc();
 
 	uint32_t replica_id = 1;
-
-	/* Unregister a local replica if it was registered by bootstrap.bin */
-	if (boxk(IPROTO_DELETE, BOX_CLUSTER_ID, "[%u]", 1) != 0)
-		diag_raise();
 
 	/* Register the first replica in the replica set */
 	box_register_replica(replica_id, &INSTANCE_UUID);
@@ -1735,9 +1751,12 @@ bootstrap_master(const struct tt_uuid *replicaset_uuid)
 	/* Set UUID of a new replica set */
 	box_set_replicaset_uuid(replicaset_uuid);
 
+	/* Enable WAL subsystem. */
+	if (wal_enable() != 0)
+		diag_raise();
+
 	/* Make the initial checkpoint */
-	if (engine_begin_checkpoint() ||
-	    engine_commit_checkpoint(&replicaset.vclock))
+	if (do_checkpoint() != 0)
 		panic("failed to create a checkpoint");
 
 	gc_add_checkpoint(&replicaset.vclock);
@@ -1787,9 +1806,6 @@ bootstrap_from_master(struct replica *master)
 
 	applier_resume_to_state(applier, APPLIER_JOINED, TIMEOUT_INFINITY);
 
-	/* Clear the pointer to journal before it goes out of scope */
-	journal_set(NULL);
-
 	/* Finalize the new replica */
 	engine_end_recovery_xc();
 
@@ -1797,9 +1813,21 @@ bootstrap_from_master(struct replica *master)
 	applier_resume_to_state(applier, APPLIER_READY, TIMEOUT_INFINITY);
 	assert(applier->state == APPLIER_READY);
 
+	/*
+	 * An engine may write to WAL on its own during the join
+	 * stage (e.g. Vinyl's deferred DELETEs). That's OK - those
+	 * records will pass through the recovery journal and wind
+	 * up in the initial checkpoint. However, we must enable
+	 * the WAL right before starting checkpointing so that
+	 * records written during and after the initial checkpoint
+	 * go to the real WAL and can be recovered after restart.
+	 * This also clears the recovery journal created on stack.
+	 */
+	if (wal_enable() != 0)
+		diag_raise();
+
 	/* Make the initial checkpoint */
-	if (engine_begin_checkpoint() ||
-	    engine_commit_checkpoint(&replicaset.vclock))
+	if (do_checkpoint() != 0)
 		panic("failed to create a checkpoint");
 
 	gc_add_checkpoint(&replicaset.vclock);
@@ -1823,6 +1851,9 @@ bootstrap(const struct tt_uuid *instance_uuid,
 		INSTANCE_UUID = *instance_uuid;
 	else
 		tt_uuid_create(&INSTANCE_UUID);
+
+	say_info("instance uuid %s", tt_uuid_str(&INSTANCE_UUID));
+
 	/*
 	 * Begin listening on the socket to enable
 	 * master-master replication leader election.
@@ -1880,6 +1911,8 @@ local_recovery(const struct tt_uuid *instance_uuid,
 			  tt_uuid_str(&INSTANCE_UUID));
 	}
 
+	say_info("instance uuid %s", tt_uuid_str(&INSTANCE_UUID));
+
 	struct wal_stream wal_stream;
 	wal_stream_create(&wal_stream, cfg_geti64("rows_per_wal"));
 
@@ -1905,6 +1938,7 @@ local_recovery(const struct tt_uuid *instance_uuid,
 	 * not attempt to apply these rows twice.
 	 */
 	recovery_scan(recovery, &replicaset.vclock);
+	say_info("instance vclock %s", vclock_to_string(&replicaset.vclock));
 
 	if (wal_dir_lock >= 0) {
 		box_listen();
@@ -1974,6 +2008,16 @@ local_recovery(const struct tt_uuid *instance_uuid,
 		box_sync_replication(false);
 	}
 	recovery_finalize(recovery);
+
+	/*
+	 * We must enable WAL before finalizing engine recovery,
+	 * because an engine may start writing to WAL right after
+	 * this point (e.g. deferred DELETE statements in Vinyl).
+	 * This also clears the recovery journal created on stack.
+	 */
+	if (wal_enable() != 0)
+		diag_raise();
+
 	engine_end_recovery_xc();
 
 	/* Check replica set UUID. */
@@ -1983,9 +2027,6 @@ local_recovery(const struct tt_uuid *instance_uuid,
 			  tt_uuid_str(replicaset_uuid),
 			  tt_uuid_str(&REPLICASET_UUID));
 	}
-
-	/* Clear the pointer to journal before it goes out of scope */
-	journal_set(NULL);
 }
 
 static void
@@ -2043,7 +2084,14 @@ box_cfg_xc(void)
 	replication_init();
 	port_init();
 	iproto_init();
-	wal_thread_start();
+
+	int64_t wal_max_rows = box_check_wal_max_rows(cfg_geti64("rows_per_wal"));
+	int64_t wal_max_size = box_check_wal_max_size(cfg_geti64("wal_max_size"));
+	enum wal_mode wal_mode = box_check_wal_mode(cfg_gets("wal_mode"));
+	if (wal_init(wal_mode, cfg_gets("wal_dir"), wal_max_rows,
+		     wal_max_size, &INSTANCE_UUID) != 0) {
+		diag_raise();
+	}
 
 	title("loading");
 
@@ -2052,7 +2100,7 @@ box_cfg_xc(void)
 	box_check_replicaset_uuid(&replicaset_uuid);
 
 	box_set_net_msg_max();
-	box_set_checkpoint_count();
+	box_set_readahead();
 	box_set_too_long_threshold();
 	box_set_replication_timeout();
 	box_set_replication_connect_timeout();
@@ -2102,20 +2150,7 @@ box_cfg_xc(void)
 		}
 	}
 
-	struct gc_checkpoint *first_checkpoint = gc_first_checkpoint();
-	assert(first_checkpoint != NULL);
-
-	/* Start WAL writer */
-	int64_t wal_max_rows = box_check_wal_max_rows(cfg_geti64("rows_per_wal"));
-	int64_t wal_max_size = box_check_wal_max_size(cfg_geti64("wal_max_size"));
-	enum wal_mode wal_mode = box_check_wal_mode(cfg_gets("wal_mode"));
-	if (wal_init(wal_mode, cfg_gets("wal_dir"), wal_max_rows,
-		     wal_max_size, &INSTANCE_UUID, &replicaset.vclock,
-		     vclock_sum(&first_checkpoint->vclock))) {
-		diag_raise();
-	}
 	gc_set_wal_watcher();
-
 	rmean_cleanup(rmean_box);
 
 	/* Follow replica */
@@ -2155,12 +2190,9 @@ box_atfork()
 	wal_atfork();
 }
 
-int
-box_checkpoint()
+static int
+do_checkpoint()
 {
-	/* Signal arrived before box.cfg{} */
-	if (! is_box_configured)
-		return 0;
 	int rc = 0;
 	if (box_checkpoint_is_in_progress) {
 		diag_set(ClientError, ER_CHECKPOINT_IN_PROGRESS);
@@ -2187,6 +2219,16 @@ end:
 	latch_unlock(&schema_lock);
 	box_checkpoint_is_in_progress = false;
 	return rc;
+}
+
+int
+box_checkpoint()
+{
+	/* Signal arrived before box.cfg{} */
+	if (! is_box_configured)
+		return 0;
+
+	return do_checkpoint();
 }
 
 int

@@ -3,7 +3,7 @@ test_run = require('test_run').new()
 -- Since we store LSNs in data files, the data size may differ
 -- from run to run. Deploy a new server to make sure it will be
 -- the same so that we can check it.
-test_run:cmd('create server test with script = "vinyl/info.lua"')
+test_run:cmd('create server test with script = "vinyl/stat.lua"')
 test_run:cmd('start server test')
 test_run:cmd('switch test')
 
@@ -69,9 +69,14 @@ end;
 --
 -- Note, latency measurement is beyond the scope of this test
 -- so we just filter it out.
+--
+-- Filter dump/compaction time as we need error injection to
+-- test them properly.
 function istat()
     local st = box.space.test.index.pk:stat()
     st.latency = nil
+    st.disk.dump.time = nil
+    st.disk.compaction.time = nil
     return st
 end;
 
@@ -79,9 +84,14 @@ end;
 --
 -- Note, checking correctness of the load regulator logic is beyond
 -- the scope of this test so we just filter out related statistics.
+--
+-- Filter dump/compaction time as we need error injection to
+-- test them properly.
 function gstat()
     local st = box.stat.vinyl()
     st.regulator = nil
+    st.scheduler.dump_time = nil
+    st.scheduler.compaction_time = nil
     return st
 end;
 
@@ -118,7 +128,7 @@ stat_diff(istat(), st)
 st = istat()
 for i = 1, 100, 2 do put(i) end
 box.snapshot()
-wait(istat, st, 'disk.compact.count', 1)
+wait(istat, st, 'disk.compaction.count', 1)
 stat_diff(istat(), st)
 
 -- point lookup from disk + cache put
@@ -174,7 +184,7 @@ stat_diff(istat(), st, 'cache')
 for i = 1, 100 do put(i) end
 st = istat()
 box.snapshot()
-wait(istat, st, 'disk.compact.count', 2)
+wait(istat, st, 'disk.compaction.count', 2)
 st = istat()
 st.range_count -- 2
 st.run_count -- 2
@@ -205,10 +215,10 @@ box.rollback()
 --
 
 -- dump and compaction totals
-gstat().disk.dump['in'] == istat().disk.dump['in'].bytes
-gstat().disk.dump['out'] == istat().disk.dump['out'].bytes
-gstat().disk.compact['in'] == istat().disk.compact['in'].bytes
-gstat().disk.compact['out'] == istat().disk.compact['out'].bytes
+gstat().scheduler.dump_input == istat().disk.dump.input.bytes
+gstat().scheduler.dump_output == istat().disk.dump.output.bytes
+gstat().scheduler.compaction_input == istat().disk.compaction.input.bytes
+gstat().scheduler.compaction_output == istat().disk.compaction.output.bytes
 
 -- use memory
 st = gstat()
@@ -317,6 +327,33 @@ stat_diff(gstat(), st, 'tx')
 box.stat.reset()
 istat()
 gstat()
+
+s:drop()
+
+-- sched stats
+s = box.schema.space.create('test', {engine = 'vinyl'})
+i1 = s:create_index('i1', {parts = {1, 'unsigned'}})
+i2 = s:create_index('i2', {parts = {2, 'unsigned'}})
+
+for i = 1, 100 do s:replace{i, i, string.rep('x', 1000)} end
+st = gstat()
+box.snapshot()
+stat_diff(gstat(), st, 'scheduler')
+
+for i = 1, 100, 10 do s:replace{i, i, string.rep('y', 1000)} end
+st = gstat()
+box.snapshot()
+stat_diff(gstat(), st, 'scheduler')
+
+st = gstat()
+i1:compact()
+while i1:stat().disk.compaction.count == 0 do fiber.sleep(0.01) end
+stat_diff(gstat(), st, 'scheduler')
+
+st = gstat()
+i2:compact()
+while i2:stat().disk.compaction.count == 0 do fiber.sleep(0.01) end
+stat_diff(gstat(), st, 'scheduler')
 
 s:drop()
 
@@ -436,6 +473,7 @@ i:stat().disk.statement
 test_run:cmd('restart server test')
 
 fiber = require('fiber')
+digest = require('digest')
 
 s = box.space.test
 i = s.index.primary
@@ -446,6 +484,110 @@ i:compact()
 while i:stat().run_count > 1 do fiber.sleep(0.01) end
 
 i:stat().disk.statement
+
+s:drop()
+
+--
+-- Last level size.
+--
+s = box.schema.space.create('test', {engine = 'vinyl'})
+i1 = s:create_index('i1', {parts = {1, 'unsigned'}})
+i2 = s:create_index('i2', {parts = {2, 'unsigned'}})
+
+i1:stat().disk.last_level
+i2:stat().disk.last_level
+box.stat.vinyl().disk.data_compacted
+
+for i = 1, 100 do s:replace{i, i, digest.urandom(100)} end
+box.snapshot()
+
+i1:stat().disk.last_level
+i2:stat().disk.last_level
+box.stat.vinyl().disk.data_compacted
+
+for i = 1, 100, 10 do s:replace{i, i * 1000, digest.urandom(100)} end
+box.snapshot()
+
+i1:stat().disk.last_level
+i2:stat().disk.last_level
+box.stat.vinyl().disk.data_compacted
+
+i1:compact()
+while i1:stat().disk.compaction.count == 0 do fiber.sleep(0.01) end
+
+i1:stat().disk.last_level
+box.stat.vinyl().disk.data_compacted
+
+i2:compact()
+while i2:stat().disk.compaction.count == 0 do fiber.sleep(0.01) end
+
+i2:stat().disk.last_level
+box.stat.vinyl().disk.data_compacted
+
+s:drop()
+
+box.stat.vinyl().disk.data_compacted
+
+--
+-- Number of dumps needed to trigger major compaction in
+-- an LSM tree range.
+--
+s = box.schema.space.create('test', {engine = 'vinyl'})
+i = s:create_index('primary', {page_size = 128, range_size = 8192, run_count_per_level = 1, run_size_ratio = 2})
+
+test_run:cmd("setopt delimiter ';'")
+function dump(a, b)
+    for i = a, b do
+        s:replace{i, digest.urandom(100)}
+    end
+    box.snapshot()
+end;
+function wait_compaction(count)
+    test_run:wait_cond(function()
+        return i:stat().disk.compaction.count == count
+    end, 10)
+end;
+test_run:cmd("setopt delimiter ''");
+
+dump(1, 100)
+i:stat().dumps_per_compaction -- 1
+
+dump(1, 100) -- compaction
+dump(1, 100) -- split + compaction
+wait_compaction(3)
+i:stat().range_count -- 2
+i:stat().dumps_per_compaction -- 1
+
+dump(1, 10)
+dump(1, 40) -- compaction in range 1
+wait_compaction(4)
+i:stat().dumps_per_compaction -- 1
+
+dump(90, 100)
+dump(60, 100) -- compaction in range 2
+wait_compaction(5)
+i:stat().dumps_per_compaction -- 2
+
+-- Forcing compaction manually doesn't affect dumps_per_compaction.
+dump(40, 60)
+i:compact()
+wait_compaction(7)
+i:stat().dumps_per_compaction -- 2
+
+test_run:cmd('restart server test')
+
+fiber = require('fiber')
+digest = require('digest')
+
+s = box.space.test
+i = s.index.primary
+
+i:stat().dumps_per_compaction -- 2
+for i = 1, 100 do s:replace{i, digest.urandom(100)} end
+box.snapshot()
+test_run:wait_cond(function() return i:stat().disk.compaction.count == 2 end, 10)
+
+i:stat().dumps_per_compaction -- 1
 
 s:drop()
 

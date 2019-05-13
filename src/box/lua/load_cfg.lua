@@ -41,7 +41,7 @@ local default_cfg = {
     vinyl_timeout       = 60,
     vinyl_run_count_per_level = 2,
     vinyl_run_size_ratio      = 3.5,
-    vinyl_range_size          = 1024 * 1024 * 1024,
+    vinyl_range_size          = nil, -- set automatically
     vinyl_page_size           = 8 * 1024,
     vinyl_bloom_fpr           = 0.05,
     log                 = nil,
@@ -250,21 +250,28 @@ local dynamic_cfg = {
 }
 
 local dynamic_cfg_skip_at_load = {
-    wal_mode                = true,
     listen                  = true,
     memtx_memory            = true,
+    memtx_max_tuple_size    = true,
     vinyl_memory            = true,
+    vinyl_max_tuple_size    = true,
+    vinyl_cache             = true,
+    vinyl_timeout           = true,
+    too_long_threshold      = true,
     replication             = true,
     replication_timeout     = true,
     replication_connect_timeout = true,
     replication_connect_quorum = true,
     replication_sync_lag    = true,
     replication_sync_timeout = true,
+    replication_skip_conflict = true,
     wal_dir_rescan_delay    = true,
     custom_proc_title       = true,
     force_recovery          = true,
     instance_uuid           = true,
     replicaset_uuid         = true,
+    net_msg_max             = true,
+    readahead               = true,
 }
 
 local function convert_gb(size)

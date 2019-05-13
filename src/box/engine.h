@@ -113,6 +113,12 @@ struct engine_vtab {
 	 */
 	void (*rollback)(struct engine *, struct txn *);
 	/**
+	 * Notify the engine that the instance is about to switch
+	 * to read-only mode. The engine is supposed to abort all
+	 * active rw transactions when this method is called.
+	 */
+	void (*switch_to_ro)(struct engine *);
+	/**
 	 * Bootstrap an empty data directory
 	 */
 	int (*bootstrap)(struct engine *);
@@ -156,7 +162,7 @@ struct engine_vtab {
 	void (*abort_checkpoint)(struct engine *);
 	/**
 	 * Remove files that are not needed to recover
-	 * from checkpoint with @lsn or newer.
+	 * from checkpoint @vclock or newer.
 	 *
 	 * If this function returns a non-zero value, garbage
 	 * collection is aborted, i.e. this method isn't called
@@ -166,7 +172,8 @@ struct engine_vtab {
 	 * fails to delete a snapshot file, because we recover
 	 * checkpoint list by scanning the snapshot directory.
 	 */
-	int (*collect_garbage)(struct engine *engine, int64_t lsn);
+	void (*collect_garbage)(struct engine *engine,
+				const struct vclock *vclock);
 	/**
 	 * Backup callback. It is supposed to call @cb for each file
 	 * that needs to be backed up in order to restore from the
@@ -292,6 +299,12 @@ void
 engine_shutdown(void);
 
 /**
+ * Called before switching the instance to read-only mode.
+ */
+void
+engine_switch_to_ro(void);
+
+/**
  * Initialize an empty data directory
  */
 int
@@ -336,8 +349,8 @@ engine_commit_checkpoint(const struct vclock *vclock);
 void
 engine_abort_checkpoint(void);
 
-int
-engine_collect_garbage(int64_t lsn);
+void
+engine_collect_garbage(const struct vclock *vclock);
 
 int
 engine_backup(const struct vclock *vclock, engine_backup_cb cb, void *cb_arg);
@@ -360,6 +373,7 @@ void generic_engine_commit(struct engine *, struct txn *);
 void generic_engine_rollback_statement(struct engine *, struct txn *,
 				       struct txn_stmt *);
 void generic_engine_rollback(struct engine *, struct txn *);
+void generic_engine_switch_to_ro(struct engine *);
 int generic_engine_bootstrap(struct engine *);
 int generic_engine_begin_initial_recovery(struct engine *,
 					  const struct vclock *);
@@ -369,7 +383,7 @@ int generic_engine_begin_checkpoint(struct engine *);
 int generic_engine_wait_checkpoint(struct engine *, const struct vclock *);
 void generic_engine_commit_checkpoint(struct engine *, const struct vclock *);
 void generic_engine_abort_checkpoint(struct engine *);
-int generic_engine_collect_garbage(struct engine *, int64_t);
+void generic_engine_collect_garbage(struct engine *, const struct vclock *);
 int generic_engine_backup(struct engine *, const struct vclock *,
 			  engine_backup_cb, void *);
 void generic_engine_memory_stat(struct engine *, struct engine_memory_stat *);

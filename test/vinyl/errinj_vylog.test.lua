@@ -2,6 +2,24 @@ test_run = require('test_run').new()
 fiber = require('fiber')
 
 --
+-- Check that DDL operations are logged in vylog only after successful
+-- WAL write.
+--
+-- If we logged an index creation in the metadata log before WAL write,
+-- WAL failure would result in leaving the index record in vylog forever.
+-- Since we use LSN to identify indexes in vylog, retrying index creation
+-- would then lead to a duplicate index id in vylog and hence inability
+-- to make a snapshot or recover.
+--
+s = box.schema.space.create('test', {engine = 'vinyl'})
+box.error.injection.set('ERRINJ_WAL_IO', true)
+_ = s:create_index('pk')
+box.error.injection.set('ERRINJ_WAL_IO', false)
+_ = s:create_index('pk')
+box.snapshot()
+s:drop()
+
+--
 -- Check that an error to commit a new run to vylog does not
 -- break vinyl permanently.
 --
@@ -158,4 +176,32 @@ s = box.space.test
 s.index.pk:select()
 s.index.sk:select()
 
+s:drop()
+
+--
+-- gh-4066: recovery error if an instance is restarted while
+-- building an index and there's an index with the same id in
+-- the snapshot.
+--
+fiber = require('fiber')
+
+s = box.schema.space.create('test', {engine = 'vinyl'})
+_ = s:create_index('pk')
+_ = s:create_index('sk', {parts = {2, 'unsigned'}})
+s.index[1] ~= nil
+s:replace{1, 2}
+box.snapshot()
+
+s.index.sk:drop()
+
+-- Log index creation, but never finish building it due to an error injection.
+box.error.injection.set('ERRINJ_VY_READ_PAGE_TIMEOUT', 9000)
+_ = fiber.create(function() s:create_index('sk', {parts = {2, 'unsigned'}}) end)
+fiber.sleep(0.01)
+
+-- Should ignore the incomplete index on recovery.
+test_run:cmd('restart server default')
+
+s = box.space.test
+s.index[1] == nil
 s:drop()

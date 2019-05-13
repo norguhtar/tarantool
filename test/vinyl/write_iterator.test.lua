@@ -323,9 +323,12 @@ _ = s:on_replace(function() end)
 pk = s:create_index('primary', {run_count_per_level = 1})
 sk = s:create_index('secondary', {run_count_per_level = 1, parts = {2, 'unsigned'}})
 PAD1 = 100
-PAD2 = 10
+PAD2 = 15
 -- Create a big run to prevent major compaction.
 for i = 1001, 1000 + PAD1 do s:replace{i, i} end
+box.snapshot()
+-- Some padding to trigger minor compaction.
+for i = 1001, 1000 + PAD2 do s:replace{i, i} end
 box.snapshot()
 -- Generate some INSERT statements and dump them to disk.
 _ = s:insert{1, 1} -- insert
@@ -355,14 +358,14 @@ s:delete{8}
 for i = 1001, 1000 + PAD2 do s:replace{i, i} end
 box.snapshot()
 -- Wait for compaction.
-while pk:stat().disk.compact.count == 0 do fiber.sleep(0.001) end
-while sk:stat().disk.compact.count == 0 do fiber.sleep(0.001) end
-pk:stat().disk.compact.count -- 1
-sk:stat().disk.compact.count -- 1
+while pk:stat().disk.compaction.count == 0 do fiber.sleep(0.001) end
+while sk:stat().disk.compaction.count == 0 do fiber.sleep(0.001) end
+pk:stat().disk.compaction.count -- 1
+sk:stat().disk.compaction.count -- 1
 -- All INSERT+DELETE pairs should have been annihilated,
 -- only padding is left.
-pk:stat().disk.compact.out.rows - PAD2 -- 0
-sk:stat().disk.compact.out.rows - PAD2 -- 0
+pk:stat().disk.compaction.output.rows - PAD2 -- 0
+sk:stat().disk.compaction.output.rows - PAD2 -- 0
 pk:select(1000, {iterator = 'LE'}) -- empty
 sk:select(1000, {iterator = 'LE'}) -- empty
 s:drop()
@@ -373,7 +376,7 @@ s = box.schema.space.create('test', {engine = 'vinyl'})
 pk = s:create_index('primary', {run_count_per_level = 1})
 sk = s:create_index('secondary', {run_count_per_level = 1, parts = {2, 'unsigned'}})
 PAD1 = 100
-PAD2 = 10
+PAD2 = 15
 -- Create a big run to prevent major compaction.
 for i = 1001, 1000 + PAD1 do s:insert{i, i} end
 _ = s:insert{1, 1}
@@ -384,6 +387,9 @@ _ = s:insert{5, 5}
 _ = s:insert{6, 6}
 _ = s:insert{7, 7}
 _ = s:insert{8, 8}
+box.snapshot()
+-- Some padding to trigger minor compaction.
+for i = 1001, 1000 + PAD2 do s:replace{i, i} end
 box.snapshot()
 -- Generate DELETE+INSERT statements and write them to disk.
 s:delete{1} s:insert{1, 100}
@@ -408,10 +414,10 @@ s:delete{8}
 for i = 1001, 1000 + PAD2 do s:replace{i, i} end
 box.snapshot()
 -- Wait for compaction.
-while pk:stat().disk.compact.count == 0 do fiber.sleep(0.001) end
-while sk:stat().disk.compact.count == 0 do fiber.sleep(0.001) end
-pk:stat().disk.compact.count -- 1
-sk:stat().disk.compact.count -- 1
+while pk:stat().disk.compaction.count == 0 do fiber.sleep(0.001) end
+while sk:stat().disk.compaction.count == 0 do fiber.sleep(0.001) end
+pk:stat().disk.compaction.count -- 1
+sk:stat().disk.compaction.count -- 1
 -- If INSERT+DELETE statements stored in the two compacted runs
 -- were annihilated we would see tuples stored in the first run.
 pk:select(1000, {iterator = 'LE'}) -- empty

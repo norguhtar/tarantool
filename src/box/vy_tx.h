@@ -51,6 +51,7 @@
 extern "C" {
 #endif /* defined(__cplusplus) */
 
+struct space;
 struct tuple;
 struct tx_manager;
 struct vy_mem;
@@ -140,6 +141,14 @@ struct vy_tx {
 	/** Transaction manager. */
 	struct tx_manager *xm;
 	/**
+	 * Pointer to the space affected by the last prepared statement.
+	 * We need it so that we can abort a transaction on DDL even
+	 * if it hasn't inserted anything into the write set yet (e.g.
+	 * yielded on unique check) and therefore would otherwise be
+	 * ignored by tx_manager_abort_writers_for_ddl().
+	 */
+	struct space *last_stmt_space;
+	/**
 	 * In memory transaction log. Contains both reads
 	 * and writes.
 	 */
@@ -161,6 +170,8 @@ struct vy_tx {
 	size_t write_size;
 	/** Current state of the transaction.*/
 	enum tx_state state;
+	/** Set if the transaction was started by an applier. */
+	bool is_applier_session;
 	/**
 	 * The read view of this transaction. When a transaction
 	 * is started, it is set to the "read committed" state,
@@ -275,13 +286,19 @@ size_t
 tx_manager_mem_used(struct tx_manager *xm);
 
 /**
- * Abort all rw transactions that affect the given LSM tree
- * and haven't reached WAL yet.
- *
- * Returns 0 on success, -1 on memory allocation error.
+ * Abort all rw transactions that affect the given space
+ * and haven't reached WAL yet. Called before executing a DDL
+ * operation.
  */
-int
-tx_manager_abort_writers(struct tx_manager *xm, struct vy_lsm *lsm);
+void
+tx_manager_abort_writers_for_ddl(struct tx_manager *xm, struct space *space);
+
+/**
+ * Abort all local rw transactions that haven't reached WAL yet.
+ * Called before switching to read-only mode.
+ */
+void
+tx_manager_abort_writers_for_ro(struct tx_manager *xm);
 
 /** Initialize a tx object. */
 void
@@ -313,20 +330,23 @@ void
 vy_tx_rollback(struct vy_tx *tx);
 
 /**
+ * Begin a statement in the vinyl transaction manager.
  * Return the save point corresponding to the current
  * transaction state. The transaction can be rolled back
- * to a save point with vy_tx_rollback_to_savepoint().
+ * to a save point with vy_tx_rollback_statement().
  */
-static inline void *
-vy_tx_savepoint(struct vy_tx *tx)
-{
-	assert(tx->state == VINYL_TX_READY);
-	return stailq_last(&tx->log);
-}
+int
+vy_tx_begin_statement(struct vy_tx *tx, struct space *space, void **savepoint);
 
-/** Rollback a transaction to a given save point. */
+/**
+ * Rollback a transaction statement.
+ *
+ * @param tx   Transaction in question.
+ * @param svp  Save point to rollback to, as returned by
+ *             vy_tx_begin_statement().
+ */
 void
-vy_tx_rollback_to_savepoint(struct vy_tx *tx, void *svp);
+vy_tx_rollback_statement(struct vy_tx *tx, void *svp);
 
 /**
  * Remember a read interval in the conflict manager index.

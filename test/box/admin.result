@@ -13,8 +13,8 @@ index = space:create_index('primary')
 ...
 help()
 ---
-- - To get help, see the Tarantool manual at http://tarantool.org/doc/
-  - To start the interactive Tarantool tutorial, type 'tutorial()'
+- - To get help, see the Tarantool manual at https://tarantool.io/en/doc/
+  - To start the interactive Tarantool tutorial, type 'tutorial()' here
 ...
 cfg_filter(box.cfg)
 ---
@@ -90,8 +90,6 @@ cfg_filter(box.cfg)
     - 134217728
   - - vinyl_page_size
     - 8192
-  - - vinyl_range_size
-    - 1073741824
   - - vinyl_read_threads
     - 1
   - - vinyl_run_count_per_level

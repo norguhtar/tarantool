@@ -163,7 +163,7 @@ static int
 vy_point_lookup_scan_slices(struct vy_lsm *lsm, const struct vy_read_view **rv,
 			    struct tuple *key, struct vy_history *history)
 {
-	struct vy_range *range = vy_range_tree_find_by_key(lsm->tree,
+	struct vy_range *range = vy_range_tree_find_by_key(&lsm->range_tree,
 							   ITER_EQ, key);
 	assert(range != NULL);
 	int slice_count = range->slice_count;
@@ -196,13 +196,12 @@ vy_point_lookup(struct vy_lsm *lsm, struct vy_tx *tx,
 		const struct vy_read_view **rv,
 		struct tuple *key, struct tuple **ret)
 {
-	assert(tuple_field_count(key) >= lsm->cmp_def->part_count);
+	/* All key parts must be set for a point lookup. */
+	assert(vy_stmt_is_full_key(key, lsm->cmp_def));
+	assert(tx == NULL || tx->state == VINYL_TX_READY);
 
 	*ret = NULL;
-	double start_time = ev_monotonic_now(loop());
 	int rc = 0;
-
-	lsm->stat.lookup++;
 
 	/* History list */
 	struct vy_history history, mem_history, disk_history;
@@ -237,6 +236,19 @@ restart:
 		/* Turn of the injection to avoid infinite loop */
 		errinj(ERRINJ_VY_POINT_ITER_WAIT, ERRINJ_BOOL)->bparam = false;
 	});
+
+	if (tx != NULL && tx->state == VINYL_TX_ABORT) {
+		/*
+		 * The transaction was aborted while we were reading
+		 * disk. We must stop now and return an error as this
+		 * function could be called by a DML request aborted
+		 * by a DDL operation: failing early will prevent it
+		 * from dereferencing a destroyed space.
+		 */
+		diag_set(ClientError, ER_TRANSACTION_CONFLICT);
+		rc = -1;
+		goto done;
+	}
 
 	if (mem_list_version != lsm->mem_list_version) {
 		/*
@@ -280,18 +292,6 @@ done:
 	if (rc != 0)
 		return -1;
 
-	if (*ret != NULL)
-		vy_stmt_counter_acct_tuple(&lsm->stat.get, *ret);
-
-	double latency = ev_monotonic_now(loop()) - start_time;
-	latency_collect(&lsm->stat.latency, latency);
-
-	if (latency > lsm->env->too_long_threshold) {
-		say_warn_ratelimited("%s: get(%s) => %s "
-				     "took too long: %.3f sec",
-				     vy_lsm_name(lsm), tuple_str(key),
-				     vy_stmt_str(*ret), latency);
-	}
 	return 0;
 }
 
@@ -299,7 +299,7 @@ int
 vy_point_lookup_mem(struct vy_lsm *lsm, const struct vy_read_view **rv,
 		    struct tuple *key, struct tuple **ret)
 {
-	assert(tuple_field_count(key) >= lsm->cmp_def->part_count);
+	assert(vy_stmt_is_full_key(key, lsm->cmp_def));
 
 	int rc;
 	struct vy_history history;

@@ -49,6 +49,12 @@
 #include "schema.h"
 #include "gc.h"
 
+/* sync snapshot every 16MB */
+#define SNAP_SYNC_INTERVAL	(1 << 24)
+
+static void
+checkpoint_cancel(struct checkpoint *ckpt);
+
 /*
  * Memtx yield-in-transaction trigger: roll back the effects
  * of the transaction and mark the transaction as aborted.
@@ -176,6 +182,8 @@ static void
 memtx_engine_shutdown(struct engine *engine)
 {
 	struct memtx_engine *memtx = (struct memtx_engine *)engine;
+	if (memtx->checkpoint != NULL)
+		checkpoint_cancel(memtx->checkpoint);
 	if (mempool_is_initialized(&memtx->tree_iterator_pool))
 		mempool_destroy(&memtx->tree_iterator_pool);
 	if (mempool_is_initialized(&memtx->rtree_iterator_pool))
@@ -576,7 +584,6 @@ struct checkpoint {
 	 * read view iterators.
 	 */
 	struct rlist entries;
-	uint64_t snap_io_rate_limit;
 	struct cord cord;
 	bool waiting_for_snap_thread;
 	/** The vclock of the snapshot file. */
@@ -595,8 +602,11 @@ checkpoint_init(struct checkpoint *ckpt, const char *snap_dirname,
 {
 	rlist_create(&ckpt->entries);
 	ckpt->waiting_for_snap_thread = false;
-	xdir_create(&ckpt->dir, snap_dirname, SNAP, &INSTANCE_UUID);
-	ckpt->snap_io_rate_limit = snap_io_rate_limit;
+	struct xlog_opts opts = xlog_opts_default;
+	opts.rate_limit = snap_io_rate_limit;
+	opts.sync_interval = SNAP_SYNC_INTERVAL;
+	opts.free_cache = true;
+	xdir_create(&ckpt->dir, snap_dirname, SNAP, &INSTANCE_UUID, &opts);
 	vclock_create(&ckpt->vclock);
 	ckpt->touch = false;
 	return 0;
@@ -613,6 +623,20 @@ checkpoint_destroy(struct checkpoint *ckpt)
 	xdir_destroy(&ckpt->dir);
 }
 
+static void
+checkpoint_cancel(struct checkpoint *ckpt)
+{
+	/*
+	 * Cancel the checkpoint thread if it's running and wait
+	 * for it to terminate so as to eliminate the possibility
+	 * of use-after-free.
+	 */
+	if (ckpt->waiting_for_snap_thread) {
+		tt_pthread_cancel(ckpt->cord.id);
+		tt_pthread_join(ckpt->cord.id, NULL);
+	}
+	checkpoint_destroy(ckpt);
+}
 
 static int
 checkpoint_add_space(struct space *sp, void *data)
@@ -660,8 +684,6 @@ checkpoint_f(va_list ap)
 	struct xlog snap;
 	if (xdir_create_xlog(&ckpt->dir, &snap, &ckpt->vclock) != 0)
 		return -1;
-
-	snap.rate_limit = ckpt->snap_io_rate_limit;
 
 	say_info("saving snapshot `%s'", snap.filename);
 	struct checkpoint_entry *entry;
@@ -822,22 +844,12 @@ memtx_engine_abort_checkpoint(struct engine *engine)
 	memtx->checkpoint = NULL;
 }
 
-static int
-memtx_engine_collect_garbage(struct engine *engine, int64_t lsn)
+static void
+memtx_engine_collect_garbage(struct engine *engine, const struct vclock *vclock)
 {
 	struct memtx_engine *memtx = (struct memtx_engine *)engine;
-	/*
-	 * We recover the checkpoint list by scanning the snapshot
-	 * directory so deletion of an xlog file or a file that
-	 * belongs to another engine without the corresponding snap
-	 * file would result in a corrupted checkpoint on the list.
-	 * That said, we have to abort garbage collection if we
-	 * fail to delete a snap file.
-	 */
-	if (xdir_collect_garbage(&memtx->snap_dir, lsn, XDIR_GC_USE_COIO) != 0)
-		return -1;
-
-	return 0;
+	xdir_collect_garbage(&memtx->snap_dir, vclock_sum(vclock),
+			     XDIR_GC_ASYNC);
 }
 
 static int
@@ -873,7 +885,8 @@ memtx_initial_join_f(va_list ap)
 	 * snap_dirname and INSTANCE_UUID don't change after start,
 	 * safe to use in another thread.
 	 */
-	xdir_create(&dir, snap_dirname, SNAP, &INSTANCE_UUID);
+	xdir_create(&dir, snap_dirname, SNAP, &INSTANCE_UUID,
+		    &xlog_opts_default);
 	struct xlog_cursor cursor;
 	int rc = xdir_open_cursor(&dir, checkpoint_lsn, &cursor);
 	xdir_destroy(&dir);
@@ -952,6 +965,7 @@ static const struct engine_vtab memtx_engine_vtab = {
 	/* .commit = */ generic_engine_commit,
 	/* .rollback_statement = */ memtx_engine_rollback_statement,
 	/* .rollback = */ memtx_engine_rollback,
+	/* .switch_to_ro = */ generic_engine_switch_to_ro,
 	/* .bootstrap = */ memtx_engine_bootstrap,
 	/* .begin_initial_recovery = */ memtx_engine_begin_initial_recovery,
 	/* .begin_final_recovery = */ memtx_engine_begin_final_recovery,
@@ -1020,7 +1034,8 @@ memtx_engine_new(const char *snap_dirname, bool force_recovery,
 		return NULL;
 	}
 
-	xdir_create(&memtx->snap_dir, snap_dirname, SNAP, &INSTANCE_UUID);
+	xdir_create(&memtx->snap_dir, snap_dirname, SNAP, &INSTANCE_UUID,
+		    &xlog_opts_default);
 	memtx->snap_dir.force_recovery = force_recovery;
 
 	if (xdir_scan(&memtx->snap_dir) != 0)

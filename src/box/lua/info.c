@@ -119,9 +119,35 @@ static void
 lbox_pushrelay(lua_State *L, struct relay *relay)
 {
 	lua_newtable(L);
-	lua_pushstring(L, "vclock");
-	lbox_pushvclock(L, relay_vclock(relay));
-	lua_settable(L, -3);
+	lua_pushstring(L, "status");
+
+	switch(relay_get_state(relay)) {
+	case RELAY_FOLLOW:
+		lua_pushstring(L, "follow");
+		lua_settable(L, -3);
+		lua_pushstring(L, "vclock");
+		lbox_pushvclock(L, relay_vclock(relay));
+		lua_settable(L, -3);
+		lua_pushstring(L, "idle");
+		lua_pushnumber(L, ev_monotonic_now(loop()) -
+			       relay_last_row_time(relay));
+		lua_settable(L, -3);
+		break;
+	case RELAY_STOPPED:
+	{
+		lua_pushstring(L, "stopped");
+		lua_settable(L, -3);
+
+		struct error *e = diag_last_error(relay_get_diag(relay));
+		if (e != NULL) {
+			lua_pushstring(L, "message");
+			lua_pushstring(L, e->errmsg);
+			lua_settable(L, -3);
+		}
+		break;
+	}
+	default: unreachable();
+	}
 }
 
 static void
@@ -151,25 +177,9 @@ lbox_pushreplica(lua_State *L, struct replica *replica)
 		lua_settable(L, -3);
 	}
 
-	if (relay_get_state(relay) == RELAY_FOLLOW) {
+	if (relay_get_state(relay) != RELAY_OFF) {
 		lua_pushstring(L, "downstream");
 		lbox_pushrelay(L, relay);
-		lua_settable(L, -3);
-	} else if (relay_get_state(relay) == RELAY_STOPPED) {
-		lua_pushstring(L, "downstream");
-
-		lua_newtable(L);
-		lua_pushstring(L, "status");
-		lua_pushstring(L, "stopped");
-		lua_settable(L, -3);
-
-		struct error *e = diag_last_error(relay_get_diag(relay));
-		if (e != NULL) {
-			lua_pushstring(L, "message");
-			lua_pushstring(L, e->errmsg);
-			lua_settable(L, -3);
-		}
-
 		lua_settable(L, -3);
 	}
 }
@@ -371,6 +381,10 @@ lbox_info_gc_call(struct lua_State *L)
 
 	lua_pushstring(L, "signature");
 	luaL_pushint64(L, vclock_sum(&gc.vclock));
+	lua_settable(L, -3);
+
+	lua_pushstring(L, "checkpoint_is_in_progress");
+	lua_pushboolean(L, box_checkpoint_is_in_progress);
 	lua_settable(L, -3);
 
 	lua_pushstring(L, "checkpoints");

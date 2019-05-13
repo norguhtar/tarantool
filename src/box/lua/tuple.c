@@ -57,6 +57,7 @@
 
 static const char *tuplelib_name = "box.tuple";
 static const char *tuple_iteratorlib_name = "box.tuple.iterator";
+static struct luaL_serializer tuple_serializer;
 
 extern char tuple_lua[]; /* Lua source */
 
@@ -92,7 +93,7 @@ luaT_istuple(struct lua_State *L, int narg)
 }
 
 int
-lbox_tuple_new(lua_State *L)
+luaT_tuple_new(struct lua_State *L, struct tuple_format *format)
 {
 	int argc = lua_gettop(L);
 	if (argc < 1) {
@@ -108,7 +109,7 @@ lbox_tuple_new(lua_State *L)
 
 	if (argc == 1 && (lua_istable(L, 1) || luaT_istuple(L, 1))) {
 		/* New format: box.tuple.new({1, 2, 3}) */
-		luamp_encode_tuple(L, luaL_msgpack_default, &stream, 1);
+		luamp_encode_tuple(L, &tuple_serializer, &stream, 1);
 	} else {
 		/* Backward-compatible format: box.tuple.new(1, 2, 3). */
 		luamp_encode_array(luaL_msgpack_default, &stream, argc);
@@ -118,8 +119,7 @@ lbox_tuple_new(lua_State *L)
 	}
 	mpstream_flush(&stream);
 
-	box_tuple_format_t *fmt = box_tuple_format_default();
-	struct tuple *tuple = box_tuple_new(fmt, buf->buf,
+	struct tuple *tuple = box_tuple_new(format, buf->buf,
 					   buf->buf + ibuf_used(buf));
 	if (tuple == NULL)
 		return luaT_error(L);
@@ -127,6 +127,12 @@ lbox_tuple_new(lua_State *L)
 	luaT_pushtuple(L, tuple);
 	ibuf_reinit(tarantool_lua_ibuf);
 	return 1;
+}
+
+static int
+lbox_tuple_new(lua_State *L)
+{
+	return luaT_tuple_new(L, box_tuple_format_default());
 }
 
 static int
@@ -537,6 +543,15 @@ box_lua_tuple_init(struct lua_State *L)
 	lua_pop(L, 1);
 
 	luamp_set_encode_extension(luamp_encode_extension_box);
+
+	/*
+	 * Create special serializer for box.tuple.new().
+	 * Disable storage optimization for excessively
+	 * sparse arrays as a tuple always must be regular
+	 * MP_ARRAY.
+	 */
+	luaL_serializer_create(&tuple_serializer);
+	tuple_serializer.encode_sparse_ratio = 0;
 
 	/* Get CTypeID for `struct tuple' */
 	int rc = luaL_cdef(L, "struct tuple;");

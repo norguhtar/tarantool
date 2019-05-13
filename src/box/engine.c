@@ -65,6 +65,14 @@ engine_shutdown(void)
 	}
 }
 
+void
+engine_switch_to_ro(void)
+{
+	struct engine *engine;
+	engine_foreach(engine)
+		engine->vtab->switch_to_ro(engine);
+}
+
 int
 engine_bootstrap(void)
 {
@@ -147,15 +155,12 @@ engine_abort_checkpoint(void)
 		engine->vtab->abort_checkpoint(engine);
 }
 
-int
-engine_collect_garbage(int64_t lsn)
+void
+engine_collect_garbage(const struct vclock *vclock)
 {
 	struct engine *engine;
-	engine_foreach(engine) {
-		if (engine->vtab->collect_garbage(engine, lsn) < 0)
-			return -1;
-	}
-	return 0;
+	engine_foreach(engine)
+		engine->vtab->collect_garbage(engine, vclock);
 }
 
 int
@@ -256,6 +261,12 @@ generic_engine_rollback(struct engine *engine, struct txn *txn)
 	(void)txn;
 }
 
+void
+generic_engine_switch_to_ro(struct engine *engine)
+{
+	(void)engine;
+}
+
 int
 generic_engine_bootstrap(struct engine *engine)
 {
@@ -316,12 +327,12 @@ generic_engine_abort_checkpoint(struct engine *engine)
 	(void)engine;
 }
 
-int
-generic_engine_collect_garbage(struct engine *engine, int64_t lsn)
+void
+generic_engine_collect_garbage(struct engine *engine,
+			       const struct vclock *vclock)
 {
 	(void)engine;
-	(void)lsn;
-	return 0;
+	(void)vclock;
 }
 
 int

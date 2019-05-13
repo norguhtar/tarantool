@@ -255,12 +255,8 @@ index_opts_decode(struct index_opts *opts, const char *map)
 			  BOX_INDEX_FIELD_OPTS, "distance must be either "\
 			  "'euclid' or 'manhattan'");
 	}
-	if (opts->range_size <= 0) {
-		tnt_raise(ClientError, ER_WRONG_INDEX_OPTIONS,
-			  BOX_INDEX_FIELD_OPTS,
-			  "range_size must be greater than 0");
-	}
-	if (opts->page_size <= 0 || opts->page_size > opts->range_size) {
+	if (opts->page_size <= 0 || (opts->range_size > 0 &&
+				     opts->page_size > opts->range_size)) {
 		tnt_raise(ClientError, ER_WRONG_INDEX_OPTIONS,
 			  BOX_INDEX_FIELD_OPTS,
 			  "page_size must be greater than 0 and "
@@ -787,8 +783,6 @@ alter_space_commit(struct trigger *trigger, void *event)
 		op->commit(alter, txn->signature);
 	}
 
-	trigger_run_xc(&on_alter_space, alter->new_space);
-
 	alter->new_space = NULL; /* for alter_space_delete(). */
 	/*
 	 * Delete the old version of the space, we are not
@@ -823,6 +817,8 @@ alter_space_rollback(struct trigger *trigger, void * /* event */)
 	 */
 	space_swap_triggers(alter->new_space, alter->old_space);
 	space_cache_replace(alter->new_space, alter->old_space);
+	trigger_run(&on_alter_space, alter->old_space);
+
 	alter_space_delete(alter);
 }
 
@@ -923,6 +919,7 @@ alter_space_do(struct txn *txn, struct alter_space *alter)
 	 * cache with it.
 	 */
 	space_cache_replace(alter->old_space, alter->new_space);
+	trigger_run_xc(&on_alter_space, alter->new_space);
 
 	/*
 	 * Install transaction commit/rollback triggers to either
@@ -1339,18 +1336,25 @@ RebuildIndex::~RebuildIndex()
 /** TruncateIndex - truncate an index. */
 class TruncateIndex: public AlterSpaceOp
 {
+	/** id of the index to truncate. */
+	uint32_t iid;
+	/**
+	 * In case TRUNCATE fails, we need to clean up the new
+	 * index data in the engine.
+	 */
+	struct index *new_index;
 public:
 	TruncateIndex(struct alter_space *alter, uint32_t iid)
 		: AlterSpaceOp(alter), iid(iid) {}
-	/** id of the index to truncate. */
-	uint32_t iid;
 	virtual void prepare(struct alter_space *alter);
 	virtual void commit(struct alter_space *alter, int64_t signature);
+	virtual ~TruncateIndex();
 };
 
 void
 TruncateIndex::prepare(struct alter_space *alter)
 {
+	new_index = space_index(alter->new_space, iid);
 	if (iid == 0) {
 		/*
 		 * Notify the engine that the primary index
@@ -1367,7 +1371,6 @@ TruncateIndex::prepare(struct alter_space *alter)
 	 * index was recreated. For example, Vinyl uses this
 	 * callback to load indexes during local recovery.
 	 */
-	struct index *new_index = space_index(alter->new_space, iid);
 	assert(new_index != NULL);
 	space_build_index_xc(alter->new_space, new_index,
 			     alter->new_space->format);
@@ -1377,10 +1380,17 @@ void
 TruncateIndex::commit(struct alter_space *alter, int64_t signature)
 {
 	struct index *old_index = space_index(alter->old_space, iid);
-	struct index *new_index = space_index(alter->new_space, iid);
 
 	index_commit_drop(old_index, signature);
 	index_commit_create(new_index, signature);
+	new_index = NULL;
+}
+
+TruncateIndex::~TruncateIndex()
+{
+	if (new_index == NULL)
+		return;
+	index_abort_create(new_index);
 }
 
 /**
@@ -1413,7 +1423,6 @@ on_drop_space_commit(struct trigger *trigger, void *event)
 {
 	(void) event;
 	struct space *space = (struct space *)trigger->data;
-	trigger_run_xc(&on_alter_space, space);
 	space_delete(space);
 }
 
@@ -1428,6 +1437,7 @@ on_drop_space_rollback(struct trigger *trigger, void *event)
 	(void) event;
 	struct space *space = (struct space *)trigger->data;
 	space_cache_replace(NULL, space);
+	trigger_run(&on_alter_space, space);
 }
 
 /**
@@ -1437,8 +1447,7 @@ static void
 on_create_space_commit(struct trigger *trigger, void *event)
 {
 	(void) event;
-	struct space *space = (struct space *)trigger->data;
-	trigger_run_xc(&on_alter_space, space);
+	(void) trigger;
 }
 
 /**
@@ -1454,6 +1463,7 @@ on_create_space_rollback(struct trigger *trigger, void *event)
 	(void) event;
 	struct space *space = (struct space *)trigger->data;
 	space_cache_replace(space, NULL);
+	trigger_run(&on_alter_space, space);
 	space_delete(space);
 }
 
@@ -1602,6 +1612,7 @@ on_replace_dd_space(struct trigger * /* trigger */, void *event)
 		 * execution on a replica.
 		 */
 		space_cache_replace(NULL, space);
+		trigger_run_xc(&on_alter_space, space);
 		/*
 		 * Do not forget to update schema_version right after
 		 * inserting the space to the space_cache, since no
@@ -1653,6 +1664,7 @@ on_replace_dd_space(struct trigger * /* trigger */, void *event)
 		 * execution on a replica.
 		 */
 		space_cache_replace(old_space, NULL);
+		trigger_run_xc(&on_alter_space, old_space);
 		/*
 		 * Do not forget to update schema_version right after
 		 * deleting the space from the space_cache, since no
@@ -2854,6 +2866,7 @@ on_replace_dd_schema(struct trigger * /* trigger */, void *event)
 		tt_uuid uu;
 		tuple_field_uuid_xc(new_tuple, BOX_CLUSTER_FIELD_UUID, &uu);
 		REPLICASET_UUID = uu;
+		say_info("cluster uuid %s", tt_uuid_str(&uu));
 	} else if (strcmp(key, "version") == 0) {
 		if (new_tuple != NULL) {
 			uint32_t major, minor, patch;

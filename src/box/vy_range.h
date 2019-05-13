@@ -103,15 +103,15 @@ struct vy_range {
 	 * The lower the level is scheduled for compaction,
 	 * the bigger it tends to be because upper levels are
 	 * taken in.
-	 * @sa vy_range_update_compact_priority() to see
+	 * @sa vy_range_update_compaction_priority() to see
 	 * how we  decide how many runs to compact next time.
 	 */
-	int compact_priority;
+	int compaction_priority;
 	/** Number of statements that need to be compacted. */
-	struct vy_disk_stmt_counter compact_queue;
+	struct vy_disk_stmt_counter compaction_queue;
 	/**
 	 * If this flag is set, the range must be scheduled for
-	 * major compaction, i.e. its compact_priority must be
+	 * major compaction, i.e. its compaction_priority must be
 	 * raised to max (slice_count). The flag is set by
 	 * vy_lsm_force_compaction() and cleared when the range
 	 * is scheduled for compaction.
@@ -119,6 +119,11 @@ struct vy_range {
 	bool needs_compaction;
 	/** Number of times the range was compacted. */
 	int n_compactions;
+	/**
+	 * Number of dumps it takes to trigger major compaction in
+	 * this range, see vy_run::dump_count for more details.
+	 */
+	int dumps_per_compaction;
 	/** Link in vy_lsm->tree. */
 	rb_node(struct vy_range) tree_node;
 	/** Link in vy_lsm->range_heap. */
@@ -132,7 +137,7 @@ struct vy_range {
 
 /**
  * Heap of all ranges of the same LSM tree, prioritized by
- * vy_range->compact_priority.
+ * vy_range->compaction_priority.
  */
 #define HEAP_NAME vy_range_heap
 static inline bool
@@ -140,7 +145,7 @@ vy_range_heap_less(struct heap_node *a, struct heap_node *b)
 {
 	struct vy_range *r1 = container_of(a, struct vy_range, heap_node);
 	struct vy_range *r2 = container_of(b, struct vy_range, heap_node);
-	return r1->compact_priority > r2->compact_priority;
+	return r1->compaction_priority > r2->compaction_priority;
 }
 #define HEAP_LESS(h, l, r) vy_range_heap_less(l, r)
 #include "salad/heap.h"
@@ -239,20 +244,26 @@ vy_range_remove_slice(struct vy_range *range, struct vy_slice *slice);
  * @param opts      Index options.
  */
 void
-vy_range_update_compact_priority(struct vy_range *range,
-				 const struct index_opts *opts);
+vy_range_update_compaction_priority(struct vy_range *range,
+				    const struct index_opts *opts);
+
+/**
+ * Update the value of range->dumps_per_compaction.
+ */
+void
+vy_range_update_dumps_per_compaction(struct vy_range *range);
 
 /**
  * Check if a range needs to be split in two.
  *
  * @param range             The range.
- * @param opts              Index options.
+ * @param range_size        Target range size.
  * @param[out] p_split_key  Key to split the range by.
  *
  * @retval true             If the range needs to be split.
  */
 bool
-vy_range_needs_split(struct vy_range *range, const struct index_opts *opts,
+vy_range_needs_split(struct vy_range *range, int64_t range_size,
 		     const char **p_split_key);
 
 /**
@@ -261,7 +272,7 @@ vy_range_needs_split(struct vy_range *range, const struct index_opts *opts,
  *
  * @param range         The range.
  * @param tree          The range tree.
- * @param opts          Index options.
+ * @param range_size    Target range size.
  * @param[out] p_first  The first range in the tree to coalesce.
  * @param[out] p_last   The last range in the tree to coalesce.
  *
@@ -269,8 +280,8 @@ vy_range_needs_split(struct vy_range *range, const struct index_opts *opts,
  */
 bool
 vy_range_needs_coalesce(struct vy_range *range, vy_range_tree_t *tree,
-			const struct index_opts *opts,
-			struct vy_range **p_first, struct vy_range **p_last);
+			int64_t range_size, struct vy_range **p_first,
+			struct vy_range **p_last);
 
 #if defined(__cplusplus)
 } /* extern "C" */

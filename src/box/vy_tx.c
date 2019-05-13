@@ -46,6 +46,7 @@
 #include "iterator_type.h"
 #include "salad/stailq.h"
 #include "schema.h" /* space_cache_version */
+#include "session.h"
 #include "space.h"
 #include "trigger.h"
 #include "trivia/util.h"
@@ -96,7 +97,6 @@ vy_global_read_view_create(struct vy_read_view *rv, int64_t lsn)
 	 */
 	rv->vlsn = lsn;
 	rv->refs = 0;
-	rv->is_aborted = false;
 }
 
 struct tx_manager *
@@ -184,7 +184,6 @@ tx_manager_read_view(struct tx_manager *xm)
 			 "mempool", "read view");
 		return NULL;
 	}
-	rv->is_aborted = false;
 	if (xm->last_prepared_tx != NULL) {
 		rv->vlsn = MAX_LSN + xm->last_prepared_tx->psn;
 		xm->last_prepared_tx->read_view = rv;
@@ -247,6 +246,30 @@ txv_delete(struct txv *v)
 	mempool_free(&xm->txv_mempool, v);
 }
 
+/**
+ * Account a read interval in transaction manager stats.
+ */
+static void
+vy_read_interval_acct(struct vy_read_interval *interval)
+{
+	struct tx_manager *xm = interval->tx->xm;
+	xm->read_set_size += tuple_size(interval->left);
+	if (interval->left != interval->right)
+		xm->read_set_size += tuple_size(interval->right);
+}
+
+/**
+ * Unaccount a read interval in transaction manager stats.
+ */
+static void
+vy_read_interval_unacct(struct vy_read_interval *interval)
+{
+	struct tx_manager *xm = interval->tx->xm;
+	xm->read_set_size -= tuple_size(interval->left);
+	if (interval->left != interval->right)
+		xm->read_set_size -= tuple_size(interval->right);
+}
+
 static struct vy_read_interval *
 vy_read_interval_new(struct vy_tx *tx, struct vy_lsm *lsm,
 		     struct tuple *left, bool left_belongs,
@@ -270,9 +293,7 @@ vy_read_interval_new(struct vy_tx *tx, struct vy_lsm *lsm,
 	interval->right = right;
 	interval->right_belongs = right_belongs;
 	interval->subtree_last = NULL;
-	xm->read_set_size += tuple_size(left);
-	if (left != right)
-		xm->read_set_size += tuple_size(right);
+	vy_read_interval_acct(interval);
 	return interval;
 }
 
@@ -280,9 +301,7 @@ static void
 vy_read_interval_delete(struct vy_read_interval *interval)
 {
 	struct tx_manager *xm = interval->tx->xm;
-	xm->read_set_size -= tuple_size(interval->left);
-	if (interval->left != interval->right)
-		xm->read_set_size -= tuple_size(interval->right);
+	vy_read_interval_unacct(interval);
 	vy_lsm_unref(interval->lsm);
 	tuple_unref(interval->left);
 	tuple_unref(interval->right);
@@ -303,12 +322,14 @@ vy_tx_read_set_free_cb(vy_tx_read_set_t *read_set,
 void
 vy_tx_create(struct tx_manager *xm, struct vy_tx *tx)
 {
+	tx->last_stmt_space = NULL;
 	stailq_create(&tx->log);
 	write_set_new(&tx->write_set);
 	tx->write_set_version = 0;
 	tx->write_size = 0;
 	tx->xm = xm;
 	tx->state = VINYL_TX_READY;
+	tx->is_applier_session = false;
 	tx->read_view = (struct vy_read_view *)xm->p_global_read_view;
 	vy_tx_read_set_new(&tx->read_set);
 	tx->psn = 0;
@@ -333,6 +354,15 @@ vy_tx_destroy(struct vy_tx *tx)
 
 	vy_tx_read_set_iter(&tx->read_set, NULL, vy_tx_read_set_free_cb, NULL);
 	rlist_del_entry(tx, in_writers);
+}
+
+/** Mark a transaction as aborted and account it in stats. */
+static void
+vy_tx_abort(struct vy_tx *tx)
+{
+	assert(tx->state == VINYL_TX_READY);
+	tx->state = VINYL_TX_ABORT;
+	tx->xm->stat.conflict++;
 }
 
 /** Return true if the transaction is read-only. */
@@ -394,7 +424,7 @@ vy_tx_abort_readers(struct vy_tx *tx, struct txv *v)
 		/* Abort only active TXs */
 		if (abort->state != VINYL_TX_READY)
 			continue;
-		abort->state = VINYL_TX_ABORT;
+		vy_tx_abort(abort);
 	}
 }
 
@@ -407,6 +437,11 @@ vy_tx_begin(struct tx_manager *xm)
 		return NULL;
 	}
 	vy_tx_create(xm, tx);
+
+	struct session *session = fiber_get_session(fiber());
+	if (session != NULL && session->type == SESSION_TYPE_APPLIER)
+		tx->is_applier_session = true;
+
 	return tx;
 }
 
@@ -609,13 +644,18 @@ vy_tx_prepare(struct vy_tx *tx)
 {
 	struct tx_manager *xm = tx->xm;
 
+	if (tx->state == VINYL_TX_ABORT) {
+		/* Conflict is already accounted - see vy_tx_abort(). */
+		diag_set(ClientError, ER_TRANSACTION_CONFLICT);
+		return -1;
+	}
+
+	assert(tx->state == VINYL_TX_READY);
 	if (vy_tx_is_ro(tx)) {
-		assert(tx->state == VINYL_TX_READY);
 		tx->state = VINYL_TX_COMMIT;
 		return 0;
 	}
-
-	if (vy_tx_is_in_read_view(tx) || tx->state == VINYL_TX_ABORT) {
+	if (vy_tx_is_in_read_view(tx)) {
 		xm->stat.conflict++;
 		diag_set(ClientError, ER_TRANSACTION_CONFLICT);
 		return -1;
@@ -808,10 +848,6 @@ vy_tx_rollback_after_prepare(struct vy_tx *tx)
 			vy_mem_unpin(v->mem);
 	}
 
-	/* Abort read views of dependent transactions. */
-	if (tx->read_view != &xm->global_read_view)
-		tx->read_view->is_aborted = true;
-
 	struct write_set_iterator it;
 	write_set_ifirst(&tx->write_set, &it);
 	while ((v = write_set_inext(&it)) != NULL) {
@@ -833,9 +869,27 @@ vy_tx_rollback(struct vy_tx *tx)
 	mempool_free(&xm->tx_mempool, tx);
 }
 
-void
-vy_tx_rollback_to_savepoint(struct vy_tx *tx, void *svp)
+int
+vy_tx_begin_statement(struct vy_tx *tx, struct space *space, void **savepoint)
 {
+	if (tx->state == VINYL_TX_ABORT) {
+		diag_set(ClientError, ER_TRANSACTION_CONFLICT);
+		return -1;
+	}
+	assert(tx->state == VINYL_TX_READY);
+	tx->last_stmt_space = space;
+	if (stailq_empty(&tx->log))
+		rlist_add_entry(&tx->xm->writers, tx, in_writers);
+	*savepoint = stailq_last(&tx->log);
+	return 0;
+}
+
+void
+vy_tx_rollback_statement(struct vy_tx *tx, void *svp)
+{
+	if (tx->state == VINYL_TX_ABORT)
+		return;
+
 	assert(tx->state == VINYL_TX_READY);
 	struct stailq_entry *last = svp;
 	struct stailq tail;
@@ -855,6 +909,7 @@ vy_tx_rollback_to_savepoint(struct vy_tx *tx, void *svp)
 	}
 	if (stailq_empty(&tx->log))
 		rlist_del_entry(tx, in_writers);
+	tx->last_stmt_space = NULL;
 }
 
 int
@@ -910,6 +965,7 @@ vy_tx_track(struct vy_tx *tx, struct vy_lsm *lsm,
 	 * remove them from the transaction and LSM tree read sets.
 	 */
 	if (!stailq_empty(&merge)) {
+		vy_read_interval_unacct(new_interval);
 		interval = stailq_first_entry(&merge, struct vy_read_interval,
 					      in_merge);
 		if (vy_read_interval_cmpl(new_interval, interval) > 0) {
@@ -933,6 +989,7 @@ vy_tx_track(struct vy_tx *tx, struct vy_lsm *lsm,
 			vy_lsm_read_set_remove(&lsm->read_set, interval);
 			vy_read_interval_delete(interval);
 		}
+		vy_read_interval_acct(new_interval);
 	}
 
 	vy_tx_read_set_insert(&tx->read_set, new_interval);
@@ -943,7 +1000,7 @@ vy_tx_track(struct vy_tx *tx, struct vy_lsm *lsm,
 int
 vy_tx_track_point(struct vy_tx *tx, struct vy_lsm *lsm, struct tuple *stmt)
 {
-	assert(tuple_field_count(stmt) >= lsm->cmp_def->part_count);
+	assert(vy_stmt_is_full_key(stmt, lsm->cmp_def));
 
 	if (vy_tx_is_in_read_view(tx)) {
 		/* No point in tracking reads. */
@@ -1050,27 +1107,36 @@ vy_tx_set_with_colmask(struct vy_tx *tx, struct vy_lsm *lsm,
 	tx->write_set_version++;
 	tx->write_size += tuple_size(stmt);
 	vy_stmt_counter_acct_tuple(&lsm->stat.txw.count, stmt);
-	if (stailq_empty(&tx->log))
-		rlist_add_entry(&tx->xm->writers, tx, in_writers);
 	stailq_add_tail_entry(&tx->log, v, next_in_log);
 	return 0;
 }
 
-int
-tx_manager_abort_writers(struct tx_manager *xm, struct vy_lsm *lsm)
+void
+tx_manager_abort_writers_for_ddl(struct tx_manager *xm, struct space *space)
 {
-	struct tuple *key = vy_stmt_new_select(lsm->env->key_format, NULL, 0);
-	if (key == NULL)
-		return -1;
+	if (space->index_count == 0)
+		return; /* no indexes, no conflicts */
+	struct vy_lsm *lsm = vy_lsm(space->index[0]);
 	struct vy_tx *tx;
 	rlist_foreach_entry(tx, &xm->writers, in_writers) {
-		assert(!vy_tx_is_ro(tx));
-		if (tx->state == VINYL_TX_READY &&
-		    write_set_search_key(&tx->write_set, lsm, key) != NULL)
-			tx->state = VINYL_TX_ABORT;
+		if (tx->state != VINYL_TX_READY)
+			continue;
+		if (tx->last_stmt_space == space ||
+		    write_set_search_key(&tx->write_set, lsm,
+					 lsm->env->empty_key) != NULL)
+			vy_tx_abort(tx);
 	}
-	tuple_unref(key);
-	return 0;
+}
+
+void
+tx_manager_abort_writers_for_ro(struct tx_manager *xm)
+{
+	struct vy_tx *tx;
+	rlist_foreach_entry(tx, &xm->writers, in_writers) {
+		/* Applier ignores ro flag. */
+		if (tx->state == VINYL_TX_READY && !tx->is_applier_session)
+			vy_tx_abort(tx);
+	}
 }
 
 void
@@ -1106,7 +1172,7 @@ vy_txw_iterator_seek(struct vy_txw_iterator *itr,
 	struct vy_lsm *lsm = itr->lsm;
 	struct write_set_key k = { lsm, key };
 	struct txv *txv;
-	if (tuple_field_count(key) > 0) {
+	if (!vy_stmt_is_empty_key(key)) {
 		if (iterator_type == ITER_EQ)
 			txv = write_set_search(&itr->tx->write_set, &k);
 		else if (iterator_type == ITER_GE || iterator_type == ITER_GT)

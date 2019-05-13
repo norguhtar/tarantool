@@ -72,6 +72,9 @@ const char *vy_file_suffix[] = {
 	"run" inprogress_suffix, 	/* VY_FILE_RUN_INPROGRESS */
 };
 
+/* sync run and index files very 16 MB */
+#define VY_RUN_SYNC_INTERVAL (1 << 24)
+
 /**
  * We read runs in background threads so as not to stall tx.
  * This structure represents such a thread.
@@ -152,11 +155,8 @@ vy_run_env_stop_readers(struct vy_run_env *env)
 {
 	for (int i = 0; i < env->reader_pool_size; i++) {
 		struct vy_run_reader *reader = &env->reader_pool[i];
-
-		cbus_stop_loop(&reader->reader_pipe);
-		cpipe_destroy(&reader->reader_pipe);
-		if (cord_join(&reader->cord) != 0)
-			panic("failed to join vinyl reader thread");
+		tt_pthread_cancel(reader->cord.id);
+		tt_pthread_join(reader->cord.id, NULL);
 	}
 	free(env->reader_pool);
 }
@@ -377,6 +377,7 @@ vy_slice_new(int64_t id, struct vy_run *run, struct tuple *begin,
 	memset(slice, 0, sizeof(*slice));
 	slice->id = id;
 	slice->run = run;
+	slice->seed = rand();
 	vy_run_ref(run);
 	run->slice_count++;
 	if (begin != NULL)
@@ -524,10 +525,8 @@ vy_page_info_decode(struct vy_page_info *page, const struct xrow_header *xrow,
 			page->row_index_offset = mp_decode_uint(&pos);
 			break;
 		default:
-			diag_set(ClientError, ER_INVALID_INDEX_FILE, filename,
-				 tt_sprintf("Can't decode page info: "
-					    "unknown key %u", (unsigned)key));
-			return -1;
+			mp_next(&pos); /* unknown key, ignore */
+			break;
 		}
 	}
 	if (key_map) {
@@ -634,10 +633,8 @@ vy_run_info_decode(struct vy_run_info *run_info,
 			vy_stmt_stat_decode(&run_info->stmt_stat, &pos);
 			break;
 		default:
-			diag_set(ClientError, ER_INVALID_INDEX_FILE, filename,
-				"Can't decode run info: unknown key %u",
-				(unsigned)key);
-			return -1;
+			mp_next(&pos); /* unknown key, ignore */
+			break;
 		}
 	}
 	if (key_map) {
@@ -705,7 +702,7 @@ vy_page_xrow(struct vy_page *page, uint32_t stmt_no,
 	const char *data_end = stmt_no + 1 < page->row_count ?
 			       page->data + page->row_index[stmt_no + 1] :
 			       page->data + page->unpacked_size;
-	return xrow_header_decode(xrow, &data, data_end);
+	return xrow_header_decode(xrow, &data, data_end, false);
 }
 
 /* {{{ vy_run_iterator vy_run_iterator support functions */
@@ -828,6 +825,12 @@ vy_page_read(struct vy_page *page, const struct vy_page_info *page_info,
 	if (inj != NULL && inj->dparam > 0)
 		usleep(inj->dparam * 1000000);
 
+	inj = errinj(ERRINJ_VY_READ_PAGE_DELAY, ERRINJ_BOOL);
+	if (inj != NULL) {
+		while (inj->bparam)
+			usleep(10000);
+	}
+
 	/* decode xlog tx */
 	const char *data_pos = data;
 	const char *data_end = data + readen;
@@ -839,7 +842,7 @@ vy_page_read(struct vy_page *page, const struct vy_page_info *page_info,
 	struct xrow_header xrow;
 	data_pos = page->data + page_info->row_index_offset;
 	data_end = page->data + page_info->unpacked_size;
-	if (xrow_header_decode(&xrow, &data_pos, data_end) == -1)
+	if (xrow_header_decode(&xrow, &data_pos, data_end, true) == -1)
 		goto error;
 	if (xrow.type != VY_RUN_ROW_INDEX) {
 		diag_set(ClientError, ER_INVALID_RUN_FILE,
@@ -1280,7 +1283,7 @@ vy_run_iterator_do_seek(struct vy_run_iterator *itr,
 	struct vy_run_iterator_pos end_pos = {run->info.page_count, 0};
 	bool equal_found = false;
 	int rc;
-	if (tuple_field_count(key) > 0) {
+	if (!vy_stmt_is_empty_key(key)) {
 		rc = vy_run_iterator_search(itr, iterator_type, key,
 					    &itr->curr_pos, &equal_found);
 		if (rc != 0 || itr->search_ended)
@@ -1370,6 +1373,7 @@ vy_run_iterator_seek(struct vy_run_iterator *itr,
 		cmp = vy_stmt_compare_with_key(key, slice->begin, cmp_def);
 		if (cmp < 0 && iterator_type == ITER_EQ) {
 			vy_run_iterator_stop(itr);
+			*ret = NULL;
 			return 0;
 		}
 		if (cmp < 0 || (cmp == 0 && iterator_type != ITER_GT)) {
@@ -1442,6 +1446,16 @@ vy_run_iterator_open(struct vy_run_iterator *itr,
 
 	itr->search_started = false;
 	itr->search_ended = false;
+
+	/*
+	 * Make sure the format we use to create tuples won't
+	 * go away if DDL is called while the iterator is used.
+	 *
+	 * XXX: Please remove this kludge when proper DDL locking
+	 * is implemented on transaction management level or multi
+	 * version data dictionary is in place.
+	 */
+	tuple_format_ref(format);
 }
 
 /**
@@ -1608,6 +1622,7 @@ void
 vy_run_iterator_close(struct vy_run_iterator *itr)
 {
 	vy_run_iterator_stop(itr);
+	tuple_format_unref(itr->format);
 	TRASH(itr);
 }
 
@@ -2030,10 +2045,11 @@ vy_run_write_index(struct vy_run *run, const char *dirpath,
 	struct xlog_meta meta;
 	xlog_meta_create(&meta, XLOG_META_TYPE_INDEX, &INSTANCE_UUID,
 			 NULL, NULL);
-	if (xlog_create(&index_xlog, path, 0, &meta) < 0)
+	struct xlog_opts opts = xlog_opts_default;
+	opts.rate_limit = run->env->snap_io_rate_limit;
+	opts.sync_interval = VY_RUN_SYNC_INTERVAL;
+	if (xlog_create(&index_xlog, path, 0, &meta, &opts) < 0)
 		return -1;
-
-	index_xlog.rate_limit = run->env->snap_io_rate_limit;
 
 	xlog_tx_begin(&index_xlog);
 	struct region *region = &fiber()->gc;
@@ -2083,7 +2099,7 @@ int
 vy_run_writer_create(struct vy_run_writer *writer, struct vy_run *run,
 		     const char *dirpath, uint32_t space_id, uint32_t iid,
 		     struct key_def *cmp_def, struct key_def *key_def,
-		     uint64_t page_size, double bloom_fpr)
+		     uint64_t page_size, double bloom_fpr, bool no_compression)
 {
 	memset(writer, 0, sizeof(*writer));
 	writer->run = run;
@@ -2094,6 +2110,7 @@ vy_run_writer_create(struct vy_run_writer *writer, struct vy_run *run,
 	writer->key_def = key_def;
 	writer->page_size = page_size;
 	writer->bloom_fpr = bloom_fpr;
+	writer->no_compression = no_compression;
 	if (bloom_fpr < 1) {
 		writer->bloom = tuple_bloom_builder_new(key_def->part_count);
 		if (writer->bloom == NULL)
@@ -2126,9 +2143,12 @@ vy_run_writer_create_xlog(struct vy_run_writer *writer)
 	struct xlog_meta meta;
 	xlog_meta_create(&meta, XLOG_META_TYPE_RUN, &INSTANCE_UUID,
 			 NULL, NULL);
-	if (xlog_create(&writer->data_xlog, path, 0, &meta) != 0)
+	struct xlog_opts opts = xlog_opts_default;
+	opts.rate_limit = writer->run->env->snap_io_rate_limit;
+	opts.sync_interval = VY_RUN_SYNC_INTERVAL;
+	opts.no_compression = writer->no_compression;
+	if (xlog_create(&writer->data_xlog, path, 0, &meta, &opts) != 0)
 		return -1;
-	writer->data_xlog.rate_limit = writer->run->env->snap_io_rate_limit;
 	return 0;
 }
 

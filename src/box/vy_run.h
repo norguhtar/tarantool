@@ -130,6 +130,21 @@ struct vy_run {
 	/** Max LSN stored on disk. */
 	int64_t dump_lsn;
 	/**
+	 * Number of dumps it took to create this run.
+	 *
+	 * If the run was produced by a memory dump, it is 1.
+	 * If the run was produced by a minor compaction, it
+	 * is is the sum of dump counts of compacted runs.
+	 * If the run was produced by a major compaction, it
+	 * is is the sum of dump counts of compacted runs
+	 * minus the dump count of the last (greatest) run.
+	 *
+	 * This way, by looking at the last level run in an LSM
+	 * tree, we can tell how many dumps it took to compact
+	 * it last time.
+	 */
+	uint32_t dump_count;
+	/**
 	 * Run reference counter, the run is deleted once it hits 0.
 	 * A new run is created with the reference counter set to 1.
 	 * A run is referenced by each slice created for it and each
@@ -169,6 +184,11 @@ struct vy_slice {
 	 */
 	struct tuple *begin;
 	struct tuple *end;
+	/**
+	 * Random seed used for compaction randomization.
+	 * Lays in range [0, RAND_MAX].
+	 */
+	int seed;
 	/**
 	 * Number of async users of this slice. Slice must not
 	 * be removed until it hits 0. Used by the iterator to
@@ -597,6 +617,8 @@ struct vy_run_writer {
 	 * Current page info capacity. Can grow with page number.
 	 */
 	uint32_t page_info_capacity;
+	/** Don't use compression while writing xlog files. */
+	bool no_compression;
 	/** Xlog to write data. */
 	struct xlog data_xlog;
 	/** Bloom filter false positive rate. */
@@ -617,7 +639,7 @@ int
 vy_run_writer_create(struct vy_run_writer *writer, struct vy_run *run,
 		     const char *dirpath, uint32_t space_id, uint32_t iid,
 		     struct key_def *cmp_def, struct key_def *key_def,
-		     uint64_t page_size, double bloom_fpr);
+		     uint64_t page_size, double bloom_fpr, bool no_compression);
 
 /**
  * Write a specified statement into a run.

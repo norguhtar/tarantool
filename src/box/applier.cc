@@ -207,11 +207,12 @@ applier_connect(struct applier *applier)
 	}
 
 	if (applier->version_id != greeting.version_id) {
-		say_info("remote master is %u.%u.%u at %s",
+		say_info("remote master %s at %s running Tarantool %u.%u.%u",
+			 tt_uuid_str(&greeting.uuid),
+			 sio_strfaddr(&applier->addr, applier->addr_len),
 			 version_id_major(greeting.version_id),
 			 version_id_minor(greeting.version_id),
-			 version_id_patch(greeting.version_id),
-			 sio_strfaddr(&applier->addr, applier->addr_len));
+			 version_id_patch(greeting.version_id));
 	}
 
 	/* Save the remote instance version and UUID on connect. */
@@ -224,22 +225,26 @@ applier_connect(struct applier *applier)
 	/*
 	 * Send an IPROTO_VOTE request to fetch the master's ballot
 	 * before proceeding to "join". It will be used for leader
-	 * election on bootstrap.
+	 * election on bootstrap. Do not send to older masters
+	 * - they would stop replication upon receiving an unknown
+	 *  request type.
 	 */
-	xrow_encode_vote(&row);
-	coio_write_xrow(coio, &row);
-	coio_read_xrow(coio, ibuf, &row);
-	if (row.type == IPROTO_OK) {
-		xrow_decode_ballot_xc(&row, &applier->ballot);
-	} else try {
-		xrow_decode_error_xc(&row);
-	} catch (ClientError *e) {
-		if (e->errcode() != ER_UNKNOWN_REQUEST_TYPE)
-			e->raise();
-		/*
-		 * Master isn't aware of IPROTO_VOTE request.
-		 * It's OK - we can proceed without it.
-		 */
+	if (applier->version_id >= version_id(1, 9, 0)) {
+		xrow_encode_vote(&row);
+		coio_write_xrow(coio, &row);
+		coio_read_xrow(coio, ibuf, &row);
+		if (row.type == IPROTO_OK) {
+			xrow_decode_ballot_xc(&row, &applier->ballot);
+		} else try {
+			xrow_decode_error_xc(&row);
+		} catch (ClientError *e) {
+			if (e->errcode() != ER_UNKNOWN_REQUEST_TYPE)
+				e->raise();
+			/*
+			 * Master isn't aware of IPROTO_VOTE request.
+			 * It's OK - we can proceed without it.
+			 */
+		}
 	}
 
 	applier_set_state(applier, APPLIER_CONNECTED);
@@ -392,8 +397,11 @@ applier_subscribe(struct applier *applier)
 	struct xrow_header row;
 	struct vclock remote_vclock_at_subscribe;
 
+	struct vclock vclock;
+	vclock_create(&vclock);
+	vclock_copy(&vclock, &replicaset.vclock);
 	xrow_encode_subscribe_xc(&row, &REPLICASET_UUID, &INSTANCE_UUID,
-				 &replicaset.vclock);
+				 &vclock);
 	coio_write_xrow(coio, &row);
 
 	/* Read SUBSCRIBE response */
@@ -411,6 +419,11 @@ applier_subscribe(struct applier *applier)
 		 */
 		vclock_create(&remote_vclock_at_subscribe);
 		xrow_decode_vclock_xc(&row, &remote_vclock_at_subscribe);
+
+		say_info("subscribed");
+		say_info("remote vclock %s local vclock %s",
+			 vclock_to_string(&remote_vclock_at_subscribe),
+			 vclock_to_string(&vclock));
 	}
 	/*
 	 * Tarantool < 1.6.7:
@@ -512,34 +525,18 @@ applier_subscribe(struct applier *applier)
 
 		applier->lag = ev_now(loop()) - row.tm;
 		applier->last_row_time = ev_monotonic_now(loop());
-
+		struct replica *replica = replica_by_id(row.replica_id);
+		struct latch *latch = (replica ? &replica->order_latch :
+				       &replicaset.applier.order_latch);
+		/*
+		 * In a full mesh topology, the same set of changes
+		 * may arrive via two concurrently running appliers.
+		 * Hence we need a latch to strictly order all changes
+		 * that belong to the same server id.
+		 */
+		latch_lock(latch);
 		if (vclock_get(&replicaset.vclock, row.replica_id) < row.lsn) {
-			/**
-			 * Promote the replica set vclock before
-			 * applying the row. If there is an
-			 * exception (conflict) applying the row,
-			 * the row is skipped when the replication
-			 * is resumed.
-			 */
-			vclock_follow_xrow(&replicaset.vclock, &row);
-			struct replica *replica = replica_by_id(row.replica_id);
-			struct latch *latch = (replica ? &replica->order_latch :
-					       &replicaset.applier.order_latch);
-			/*
-			 * In a full mesh topology, the same set
-			 * of changes may arrive via two
-			 * concurrently running appliers. Thanks
-			 * to vclock_follow() above, the first row
-			 * in the set will be skipped - but the
-			 * remaining may execute out of order,
-			 * when the following xstream_write()
-			 * yields on WAL. Hence we need a latch to
-			 * strictly order all changes which belong
-			 * to the same server id.
-			 */
-			latch_lock(latch);
 			int res = xstream_write(applier->subscribe_stream, &row);
-			latch_unlock(latch);
 			if (res != 0) {
 				struct error *e = diag_last_error(diag_get());
 				/**
@@ -550,10 +547,14 @@ applier_subscribe(struct applier *applier)
 				    box_error_code(e) == ER_TUPLE_FOUND &&
 				    replication_skip_conflict)
 					diag_clear(diag_get());
-				else
+				else {
+					latch_unlock(latch);
 					diag_raise();
+				}
 			}
 		}
+		latch_unlock(latch);
+
 		if (applier->state == APPLIER_SYNC ||
 		    applier->state == APPLIER_FOLLOW)
 			fiber_cond_signal(&applier->writer_cond);

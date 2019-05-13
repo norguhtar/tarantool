@@ -136,18 +136,69 @@ lbox_stat_reset(struct lua_State *L)
 	return 0;
 }
 
+/**
+ * Push a table with a network metric to a Lua stack.
+ *
+ * Expects one argument with a name of a needed metric. The pushed
+ * table contains some subset of 'total', 'rps', 'current' fields.
+ *
+ * Metrics are the same as in lbox_stat_net_call().
+ */
 static int
 lbox_stat_net_index(struct lua_State *L)
 {
-	luaL_checkstring(L, -1);
-	return rmean_foreach(rmean_net, seek_stat_item, L);
+	const char *key = luaL_checkstring(L, -1);
+	if (rmean_foreach(rmean_net, seek_stat_item, L) == 0)
+		return 0;
+
+	if (strcmp(key, "CONNECTIONS") == 0) {
+		lua_pushstring(L, "current");
+		lua_pushnumber(L, iproto_connection_count());
+		lua_rawset(L, -3);
+	} else if (strcmp(key, "REQUESTS") == 0) {
+		lua_pushstring(L, "current");
+		lua_pushnumber(L, iproto_request_count());
+		lua_rawset(L, -3);
+	}
+	return 1;
 }
 
+/**
+ * Push a table of network metrics to a Lua stack.
+ *
+ * Metrics and their fields are:
+ *
+ * - SENT (packets): total, rps;
+ * - RECEIVED (packets): total, rps;
+ * - CONNECTIONS: current.
+ *
+ * These fields have the following meaning:
+ *
+ * - total -- amount of events since start;
+ * - rps -- amount of events per second, mean over last 5 seconds;
+ * - current -- amount of resources currently hold (say, number of
+ *   open connections).
+ */
 static int
 lbox_stat_net_call(struct lua_State *L)
 {
 	lua_newtable(L);
 	rmean_foreach(rmean_net, set_stat_item, L);
+
+	lua_pushstring(L, "CONNECTIONS");
+	lua_rawget(L, -2);
+	lua_pushstring(L, "current");
+	lua_pushnumber(L, iproto_connection_count());
+	lua_rawset(L, -3);
+	lua_pop(L, 1);
+
+	lua_pushstring(L, "REQUESTS");
+	lua_rawget(L, -2);
+	lua_pushstring(L, "current");
+	lua_pushnumber(L, iproto_request_count());
+	lua_rawset(L, -3);
+	lua_pop(L, 1);
+
 	return 1;
 }
 

@@ -70,7 +70,6 @@
 #include "info.h"
 #include "column_mask.h"
 #include "trigger.h"
-#include "session.h"
 #include "wal.h" /* wal_mode() */
 
 /**
@@ -245,6 +244,27 @@ static struct trigger on_replace_vinyl_deferred_delete;
 /** {{{ Introspection */
 
 static void
+vy_info_append_scheduler(struct vy_env *env, struct info_handler *h)
+{
+	struct vy_scheduler_stat *stat = &env->scheduler.stat;
+
+	info_table_begin(h, "scheduler");
+	info_append_int(h, "tasks_inprogress", stat->tasks_inprogress);
+	info_append_int(h, "tasks_completed", stat->tasks_completed);
+	info_append_int(h, "tasks_failed", stat->tasks_failed);
+	info_append_int(h, "dump_count", stat->dump_count);
+	info_append_double(h, "dump_time", stat->dump_time);
+	info_append_int(h, "dump_input", stat->dump_input);
+	info_append_int(h, "dump_output", stat->dump_output);
+	info_append_double(h, "compaction_time", stat->compaction_time);
+	info_append_int(h, "compaction_input", stat->compaction_input);
+	info_append_int(h, "compaction_output", stat->compaction_output);
+	info_append_int(h, "compaction_queue",
+			env->lsm_env.compaction_queue_size);
+	info_table_end(h); /* scheduler */
+}
+
+static void
 vy_info_append_regulator(struct vy_env *env, struct info_handler *h)
 {
 	struct vy_regulator *r = &env->regulator;
@@ -253,6 +273,8 @@ vy_info_append_regulator(struct vy_env *env, struct info_handler *h)
 	info_append_int(h, "write_rate", r->write_rate);
 	info_append_int(h, "dump_bandwidth", r->dump_bandwidth);
 	info_append_int(h, "dump_watermark", r->dump_watermark);
+	info_append_int(h, "rate_limit", vy_quota_get_rate_limit(r->quota,
+							VY_QUOTA_CONSUMER_TX));
 	info_table_end(h); /* regulator */
 }
 
@@ -295,24 +317,10 @@ vy_info_append_memory(struct vy_env *env, struct info_handler *h)
 static void
 vy_info_append_disk(struct vy_env *env, struct info_handler *h)
 {
-	struct vy_disk_stat *stat = &env->lsm_env.disk_stat;
-
 	info_table_begin(h, "disk");
-
-	info_append_int(h, "data", stat->data);
-	info_append_int(h, "index", stat->index);
-
-	info_table_begin(h, "dump");
-	info_append_int(h, "in", stat->dump.in);
-	info_append_int(h, "out", stat->dump.out);
-	info_table_end(h); /* dump */
-
-	info_table_begin(h, "compact");
-	info_append_int(h, "in", stat->compact.in);
-	info_append_int(h, "out", stat->compact.out);
-	info_append_int(h, "queue", stat->compact.queue);
-	info_table_end(h); /* compact */
-
+	info_append_int(h, "data", env->lsm_env.disk_data_size);
+	info_append_int(h, "index", env->lsm_env.disk_index_size);
+	info_append_int(h, "data_compacted", env->lsm_env.compacted_data_size);
 	info_table_end(h); /* disk */
 }
 
@@ -325,6 +333,7 @@ vinyl_engine_stat(struct vinyl_engine *vinyl, struct info_handler *h)
 	vy_info_append_tx(env, h);
 	vy_info_append_memory(env, h);
 	vy_info_append_disk(env, h);
+	vy_info_append_scheduler(env, h);
 	vy_info_append_regulator(env, h);
 	info_end(h);
 }
@@ -371,6 +380,7 @@ vinyl_index_stat(struct index *index, struct info_handler *h)
 
 	info_append_int(h, "lookup", stat->lookup);
 	vy_info_append_stmt_counter(h, "get", &stat->get);
+	vy_info_append_stmt_counter(h, "skip", &stat->skip);
 	vy_info_append_stmt_counter(h, "put", &stat->put);
 
 	info_table_begin(h, "latency");
@@ -397,6 +407,8 @@ vinyl_index_stat(struct index *index, struct info_handler *h)
 
 	info_table_begin(h, "disk");
 	vy_info_append_disk_stmt_counter(h, NULL, &stat->disk.count);
+	vy_info_append_disk_stmt_counter(h, "last_level",
+					 &stat->disk.last_level_count);
 	info_table_begin(h, "statement");
 	info_append_int(h, "inserts", stat->disk.stmt.inserts);
 	info_append_int(h, "replaces", stat->disk.stmt.replaces);
@@ -414,15 +426,17 @@ vinyl_index_stat(struct index *index, struct info_handler *h)
 	info_table_end(h); /* iterator */
 	info_table_begin(h, "dump");
 	info_append_int(h, "count", stat->disk.dump.count);
-	vy_info_append_stmt_counter(h, "in", &stat->disk.dump.in);
-	vy_info_append_disk_stmt_counter(h, "out", &stat->disk.dump.out);
+	info_append_double(h, "time", stat->disk.dump.time);
+	vy_info_append_stmt_counter(h, "input", &stat->disk.dump.input);
+	vy_info_append_disk_stmt_counter(h, "output", &stat->disk.dump.output);
 	info_table_end(h); /* dump */
-	info_table_begin(h, "compact");
-	info_append_int(h, "count", stat->disk.compact.count);
-	vy_info_append_disk_stmt_counter(h, "in", &stat->disk.compact.in);
-	vy_info_append_disk_stmt_counter(h, "out", &stat->disk.compact.out);
-	vy_info_append_disk_stmt_counter(h, "queue", &stat->disk.compact.queue);
-	info_table_end(h); /* compact */
+	info_table_begin(h, "compaction");
+	info_append_int(h, "count", stat->disk.compaction.count);
+	info_append_double(h, "time", stat->disk.compaction.time);
+	vy_info_append_disk_stmt_counter(h, "input", &stat->disk.compaction.input);
+	vy_info_append_disk_stmt_counter(h, "output", &stat->disk.compaction.output);
+	vy_info_append_disk_stmt_counter(h, "queue", &stat->disk.compaction.queue);
+	info_table_end(h); /* compaction */
 	info_append_int(h, "index_size", lsm->page_index_size);
 	info_append_int(h, "bloom_size", lsm->bloom_size);
 	info_table_end(h); /* disk */
@@ -446,11 +460,14 @@ vinyl_index_stat(struct index *index, struct info_handler *h)
 	info_table_end(h); /* iterator */
 	info_table_end(h); /* txw */
 
+	info_append_int(h, "range_size", vy_lsm_range_size(lsm));
 	info_append_int(h, "range_count", lsm->range_count);
 	info_append_int(h, "run_count", lsm->run_count);
 	info_append_int(h, "run_avg", lsm->run_count / lsm->range_count);
 	histogram_snprint(buf, sizeof(buf), lsm->run_hist);
 	info_append_str(h, "run_histogram", buf);
+	info_append_int(h, "dumps_per_compaction",
+			vy_lsm_dumps_per_compaction(lsm));
 
 	info_end(h);
 }
@@ -466,6 +483,7 @@ vinyl_index_reset_stat(struct index *index)
 	stat->lookup = 0;
 	latency_reset(&stat->latency);
 	vy_stmt_counter_reset(&stat->get);
+	vy_stmt_counter_reset(&stat->skip);
 	vy_stmt_counter_reset(&stat->put);
 	memset(&stat->upsert, 0, sizeof(stat->upsert));
 
@@ -476,13 +494,15 @@ vinyl_index_reset_stat(struct index *index)
 
 	/* Dump */
 	stat->disk.dump.count = 0;
-	vy_stmt_counter_reset(&stat->disk.dump.in);
-	vy_disk_stmt_counter_reset(&stat->disk.dump.out);
+	stat->disk.dump.time = 0;
+	vy_stmt_counter_reset(&stat->disk.dump.input);
+	vy_disk_stmt_counter_reset(&stat->disk.dump.output);
 
 	/* Compaction */
-	stat->disk.compact.count = 0;
-	vy_disk_stmt_counter_reset(&stat->disk.compact.in);
-	vy_disk_stmt_counter_reset(&stat->disk.compact.out);
+	stat->disk.compaction.count = 0;
+	stat->disk.compaction.time = 0;
+	vy_disk_stmt_counter_reset(&stat->disk.compaction.input);
+	vy_disk_stmt_counter_reset(&stat->disk.compaction.output);
 
 	/* Cache */
 	cache_stat->lookup = 0;
@@ -514,11 +534,8 @@ vinyl_engine_reset_stat(struct engine *engine)
 	struct tx_manager *xm = env->xm;
 	memset(&xm->stat, 0, sizeof(xm->stat));
 
-	struct vy_disk_stat *disk_stat = &env->lsm_env.disk_stat;
-	disk_stat->dump.in = 0;
-	disk_stat->dump.out = 0;
-	disk_stat->compact.in = 0;
-	disk_stat->compact.out = 0;
+	vy_scheduler_reset_stat(&env->scheduler);
+	vy_regulator_reset_stat(&env->regulator);
 }
 
 /** }}} Introspection */
@@ -749,18 +766,16 @@ vinyl_index_open(struct index *index)
 		diag_set(SystemError, "can not access vinyl data directory");
 		return -1;
 	}
-	int rc;
 	switch (env->status) {
 	case VINYL_ONLINE:
 		/*
 		 * The recovery is complete, simply
 		 * create a new index.
 		 */
-		rc = vy_lsm_create(lsm);
-		if (rc == 0) {
-			/* Make sure reader threads are up and running. */
-			vy_run_env_enable_coio(&env->run_env);
-		}
+		if (vy_lsm_create(lsm) != 0)
+			return -1;
+		/* Make sure reader threads are up and running. */
+		vy_run_env_enable_coio(&env->run_env);
 		break;
 	case VINYL_INITIAL_RECOVERY_REMOTE:
 	case VINYL_FINAL_RECOVERY_REMOTE:
@@ -769,7 +784,8 @@ vinyl_index_open(struct index *index)
 		 * exist locally, and we should create the
 		 * index directory from scratch.
 		 */
-		rc = vy_lsm_create(lsm);
+		if (vy_lsm_create(lsm) != 0)
+			return -1;
 		break;
 	case VINYL_INITIAL_RECOVERY_LOCAL:
 	case VINYL_FINAL_RECOVERY_LOCAL:
@@ -779,17 +795,30 @@ vinyl_index_open(struct index *index)
 		 * have already been created, so try to load
 		 * the index files from it.
 		 */
-		rc = vy_lsm_recover(lsm, env->recovery, &env->run_env,
-				    vclock_sum(env->recovery_vclock),
-				    env->status == VINYL_INITIAL_RECOVERY_LOCAL,
-				    env->force_recovery);
+		if (vy_lsm_recover(lsm, env->recovery, &env->run_env,
+				   vclock_sum(env->recovery_vclock),
+				   env->status == VINYL_INITIAL_RECOVERY_LOCAL,
+				   env->force_recovery) != 0)
+			return -1;
 		break;
 	default:
 		unreachable();
 	}
-	if (rc == 0)
+	/*
+	 * Add the new LSM tree to the scheduler so that it can
+	 * be dumped and compacted.
+	 *
+	 * Note, during local recovery an LSM tree may be marked
+	 * as dropped, which means that it will be dropped before
+	 * recovery is complete. In this case there's no need in
+	 * letting the scheduler know about it.
+	 */
+	if (!lsm->is_dropped)
 		vy_scheduler_add_lsm(&env->scheduler, lsm);
-	return rc;
+	else
+		assert(env->status == VINYL_INITIAL_RECOVERY_LOCAL ||
+		       env->status == VINYL_FINAL_RECOVERY_LOCAL);
+	return 0;
 }
 
 static void
@@ -911,8 +940,6 @@ vinyl_index_commit_drop(struct index *index, int64_t lsn)
 	struct vy_env *env = vy_env(index->engine);
 	struct vy_lsm *lsm = vy_lsm(index);
 
-	vy_scheduler_remove_lsm(&env->scheduler, lsm);
-
 	/*
 	 * We can't abort here, because the index drop request has
 	 * already been written to WAL. So if we fail to write the
@@ -923,6 +950,8 @@ vinyl_index_commit_drop(struct index *index, int64_t lsn)
 	 */
 	if (env->status == VINYL_FINAL_RECOVERY_LOCAL && lsm->is_dropped)
 		return;
+
+	vy_scheduler_remove_lsm(&env->scheduler, lsm);
 
 	lsm->is_dropped = true;
 
@@ -997,27 +1026,43 @@ vinyl_space_prepare_alter(struct space *old_space, struct space *new_space)
 	return 0;
 }
 
+static void
+vinyl_space_invalidate(struct space *space)
+{
+	struct vy_env *env = vy_env(space->engine);
+	/*
+	 * Abort all transactions involving the invalidated space.
+	 * An aborted transaction doesn't allow any DML/DQL requests
+	 * so the space won't be used anymore and can be safely
+	 * destroyed.
+	 *
+	 * There's a subtle corner case though - a transaction can
+	 * be reading disk from a DML request right now, with this
+	 * space passed to it in the argument list. However, it's
+	 * handled as well: the iterator will return an error as
+	 * soon as it's done reading disk, which will make the DML
+	 * request bail out early, without dereferencing the space.
+	 */
+	tx_manager_abort_writers_for_ddl(env->xm, space);
+}
+
 /**
  * This function is called after installing on_replace trigger
  * used for propagating changes done during DDL. It aborts all
- * rw transactions affecting the given LSM tree that began
+ * rw transactions affecting the given space that began
  * before the trigger was installed so that DDL doesn't miss
  * their working set.
  */
-static int
-vy_abort_writers_for_ddl(struct vy_env *env, struct vy_lsm *lsm)
+static void
+vy_abort_writers_for_ddl(struct vy_env *env, struct space *space)
 {
-	if (tx_manager_abort_writers(env->xm, lsm) != 0)
-		return -1;
+	tx_manager_abort_writers_for_ddl(env->xm, space);
 	/*
 	 * Wait for prepared transactions to complete
 	 * (we can't abort them as they reached WAL).
 	 */
 	struct vclock unused;
-	if (wal_checkpoint(&unused, false) != 0)
-		return -1;
-
-	return 0;
+	wal_checkpoint(&unused, false);
 }
 
 /** Argument passed to vy_check_format_on_replace(). */
@@ -1078,10 +1123,6 @@ vinyl_space_check_format(struct space *space, struct tuple_format *format)
 	 */
 	struct vy_lsm *pk = vy_lsm(space->index[0]);
 
-	struct tuple *key = vy_stmt_new_select(pk->env->key_format, NULL, 0);
-	if (key == NULL)
-		return -1;
-
 	struct trigger on_replace;
 	struct vy_check_format_ctx ctx;
 	ctx.format = format;
@@ -1090,13 +1131,12 @@ vinyl_space_check_format(struct space *space, struct tuple_format *format)
 	trigger_create(&on_replace, vy_check_format_on_replace, &ctx, NULL);
 	trigger_add(&space->on_replace, &on_replace);
 
-	int rc = vy_abort_writers_for_ddl(env, pk);
-	if (rc != 0)
-		goto out;
+	vy_abort_writers_for_ddl(env, space);
 
 	struct vy_read_iterator itr;
-	vy_read_iterator_open(&itr, pk, NULL, ITER_ALL, key,
+	vy_read_iterator_open(&itr, pk, NULL, ITER_ALL, pk->env->empty_key,
 			      &env->xm->p_committed_read_view);
+	int rc;
 	int loops = 0;
 	struct tuple *tuple;
 	while ((rc = vy_read_iterator_next(&itr, &tuple)) == 0) {
@@ -1120,10 +1160,9 @@ vinyl_space_check_format(struct space *space, struct tuple_format *format)
 			break;
 	}
 	vy_read_iterator_close(&itr);
-out:
+
 	diag_destroy(&ctx.diag);
 	trigger_clear(&on_replace);
-	tuple_unref(key);
 	return rc;
 }
 
@@ -1279,6 +1318,8 @@ vy_get_by_secondary_tuple(struct vy_lsm *lsm, struct vy_tx *tx,
 {
 	assert(lsm->index_id > 0);
 
+	lsm->pk->stat.lookup++;
+
 	if (vy_point_lookup(lsm->pk, tx, rv, tuple, result) != 0)
 		return -1;
 
@@ -1292,7 +1333,10 @@ vy_get_by_secondary_tuple(struct vy_lsm *lsm, struct vy_tx *tx,
 		 * propagated to the secondary index yet. In this
 		 * case silently skip this tuple.
 		 */
+		vy_stmt_counter_acct_tuple(&lsm->stat.skip, tuple);
 		if (*result != NULL) {
+			vy_stmt_counter_acct_tuple(&lsm->pk->stat.skip,
+						   *result);
 			tuple_unref(*result);
 			*result = NULL;
 		}
@@ -1322,6 +1366,7 @@ vy_get_by_secondary_tuple(struct vy_lsm *lsm, struct vy_tx *tx,
 	if ((*rv)->vlsn == INT64_MAX)
 		vy_cache_add(&lsm->pk->cache, *result, NULL, tuple, ITER_EQ);
 
+	vy_stmt_counter_acct_tuple(&lsm->pk->stat.get, *result);
 	return 0;
 }
 
@@ -1342,6 +1387,8 @@ vy_get(struct vy_lsm *lsm, struct vy_tx *tx,
        const struct vy_read_view **rv,
        struct tuple *key, struct tuple **result)
 {
+	double start_time = ev_monotonic_now(loop());
+	double latency;
 	/*
 	 * tx can be NULL, for example, if an user calls
 	 * space.index.get({key}).
@@ -1351,7 +1398,9 @@ vy_get(struct vy_lsm *lsm, struct vy_tx *tx,
 	int rc;
 	struct tuple *tuple;
 
-	if (tuple_field_count(key) >= lsm->cmp_def->part_count) {
+	lsm->stat.lookup++;
+
+	if (vy_stmt_is_full_key(key, lsm->cmp_def)) {
 		/*
 		 * Use point lookup for a full key.
 		 */
@@ -1370,7 +1419,7 @@ vy_get(struct vy_lsm *lsm, struct vy_tx *tx,
 		}
 		if ((*rv)->vlsn == INT64_MAX)
 			vy_cache_add(&lsm->cache, *result, NULL, key, ITER_EQ);
-		return 0;
+		goto out;
 	}
 
 	struct vy_read_iterator itr;
@@ -1389,7 +1438,21 @@ vy_get(struct vy_lsm *lsm, struct vy_tx *tx,
 	if (rc == 0)
 		vy_read_iterator_cache_add(&itr, *result);
 	vy_read_iterator_close(&itr);
-	return rc;
+	if (rc != 0)
+		return -1;
+out:
+	latency = ev_monotonic_now(loop()) - start_time;
+	latency_collect(&lsm->stat.latency, latency);
+
+	if (latency > lsm->env->too_long_threshold) {
+		say_warn_ratelimited("%s: get(%s) => %s "
+				     "took too long: %.3f sec",
+				     vy_lsm_name(lsm), tuple_str(key),
+				     tuple_str(*result), latency);
+	}
+	if (*result != NULL)
+		vy_stmt_counter_acct_tuple(&lsm->stat.get, *result);
+	return 0;
 }
 
 /**
@@ -2311,15 +2374,16 @@ vinyl_engine_prepare(struct engine *engine, struct txn *txn)
 	 * available for the admin to track the lag so let the applier
 	 * wait as long as necessary for memory dump to complete.
 	 */
-	double timeout = (current_session()->type != SESSION_TYPE_APPLIER ?
-			  env->timeout : TIMEOUT_INFINITY);
+	double timeout = (tx->is_applier_session ?
+			  TIMEOUT_INFINITY : env->timeout);
 	/*
 	 * Reserve quota needed by the transaction before allocating
 	 * memory. Since this may yield, which opens a time window for
 	 * the transaction to be sent to read view or aborted, we call
 	 * it before checking for conflicts.
 	 */
-	if (vy_quota_use(&env->quota, tx->write_size, timeout) != 0)
+	if (vy_quota_use(&env->quota, VY_QUOTA_CONSUMER_TX,
+			 tx->write_size, timeout) != 0)
 		return -1;
 
 	size_t mem_used_before = lsregion_used(&env->mem_env.allocator);
@@ -2328,8 +2392,8 @@ vinyl_engine_prepare(struct engine *engine, struct txn *txn)
 
 	size_t mem_used_after = lsregion_used(&env->mem_env.allocator);
 	assert(mem_used_after >= mem_used_before);
-	vy_quota_adjust(&env->quota, tx->write_size,
-			mem_used_after - mem_used_before);
+	vy_quota_adjust(&env->quota, VY_QUOTA_CONSUMER_TX,
+			tx->write_size, mem_used_after - mem_used_before);
 	vy_regulator_check_dump_watermark(&env->regulator);
 	return rc;
 }
@@ -2354,7 +2418,8 @@ vinyl_engine_commit(struct engine *engine, struct txn *txn)
 	size_t mem_used_after = lsregion_used(&env->mem_env.allocator);
 	assert(mem_used_after >= mem_used_before);
 	/* We can't abort the transaction at this point, use force. */
-	vy_quota_force_use(&env->quota, mem_used_after - mem_used_before);
+	vy_quota_force_use(&env->quota, VY_QUOTA_CONSUMER_TX,
+			   mem_used_after - mem_used_before);
 	vy_regulator_check_dump_watermark(&env->regulator);
 
 	txn->engine_tx = NULL;
@@ -2384,8 +2449,7 @@ vinyl_engine_begin_statement(struct engine *engine, struct txn *txn)
 	struct vy_tx *tx = txn->engine_tx;
 	struct txn_stmt *stmt = txn_current_stmt(txn);
 	assert(tx != NULL);
-	stmt->engine_savepoint = vy_tx_savepoint(tx);
-	return 0;
+	return vy_tx_begin_statement(tx, stmt->space, &stmt->engine_savepoint);
 }
 
 static void
@@ -2395,7 +2459,14 @@ vinyl_engine_rollback_statement(struct engine *engine, struct txn *txn,
 	(void)engine;
 	struct vy_tx *tx = txn->engine_tx;
 	assert(tx != NULL);
-	vy_tx_rollback_to_savepoint(tx, stmt->engine_savepoint);
+	vy_tx_rollback_statement(tx, stmt->engine_savepoint);
+}
+
+static void
+vinyl_engine_switch_to_ro(struct engine *engine)
+{
+	struct vy_env *env = vy_env(engine);
+	tx_manager_abort_writers_for_ro(env->xm);
 }
 
 /* }}} Public API of transaction control */
@@ -2441,7 +2512,6 @@ vy_env_dump_complete_cb(struct vy_scheduler *scheduler,
 	size_t mem_used_after = lsregion_used(allocator);
 	assert(mem_used_after <= mem_used_before);
 	size_t mem_dumped = mem_used_before - mem_used_after;
-	say_info("dumped %zu bytes in %.1f sec", mem_dumped, dump_duration);
 	/*
 	 * In certain corner cases, vy_quota_release() may need
 	 * to trigger a new dump. Notify the regulator about dump
@@ -2450,6 +2520,9 @@ vy_env_dump_complete_cb(struct vy_scheduler *scheduler,
 	 */
 	vy_regulator_dump_complete(&env->regulator, mem_dumped, dump_duration);
 	vy_quota_release(quota, mem_dumped);
+
+	vy_regulator_update_rate_limit(&env->regulator, &scheduler->stat,
+				       scheduler->compaction_pool.size);
 }
 
 static struct vy_squash_queue *
@@ -3165,7 +3238,8 @@ vinyl_space_apply_initial_join_row(struct space *space, struct request *request)
 	 * quota accounting.
 	 */
 	size_t reserved = tx->write_size;
-	if (vy_quota_use(&env->quota, reserved, TIMEOUT_INFINITY) != 0)
+	if (vy_quota_use(&env->quota, VY_QUOTA_CONSUMER_TX,
+			 reserved, TIMEOUT_INFINITY) != 0)
 		unreachable();
 
 	size_t mem_used_before = lsregion_used(&env->mem_env.allocator);
@@ -3184,7 +3258,7 @@ vinyl_space_apply_initial_join_row(struct space *space, struct request *request)
 	size_t mem_used_after = lsregion_used(&env->mem_env.allocator);
 	assert(mem_used_after >= mem_used_before);
 	size_t used = mem_used_after - mem_used_before;
-	vy_quota_adjust(&env->quota, reserved, used);
+	vy_quota_adjust(&env->quota, VY_QUOTA_CONSUMER_TX, reserved, used);
 	vy_regulator_check_dump_watermark(&env->regulator);
 	return rc;
 }
@@ -3295,24 +3369,22 @@ vy_gc(struct vy_env *env, struct vy_recovery *recovery,
 	}
 }
 
-static int
-vinyl_engine_collect_garbage(struct engine *engine, int64_t lsn)
+static void
+vinyl_engine_collect_garbage(struct engine *engine, const struct vclock *vclock)
 {
 	struct vy_env *env = vy_env(engine);
 
 	/* Cleanup old metadata log files. */
-	vy_log_collect_garbage(lsn);
+	vy_log_collect_garbage(vclock);
 
 	/* Cleanup run files. */
-	int64_t signature = vy_log_signature();
-	struct vy_recovery *recovery = vy_recovery_new(signature, 0);
+	struct vy_recovery *recovery = vy_recovery_new(vy_log_signature(), 0);
 	if (recovery == NULL) {
 		say_error("failed to recover vylog for garbage collection");
-		return 0;
+		return;
 	}
-	vy_gc(env, recovery, VY_GC_DROPPED, lsn);
+	vy_gc(env, recovery, VY_GC_DROPPED, vclock_sum(vclock));
 	vy_recovery_delete(recovery);
-	return 0;
 }
 
 /* }}} Garbage collection */
@@ -3507,7 +3579,7 @@ vy_squash_process(struct vy_squash *squash)
 		 * so there's no need in invalidating the cache.
 		 */
 		vy_mem_commit_stmt(mem, region_stmt);
-		vy_quota_force_use(&env->quota,
+		vy_quota_force_use(&env->quota, VY_QUOTA_CONSUMER_TX,
 				   mem_used_after - mem_used_before);
 		vy_regulator_check_dump_watermark(&env->regulator);
 	}
@@ -3655,7 +3727,7 @@ vinyl_iterator_check_tx(struct vinyl_iterator *it)
 		diag_set(ClientError, ER_CURSOR_NO_TRANSACTION);
 		return -1;
 	}
-	if (it->tx->state == VINYL_TX_ABORT || it->tx->read_view->is_aborted) {
+	if (it->tx->state == VINYL_TX_ABORT) {
 		/* Transaction read view was aborted. */
 		diag_set(ClientError, ER_READ_VIEW_ABORTED);
 		return -1;
@@ -3663,9 +3735,33 @@ vinyl_iterator_check_tx(struct vinyl_iterator *it)
 	return 0;
 }
 
+static void
+vinyl_iterator_account_read(struct vinyl_iterator *it, double start_time,
+			    struct tuple *result)
+{
+	struct vy_lsm *lsm = it->iterator.lsm;
+	struct tuple *key = it->iterator.key;
+	enum iterator_type type = it->iterator.iterator_type;
+
+	double latency = ev_monotonic_now(loop()) - start_time;
+	latency_collect(&lsm->stat.latency, latency);
+
+	if (latency > lsm->env->too_long_threshold) {
+		say_warn_ratelimited("%s: select(%s, %s) => %s "
+				     "took too long: %.3f sec",
+				     vy_lsm_name(lsm), tuple_str(key),
+				     iterator_type_strs[type],
+				     tuple_str(result), latency);
+	}
+	if (result != NULL)
+		vy_stmt_counter_acct_tuple(&lsm->stat.get, result);
+}
+
 static int
 vinyl_iterator_primary_next(struct iterator *base, struct tuple **ret)
 {
+	double start_time = ev_monotonic_now(loop());
+
 	assert(base->next = vinyl_iterator_primary_next);
 	struct vinyl_iterator *it = (struct vinyl_iterator *)base;
 	assert(it->lsm->index_id == 0);
@@ -3675,6 +3771,7 @@ vinyl_iterator_primary_next(struct iterator *base, struct tuple **ret)
 	if (vy_read_iterator_next(&it->iterator, ret) != 0)
 		goto fail;
 	vy_read_iterator_cache_add(&it->iterator, *ret);
+	vinyl_iterator_account_read(it, start_time, *ret);
 	if (*ret == NULL) {
 		/* EOF. Close the iterator immediately. */
 		vinyl_iterator_close(it);
@@ -3690,6 +3787,8 @@ fail:
 static int
 vinyl_iterator_secondary_next(struct iterator *base, struct tuple **ret)
 {
+	double start_time = ev_monotonic_now(loop());
+
 	assert(base->next = vinyl_iterator_secondary_next);
 	struct vinyl_iterator *it = (struct vinyl_iterator *)base;
 	assert(it->lsm->index_id > 0);
@@ -3705,6 +3804,7 @@ next:
 	if (tuple == NULL) {
 		/* EOF. Close the iterator immediately. */
 		vy_read_iterator_cache_add(&it->iterator, NULL);
+		vinyl_iterator_account_read(it, start_time, NULL);
 		vinyl_iterator_close(it);
 		*ret = NULL;
 		return 0;
@@ -3725,6 +3825,7 @@ next:
 	if (*ret == NULL)
 		goto next;
 	vy_read_iterator_cache_add(&it->iterator, *ret);
+	vinyl_iterator_account_read(it, start_time, *ret);
 	tuple_bless(*ret);
 	tuple_unref(*ret);
 	return 0;
@@ -3756,6 +3857,12 @@ vinyl_index_create_iterator(struct index *base, enum iterator_type type,
 		return NULL;
 	}
 
+	struct vy_tx *tx = in_txn() ? in_txn()->engine_tx : NULL;
+	if (tx != NULL && tx->state == VINYL_TX_ABORT) {
+		diag_set(ClientError, ER_TRANSACTION_CONFLICT);
+		return NULL;
+	}
+
 	struct vinyl_iterator *it = mempool_alloc(&env->iterator_pool);
 	if (it == NULL) {
 	        diag_set(OutOfMemory, sizeof(struct vinyl_iterator),
@@ -3779,8 +3886,6 @@ vinyl_index_create_iterator(struct index *base, enum iterator_type type,
 	it->lsm = lsm;
 	vy_lsm_ref(lsm);
 
-	struct vy_tx *tx = in_txn() ? in_txn()->engine_tx : NULL;
-	assert(tx == NULL || tx->state == VINYL_TX_READY);
 	if (tx != NULL) {
 		/*
 		 * Register a trigger that will abort this iterator
@@ -3795,6 +3900,7 @@ vinyl_index_create_iterator(struct index *base, enum iterator_type type,
 	}
 	it->tx = tx;
 
+	lsm->stat.lookup++;
 	vy_read_iterator_open(&it->iterator, lsm, tx, type, it->key,
 			      (const struct vy_read_view **)&tx->read_view);
 	return (struct iterator *)it;
@@ -3813,7 +3919,19 @@ vinyl_index_get(struct index *index, const char *key,
 	const struct vy_read_view **rv = (tx != NULL ? vy_tx_read_view(tx) :
 					  &env->xm->p_global_read_view);
 
-	if (vy_get_by_raw_key(lsm, tx, rv, key, part_count, ret) != 0)
+	if (tx != NULL && tx->state == VINYL_TX_ABORT) {
+		diag_set(ClientError, ER_TRANSACTION_CONFLICT);
+		return -1;
+	}
+
+	/*
+	 * Make sure the LSM tree isn't deleted while we are
+	 * reading from it.
+	 */
+	vy_lsm_ref(lsm);
+	int rc = vy_get_by_raw_key(lsm, tx, rv, key, part_count, ret);
+	vy_lsm_unref(lsm);
+	if (rc != 0)
 		return -1;
 	if (*ret != NULL) {
 		tuple_bless(*ret);
@@ -3898,6 +4016,15 @@ vy_build_on_replace(struct trigger *trigger, void *event)
 	}
 	return;
 err:
+	/*
+	 * No need to abort the DDL request if this transaction
+	 * has been aborted as its changes won't be applied to
+	 * the space anyway. Besides, it might have been aborted
+	 * by the DDL request itself, in which case the build
+	 * context isn't valid and so we must not modify it.
+	 */
+	if (tx->state == VINYL_TX_ABORT)
+		return;
 	ctx->is_failed = true;
 	diag_move(diag_get(), &ctx->diag);
 }
@@ -3983,9 +4110,10 @@ vy_build_insert_tuple(struct vy_env *env, struct vy_lsm *lsm,
 	/* Consume memory quota. Throttle if it is exceeded. */
 	size_t mem_used_after = lsregion_used(&env->mem_env.allocator);
 	assert(mem_used_after >= mem_used_before);
-	vy_quota_force_use(&env->quota, mem_used_after - mem_used_before);
+	vy_quota_force_use(&env->quota, VY_QUOTA_CONSUMER_TX,
+			   mem_used_after - mem_used_before);
 	vy_regulator_check_dump_watermark(&env->regulator);
-	vy_quota_wait(&env->quota);
+	vy_quota_wait(&env->quota, VY_QUOTA_CONSUMER_TX);
 	return rc;
 }
 
@@ -4111,7 +4239,8 @@ vy_build_recover(struct vy_env *env, struct vy_lsm *lsm, struct vy_lsm *pk)
 
 	mem_used_after = lsregion_used(&env->mem_env.allocator);
 	assert(mem_used_after >= mem_used_before);
-	vy_quota_force_use(&env->quota, mem_used_after - mem_used_before);
+	vy_quota_force_use(&env->quota, VY_QUOTA_CONSUMER_TX,
+			   mem_used_after - mem_used_before);
 	return rc;
 }
 
@@ -4145,10 +4274,6 @@ vinyl_space_build_index(struct space *src_space, struct index *new_index,
 	 * may yield, we install an on_replace trigger to forward
 	 * DML requests issued during the build.
 	 */
-	struct tuple *key = vy_stmt_new_select(pk->env->key_format, NULL, 0);
-	if (key == NULL)
-		return -1;
-
 	struct trigger on_replace;
 	struct vy_build_ctx ctx;
 	ctx.lsm = new_lsm;
@@ -4160,13 +4285,12 @@ vinyl_space_build_index(struct space *src_space, struct index *new_index,
 	trigger_create(&on_replace, vy_build_on_replace, &ctx, NULL);
 	trigger_add(&src_space->on_replace, &on_replace);
 
-	int rc = vy_abort_writers_for_ddl(env, pk);
-	if (rc != 0)
-		goto out;
+	vy_abort_writers_for_ddl(env, src_space);
 
 	struct vy_read_iterator itr;
-	vy_read_iterator_open(&itr, pk, NULL, ITER_ALL, key,
+	vy_read_iterator_open(&itr, pk, NULL, ITER_ALL, pk->env->empty_key,
 			      &env->xm->p_committed_read_view);
+	int rc;
 	int loops = 0;
 	struct tuple *tuple;
 	int64_t build_lsn = env->xm->lsn;
@@ -4222,10 +4346,9 @@ vinyl_space_build_index(struct space *src_space, struct index *new_index,
 		diag_move(&ctx.diag, diag_get());
 		rc = -1;
 	}
-out:
+
 	diag_destroy(&ctx.diag);
 	trigger_clear(&on_replace);
-	tuple_unref(key);
 	return rc;
 }
 
@@ -4327,7 +4450,7 @@ vy_deferred_delete_on_replace(struct trigger *trigger, void *event)
 	 */
 	struct vy_env *env = vy_env(space->engine);
 	if (is_first_statement)
-		vy_quota_wait(&env->quota);
+		vy_quota_wait(&env->quota, VY_QUOTA_CONSUMER_COMPACTION);
 
 	/* Create the deferred DELETE statement. */
 	struct vy_lsm *pk = vy_lsm(space->index[0]);
@@ -4414,7 +4537,8 @@ vy_deferred_delete_on_replace(struct trigger *trigger, void *event)
 	}
 	size_t mem_used_after = lsregion_used(&env->mem_env.allocator);
 	assert(mem_used_after >= mem_used_before);
-	vy_quota_force_use(&env->quota, mem_used_after - mem_used_before);
+	vy_quota_force_use(&env->quota, VY_QUOTA_CONSUMER_COMPACTION,
+			   mem_used_after - mem_used_before);
 	vy_regulator_check_dump_watermark(&env->regulator);
 
 	tuple_unref(delete);
@@ -4438,6 +4562,7 @@ static const struct engine_vtab vinyl_engine_vtab = {
 	/* .commit = */ vinyl_engine_commit,
 	/* .rollback_statement = */ vinyl_engine_rollback_statement,
 	/* .rollback = */ vinyl_engine_rollback,
+	/* .switch_to_ro = */ vinyl_engine_switch_to_ro,
 	/* .bootstrap = */ vinyl_engine_bootstrap,
 	/* .begin_initial_recovery = */ vinyl_engine_begin_initial_recovery,
 	/* .begin_final_recovery = */ vinyl_engine_begin_final_recovery,
@@ -4470,6 +4595,7 @@ static const struct space_vtab vinyl_space_vtab = {
 	/* .build_index = */ vinyl_space_build_index,
 	/* .swap_index = */ vinyl_space_swap_index,
 	/* .prepare_alter = */ vinyl_space_prepare_alter,
+	/* .invalidate = */ vinyl_space_invalidate,
 };
 
 static const struct index_vtab vinyl_index_vtab = {

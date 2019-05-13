@@ -117,6 +117,8 @@ struct vy_lsm_stat {
 	int64_t lookup;
 	/** Number of statements read from this LSM tree. */
 	struct vy_stmt_counter get;
+	/** Number of statements skipped on read. */
+	struct vy_stmt_counter skip;
 	/** Number of statements written to this LSM tree. */
 	struct vy_stmt_counter put;
 	/** Read latency. */
@@ -139,6 +141,8 @@ struct vy_lsm_stat {
 	struct {
 		/** Number of statements stored on disk. */
 		struct vy_disk_stmt_counter count;
+		/** Number of statements stored in the last LSM level. */
+		struct vy_disk_stmt_counter last_level_count;
 		/** Statement statistics. */
 		struct vy_stmt_stat stmt;
 		/** Run iterator statistics. */
@@ -147,22 +151,26 @@ struct vy_lsm_stat {
 		struct {
 			/* Number of completed tasks. */
 			int32_t count;
+			/** Time spent on dump tasks, in seconds. */
+			double time;
 			/** Number of input statements. */
-			struct vy_stmt_counter in;
+			struct vy_stmt_counter input;
 			/** Number of output statements. */
-			struct vy_disk_stmt_counter out;
+			struct vy_disk_stmt_counter output;
 		} dump;
 		/** Compaction statistics. */
 		struct {
 			/* Number of completed tasks. */
 			int32_t count;
+			/** Time spent on compaction tasks, in seconds. */
+			double time;
 			/** Number of input statements. */
-			struct vy_disk_stmt_counter in;
+			struct vy_disk_stmt_counter input;
 			/** Number of output statements. */
-			struct vy_disk_stmt_counter out;
+			struct vy_disk_stmt_counter output;
 			/** Number of statements awaiting compaction. */
 			struct vy_disk_stmt_counter queue;
-		} compact;
+		} compaction;
 	} disk;
 	/** TX write set statistics. */
 	struct {
@@ -206,23 +214,32 @@ struct vy_tx_stat {
 };
 
 /**
- * Global disk statistics.
+ * Scheduler statistics.
  *
- * Fields correspond to those of per LSM tree statistics.
- * All counters are given in bytes, uncompressed.
+ * All byte counters are given without taking into account
+ * disk compression.
  */
-struct vy_disk_stat {
-	int64_t data;
-	int64_t index;
-	struct {
-		int64_t in;
-		int64_t out;
-	} dump;
-	struct {
-		int64_t in;
-		int64_t out;
-		int64_t queue;
-	} compact;
+struct vy_scheduler_stat {
+	/** Number of completed tasks. */
+	int32_t tasks_completed;
+	/** Number of failed tasks. */
+	int32_t tasks_failed;
+	/** Number of tasks in progress. */
+	int32_t tasks_inprogress;
+	/** Number of completed memory dumps. */
+	int32_t dump_count;
+	/** Time spent on dump tasks, in seconds. */
+	double dump_time;
+	/** Number of bytes read by dump tasks. */
+	int64_t dump_input;
+	/** Number of bytes written by dump tasks. */
+	int64_t dump_output;
+	/** Time spent on compaction tasks, in seconds. */
+	double compaction_time;
+	/** Number of bytes read by compaction tasks. */
+	int64_t compaction_input;
+	/** Number of bytes written by compaction tasks. */
+	int64_t compaction_output;
 };
 
 static inline int
