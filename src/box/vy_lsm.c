@@ -60,7 +60,7 @@
  * and increase the number of open files. So we never create ranges
  * less than 16 MB.
  */
-static const int64_t VY_MIN_RANGE_SIZE = 16 * 1024 * 1024;
+static const int64_t VY_MIN_RANGE_SIZE = 128 * 1024 * 1024;
 
 /**
  * We want a single compaction job to finish in reasonable time
@@ -70,23 +70,17 @@ static const int64_t VY_MAX_RANGE_SIZE = 2LL * 1024 * 1024 * 1024;
 
 int
 vy_lsm_env_create(struct vy_lsm_env *env, const char *path,
-		  int64_t *p_generation,
+		  int64_t *p_generation, struct tuple_format *key_format,
 		  vy_upsert_thresh_cb upsert_thresh_cb,
 		  void *upsert_thresh_arg)
 {
-	env->key_format = tuple_format_new(&vy_tuple_format_vtab, NULL,
-					   NULL, 0, NULL, 0, 0, NULL, false,
-					   false);
-	if (env->key_format == NULL)
+	env->empty_key = vy_key_new(key_format, NULL, 0);
+	if (env->empty_key == NULL)
 		return -1;
-	tuple_format_ref(env->key_format);
-	env->empty_key = vy_stmt_new_select(env->key_format, NULL, 0);
-	if (env->empty_key == NULL) {
-		tuple_format_unref(env->key_format);
-		return -1;
-	}
 	env->path = path;
 	env->p_generation = p_generation;
+	env->key_format = key_format;
+	tuple_format_ref(key_format);
 	env->upsert_thresh_cb = upsert_thresh_cb;
 	env->upsert_thresh_arg = upsert_thresh_arg;
 	env->too_long_threshold = TIMEOUT_INFINITY;
@@ -161,11 +155,20 @@ vy_lsm_new(struct vy_lsm_env *lsm_env, struct vy_cache_env *cache_env,
 		 */
 		lsm->disk_format = format;
 	} else {
-		lsm->disk_format = tuple_format_new(&vy_tuple_format_vtab, NULL,
-						    &cmp_def, 1, NULL, 0, 0,
-						    NULL, false, false);
-		if (lsm->disk_format == NULL)
-			goto fail_format;
+		/*
+		 * To save disk space, we do not store full tuples
+		 * in secondary index runs. Instead we only store
+		 * extended keys (i.e. keys consisting of secondary
+		 * and primary index parts). This is enough to look
+		 * up a full tuple in the primary index.
+		 */
+		lsm->disk_format = lsm_env->key_format;
+
+		lsm->pk_in_cmp_def = key_def_find_pk_in_cmp_def(lsm->cmp_def,
+								pk->key_def,
+								&fiber()->gc);
+		if (lsm->pk_in_cmp_def == NULL)
+			goto fail_pk_in_cmp_def;
 	}
 	tuple_format_ref(lsm->disk_format);
 
@@ -196,8 +199,8 @@ vy_lsm_new(struct vy_lsm_env *lsm_env, struct vy_cache_env *cache_env,
 		vy_lsm_ref(pk);
 	lsm->mem_format = format;
 	tuple_format_ref(lsm->mem_format);
-	lsm->in_dump.pos = UINT32_MAX;
-	lsm->in_compaction.pos = UINT32_MAX;
+	heap_node_create(&lsm->in_dump);
+	heap_node_create(&lsm->in_compaction);
 	lsm->space_id = index_def->space_id;
 	lsm->index_id = index_def->iid;
 	lsm->group_id = group_id;
@@ -214,7 +217,9 @@ fail_run_hist:
 	vy_lsm_stat_destroy(&lsm->stat);
 fail_stat:
 	tuple_format_unref(lsm->disk_format);
-fail_format:
+	if (lsm->pk_in_cmp_def != NULL)
+		key_def_delete(lsm->pk_in_cmp_def);
+fail_pk_in_cmp_def:
 	key_def_delete(cmp_def);
 fail_cmp_def:
 	key_def_delete(key_def);
@@ -240,8 +245,8 @@ void
 vy_lsm_delete(struct vy_lsm *lsm)
 {
 	assert(lsm->refs == 0);
-	assert(lsm->in_dump.pos == UINT32_MAX);
-	assert(lsm->in_compaction.pos == UINT32_MAX);
+	assert(heap_node_is_stray(&lsm->in_dump));
+	assert(heap_node_is_stray(&lsm->in_compaction));
 	assert(vy_lsm_read_set_empty(&lsm->read_set));
 	assert(lsm->env->lsm_count > 0);
 
@@ -268,6 +273,8 @@ vy_lsm_delete(struct vy_lsm *lsm)
 	tuple_format_unref(lsm->disk_format);
 	key_def_delete(lsm->cmp_def);
 	key_def_delete(lsm->key_def);
+	if (lsm->pk_in_cmp_def != NULL)
+		key_def_delete(lsm->pk_in_cmp_def);
 	histogram_delete(lsm->run_hist);
 	vy_lsm_stat_destroy(&lsm->stat);
 	vy_cache_destroy(&lsm->cache);
@@ -405,7 +412,7 @@ vy_lsm_recover_slice(struct vy_lsm *lsm, struct vy_range *range,
 			goto out;
 	}
 	if (begin != NULL && end != NULL &&
-	    vy_key_compare(begin, end, lsm->cmp_def) >= 0) {
+	    vy_stmt_compare(begin, end, lsm->cmp_def) >= 0) {
 		diag_set(ClientError, ER_INVALID_VYLOG_FILE,
 			 tt_sprintf("begin >= end for slice %lld",
 				    (long long)slice_info->id));
@@ -451,7 +458,7 @@ vy_lsm_recover_range(struct vy_lsm *lsm,
 			goto out;
 	}
 	if (begin != NULL && end != NULL &&
-	    vy_key_compare(begin, end, lsm->cmp_def) >= 0) {
+	    vy_stmt_compare(begin, end, lsm->cmp_def) >= 0) {
 		diag_set(ClientError, ER_INVALID_VYLOG_FILE,
 			 tt_sprintf("begin >= end for range %lld",
 				    (long long)range_info->id));
@@ -632,8 +639,8 @@ vy_lsm_recover(struct vy_lsm *lsm, struct vy_recovery *recovery,
 		int cmp = 0;
 		if (prev != NULL &&
 		    (prev->end == NULL || range->begin == NULL ||
-		     (cmp = vy_key_compare(prev->end, range->begin,
-					   lsm->cmp_def)) != 0)) {
+		     (cmp = vy_stmt_compare(prev->end, range->begin,
+					    lsm->cmp_def)) != 0)) {
 			const char *errmsg = cmp > 0 ?
 				"Nearby ranges %lld and %lld overlap" :
 				"Keys between ranges %lld and %lld not spanned";
@@ -673,10 +680,9 @@ vy_lsm_generation(struct vy_lsm *lsm)
 int
 vy_lsm_compaction_priority(struct vy_lsm *lsm)
 {
-	struct heap_node *n = vy_range_heap_top(&lsm->range_heap);
-	if (n == NULL)
+	struct vy_range *range = vy_range_heap_top(&lsm->range_heap);
+	if (range == NULL)
 		return 0;
-	struct vy_range *range = container_of(n, struct vy_range, heap_node);
 	return range->compaction_priority;
 }
 
@@ -765,8 +771,8 @@ vy_lsm_remove_run(struct vy_lsm *lsm, struct vy_run *run)
 void
 vy_lsm_add_range(struct vy_lsm *lsm, struct vy_range *range)
 {
-	assert(range->heap_node.pos == UINT32_MAX);
-	vy_range_heap_insert(&lsm->range_heap, &range->heap_node);
+	assert(heap_node_is_stray(&range->heap_node));
+	vy_range_heap_insert(&lsm->range_heap, range);
 	vy_range_tree_insert(&lsm->range_tree, range);
 	lsm->range_count++;
 }
@@ -774,8 +780,8 @@ vy_lsm_add_range(struct vy_lsm *lsm, struct vy_range *range)
 void
 vy_lsm_remove_range(struct vy_lsm *lsm, struct vy_range *range)
 {
-	assert(range->heap_node.pos != UINT32_MAX);
-	vy_range_heap_delete(&lsm->range_heap, &range->heap_node);
+	assert(! heap_node_is_stray(&range->heap_node));
+	vy_range_heap_delete(&lsm->range_heap, range);
 	vy_range_tree_remove(&lsm->range_tree, range);
 	lsm->range_count--;
 }
@@ -893,7 +899,8 @@ vy_lsm_set(struct vy_lsm *lsm, struct vy_mem *mem,
 	lsm->stat.memory.count.bytes += tuple_size(stmt);
 
 	/* Abort transaction if format was changed by DDL */
-	if (format_id != tuple_format_id(mem->format)) {
+	if (!vy_stmt_is_key(stmt) &&
+	    format_id != tuple_format_id(mem->format)) {
 		diag_set(ClientError, ER_TRANSACTION_CONFLICT);
 		return -1;
 	}
@@ -984,8 +991,7 @@ vy_lsm_commit_upsert(struct vy_lsm *lsm, struct vy_mem *mem,
 		older = vy_mem_older_lsn(mem, stmt);
 		assert(older == NULL || vy_stmt_type(older) != IPROTO_UPSERT);
 		struct tuple *upserted =
-			vy_apply_upsert(stmt, older, lsm->cmp_def,
-					lsm->mem_format, false);
+			vy_apply_upsert(stmt, older, lsm->cmp_def, false);
 		lsm->stat.upsert.applied++;
 
 		if (upserted == NULL) {

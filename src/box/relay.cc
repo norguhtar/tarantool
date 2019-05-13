@@ -129,7 +129,7 @@ struct relay {
 	 */
 	struct stailq pending_gc;
 	/** Time when last row was sent to peer. */
-	double last_row_tm;
+	double last_row_time;
 	/** Relay sync state. */
 	enum relay_state state;
 
@@ -157,6 +157,12 @@ const struct vclock *
 relay_vclock(const struct relay *relay)
 {
 	return &relay->tx.vclock;
+}
+
+double
+relay_last_row_time(const struct relay *relay)
+{
+	return relay->last_row_time;
 }
 
 static void
@@ -416,7 +422,17 @@ relay_schedule_pending_gc(struct relay *relay, const struct vclock *vclock)
 {
 	struct relay_gc_msg *curr, *next, *gc_msg = NULL;
 	stailq_foreach_entry_safe(curr, next, &relay->pending_gc, in_pending) {
-		if (vclock_sum(&curr->vclock) > vclock_sum(vclock))
+		/*
+		 * We may delete a WAL file only if its vclock is
+		 * less than or equal to the vclock acknowledged by
+		 * the replica. Even if the replica's signature is
+		 * is greater, but the vclocks are incomparable, we
+		 * must not delete the WAL, because there may still
+		 * be rows not applied by the replica in it while
+		 * the greater signatures is due to changes pulled
+		 * from other members of the cluster.
+		 */
+		if (vclock_compare(&curr->vclock, vclock) > 0)
 			break;
 		stailq_shift(&relay->pending_gc);
 		free(gc_msg);
@@ -564,7 +580,7 @@ relay_subscribe_f(va_list ap)
 			timeout = inj->dparam;
 
 		fiber_cond_wait_deadline(&relay->reader_cond,
-					 relay->last_row_tm + timeout);
+					 relay->last_row_time + timeout);
 
 		/*
 		 * The fiber can be woken by IO cancel, by a timeout of
@@ -573,7 +589,7 @@ relay_subscribe_f(va_list ap)
 		 */
 		cbus_process(&relay->endpoint);
 		/* Check for a heartbeat timeout. */
-		if (ev_monotonic_now(loop()) - relay->last_row_tm > timeout)
+		if (ev_monotonic_now(loop()) - relay->last_row_time > timeout)
 			relay_send_heartbeat(relay);
 		/*
 		 * Check that the vclock has been updated and the previous
@@ -673,7 +689,7 @@ relay_send(struct relay *relay, struct xrow_header *packet)
 		fiber_sleep(0.01);
 
 	packet->sync = relay->sync;
-	relay->last_row_tm = ev_monotonic_now(loop());
+	relay->last_row_time = ev_monotonic_now(loop());
 	coio_write_xrow(&relay->io, packet);
 	fiber_gc();
 

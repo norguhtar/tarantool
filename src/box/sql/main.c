@@ -288,7 +288,7 @@ sql_config(int op, ...)
 	 * the sql library is in use.
 	 */
 	if (sqlGlobalConfig.isInit)
-		return SQL_MISUSE_BKPT;
+		return SQL_MISUSE;
 
 	va_start(ap, op);
 	switch (op) {
@@ -541,7 +541,7 @@ sqlClose(sql * db, int forceZombie)
 {
 	assert(db);
 	if (!sqlSafetyCheckSickOrOk(db)) {
-		return SQL_MISUSE_BKPT;
+		return SQL_MISUSE;
 	}
 	if (db->mTrace & SQL_TRACE_CLOSE) {
 		db->xTrace(SQL_TRACE_CLOSE, db->pTraceArg, db, 0);
@@ -640,43 +640,6 @@ sqlErrStr(int rc)
 	return zErr;
 }
 
-/*
- * This routine implements a busy callback that sleeps and tries
- * again until a timeout value is reached.  The timeout value is
- * an integer number of milliseconds passed in as the first
- * argument.
- */
-static int
-sqlDefaultBusyCallback(void *ptr,	/* Database connection */
-			  int count)	/* Number of times table has been busy */
-{
-	sql *db = (sql *) ptr;
-	int timeout = ((sql *) ptr)->busyTimeout;
-	if ((count + 1) * 1000 > timeout) {
-		return 0;
-	}
-	sqlOsSleep(db->pVfs, 1000000);
-	return 1;
-}
-
-/*
- * This routine sets the busy callback for an Sqlite database to the
- * given callback function with the given argument.
- */
-int
-sql_busy_handler(sql * db, int (*xBusy) (void *, int), void *pArg)
-{
-#ifdef SQL_ENABLE_API_ARMOR
-	if (!sqlSafetyCheckOk(db))
-		return SQL_MISUSE_BKPT;
-#endif
-	db->busyHandler.xFunc = xBusy;
-	db->busyHandler.pArg = pArg;
-	db->busyHandler.nBusy = 0;
-	db->busyTimeout = 0;
-	return SQL_OK;
-}
-
 #ifndef SQL_OMIT_PROGRESS_CALLBACK
 /*
  * This routine sets the progress callback for an Sqlite database to the
@@ -689,7 +652,6 @@ sql_progress_handler(sql * db,
 {
 #ifdef SQL_ENABLE_API_ARMOR
 	if (!sqlSafetyCheckOk(db)) {
-		(void)SQL_MISUSE_BKPT;
 		return;
 	}
 #endif
@@ -706,26 +668,6 @@ sql_progress_handler(sql * db,
 #endif
 
 /*
- * This routine installs a default busy handler that waits for the
- * specified number of milliseconds before returning 0.
- */
-int
-sql_busy_timeout(sql * db, int ms)
-{
-#ifdef SQL_ENABLE_API_ARMOR
-	if (!sqlSafetyCheckOk(db))
-		return SQL_MISUSE_BKPT;
-#endif
-	if (ms > 0) {
-		sql_busy_handler(db, sqlDefaultBusyCallback, (void *)db);
-		db->busyTimeout = ms;
-	} else {
-		sql_busy_handler(db, 0, 0);
-	}
-	return SQL_OK;
-}
-
-/*
  * Cause any pending operation to stop at its earliest opportunity.
  */
 void
@@ -734,7 +676,6 @@ sql_interrupt(sql * db)
 #ifdef SQL_ENABLE_API_ARMOR
 	if (!sqlSafetyCheckOk(db)
 	    && (db == 0 || db->magic != SQL_MAGIC_ZOMBIE)) {
-		(void)SQL_MISUSE_BKPT;
 		return;
 	}
 #endif
@@ -768,7 +709,7 @@ sqlCreateFunc(sql * db,
 	    (!xSFunc && (!xFinal && xStep)) ||
 	    (nArg < -1 || nArg > SQL_MAX_FUNCTION_ARG) ||
 	    (255 < (sqlStrlen30(zFunctionName)))) {
-		return SQL_MISUSE_BKPT;
+		return SQL_MISUSE;
 	}
 
 	assert(SQL_FUNC_CONSTANT == SQL_DETERMINISTIC);
@@ -795,7 +736,7 @@ sqlCreateFunc(sql * db,
 	p = sqlFindFunction(db, zFunctionName, nArg, 1);
 	assert(p || db->mallocFailed);
 	if (!p) {
-		return SQL_NOMEM_BKPT;
+		return SQL_NOMEM;
 	}
 
 	/* If an older version of the function with a configured destructor is
@@ -836,7 +777,7 @@ sql_create_function_v2(sql * db,
 
 #ifdef SQL_ENABLE_API_ARMOR
 	if (!sqlSafetyCheckOk(db)) {
-		return SQL_MISUSE_BKPT;
+		return SQL_MISUSE;
 	}
 #endif
 	if (xDestroy) {
@@ -875,7 +816,7 @@ sql_trace_v2(sql * db,		/* Trace this connection */
 {
 #ifdef SQL_ENABLE_API_ARMOR
 	if (!sqlSafetyCheckOk(db)) {
-		return SQL_MISUSE_BKPT;
+		return SQL_MISUSE;
 	}
 #endif
 	if (mTrace == 0)
@@ -904,7 +845,6 @@ sql_commit_hook(sql * db,	/* Attach the hook to this database */
 
 #ifdef SQL_ENABLE_API_ARMOR
 	if (!sqlSafetyCheckOk(db)) {
-		(void)SQL_MISUSE_BKPT;
 		return 0;
 	}
 #endif
@@ -928,7 +868,6 @@ sql_update_hook(sql * db,	/* Attach the hook to this database */
 
 #ifdef SQL_ENABLE_API_ARMOR
 	if (!sqlSafetyCheckOk(db)) {
-		(void)SQL_MISUSE_BKPT;
 		return 0;
 	}
 #endif
@@ -951,7 +890,6 @@ sql_rollback_hook(sql * db,	/* Attach the hook to this database */
 
 #ifdef SQL_ENABLE_API_ARMOR
 	if (!sqlSafetyCheckOk(db)) {
-		(void)SQL_MISUSE_BKPT;
 		return 0;
 	}
 #endif
@@ -1027,13 +965,13 @@ sql_errmsg(sql * db)
 {
 	const char *z;
 	if (!db) {
-		return sqlErrStr(SQL_NOMEM_BKPT);
+		return sqlErrStr(SQL_NOMEM);
 	}
 	if (!sqlSafetyCheckSickOrOk(db)) {
-		return sqlErrStr(SQL_MISUSE_BKPT);
+		return sqlErrStr(SQL_MISUSE);
 	}
 	if (db->mallocFailed) {
-		z = sqlErrStr(SQL_NOMEM_BKPT);
+		z = sqlErrStr(SQL_NOMEM);
 	} else {
 		testcase(db->pErr == 0);
 		assert(!db->mallocFailed);
@@ -1057,10 +995,10 @@ int
 sql_errcode(sql * db)
 {
 	if (db && !sqlSafetyCheckSickOrOk(db)) {
-		return SQL_MISUSE_BKPT;
+		return SQL_MISUSE;
 	}
 	if (!db || db->mallocFailed) {
-		return SQL_NOMEM_BKPT;
+		return SQL_NOMEM;
 	}
 	return db->errCode & db->errMask;
 }
@@ -1069,10 +1007,10 @@ int
 sql_extended_errcode(sql * db)
 {
 	if (db && !sqlSafetyCheckSickOrOk(db)) {
-		return SQL_MISUSE_BKPT;
+		return SQL_MISUSE;
 	}
 	if (!db || db->mallocFailed) {
-		return SQL_NOMEM_BKPT;
+		return SQL_NOMEM;
 	}
 	return db->errCode;
 }
@@ -1167,7 +1105,6 @@ sql_limit(sql * db, int limitId, int newLimit)
 
 #ifdef SQL_ENABLE_API_ARMOR
 	if (!sqlSafetyCheckOk(db)) {
-		(void)SQL_MISUSE_BKPT;
 		return -1;
 	}
 #endif
@@ -1268,7 +1205,7 @@ sqlParseUri(const char *zDefaultVfs,	/* VFS to use if no "vfs=xxx" query option 
 			nByte += (zUri[iIn] == '&');
 		zFile = sql_malloc64(nByte);
 		if (!zFile)
-			return SQL_NOMEM_BKPT;
+			return SQL_NOMEM;
 
 		iIn = 5;
 #ifdef SQL_ALLOW_URI_AUTHORITY
@@ -1475,7 +1412,7 @@ sqlParseUri(const char *zDefaultVfs,	/* VFS to use if no "vfs=xxx" query option 
 	} else {
 		zFile = sql_malloc64(nUri + 2);
 		if (!zFile)
-			return SQL_NOMEM_BKPT;
+			return SQL_NOMEM;
 		if (nUri) {
 			memcpy(zFile, zUri, nUri);
 		}
@@ -1514,7 +1451,7 @@ sql_init_db(sql **out_db)
 
 #ifdef SQL_ENABLE_API_ARMOR
 	if (ppDb == 0)
-		return SQL_MISUSE_BKPT;
+		return SQL_MISUSE;
 #endif
 #ifndef SQL_OMIT_AUTOINIT
 	rc = sql_initialize();
@@ -1628,74 +1565,6 @@ opendb_out:
 }
 
 /*
- * The following routines are substitutes for constants
- * SQL_MISUSE, SQL_CANTOPEN, SQL_NOMEM and possibly other error
- * constants.  They serve two purposes:
- *
- *   1.  Serve as a convenient place to set a breakpoint in a debugger
- *       to detect when version error conditions occurs.
- *
- *   2.  Invoke sql_log() to provide the source code location where
- *       a low-level error is first detected.
- */
-static int
-reportError(int iErr, int lineno, const char *zType)
-{
-	sql_log(iErr, "%s at line %d of [%.10s]",
-		    zType, lineno, 20 + tarantool_version());
-	return iErr;
-}
-
-int
-sqlMisuseError(int lineno)
-{
-	testcase(sqlGlobalConfig.xLog != 0);
-	return reportError(SQL_MISUSE, lineno, "misuse");
-}
-
-int
-sqlCantopenError(int lineno)
-{
-	testcase(sqlGlobalConfig.xLog != 0);
-	return reportError(SQL_CANTOPEN, lineno, "cannot open file");
-}
-
-#ifdef SQL_DEBUG
-int
-sqlNomemError(int lineno)
-{
-	testcase(sqlGlobalConfig.xLog != 0);
-	return reportError(SQL_NOMEM, lineno, "OOM");
-}
-
-int
-sqlIoerrnomemError(int lineno)
-{
-	testcase(sqlGlobalConfig.xLog != 0);
-	return reportError(SQL_IOERR_NOMEM, lineno, "I/O OOM error");
-}
-#endif
-
-/*
- * Sleep for a little while.  Return the amount of time slept.
- */
-int
-sql_sleep(int ms)
-{
-	sql_vfs *pVfs;
-	int rc;
-	pVfs = sql_vfs_find(0);
-	if (pVfs == 0)
-		return 0;
-
-	/* This function works in milliseconds, but the underlying OsSleep()
-	 * API uses microseconds. Hence the 1000's.
-	 */
-	rc = (sqlOsSleep(pVfs, 1000 * ms) / 1000);
-	return rc;
-}
-
-/*
  * Enable or disable the extended result codes.
  */
 int
@@ -1703,7 +1572,7 @@ sql_extended_result_codes(sql * db, int onoff)
 {
 #ifdef SQL_ENABLE_API_ARMOR
 	if (!sqlSafetyCheckOk(db))
-		return SQL_MISUSE_BKPT;
+		return SQL_MISUSE;
 #endif
 	db->errMask = onoff ? 0xffffffff : 0xff;
 	return SQL_OK;

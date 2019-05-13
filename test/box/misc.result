@@ -63,6 +63,7 @@ t
   - commit
   - ctl
   - error
+  - execute
   - feedback
   - index
   - info
@@ -82,7 +83,6 @@ t
   - slab
   - snapshot
   - space
-  - sql
   - stat
   - tuple
 ...
@@ -365,9 +365,9 @@ t;
   32: box.error.PROC_LUA
   33: box.error.NO_SUCH_PROC
   34: box.error.NO_SUCH_TRIGGER
-  35: box.error.NO_SUCH_INDEX
+  35: box.error.NO_SUCH_INDEX_ID
   36: box.error.NO_SUCH_SPACE
-  37: box.error.NO_SUCH_FIELD
+  37: box.error.NO_SUCH_FIELD_NO
   38: box.error.EXACT_FIELD_COUNT
   39: box.error.FIELD_MISSING
   40: box.error.WAL_IO
@@ -477,10 +477,12 @@ t;
   145: box.error.NO_SUCH_SEQUENCE
   146: box.error.SEQUENCE_EXISTS
   147: box.error.SEQUENCE_OVERFLOW
+  148: box.error.NO_SUCH_INDEX_NAME
   149: box.error.SPACE_FIELD_IS_DUPLICATE
   150: box.error.CANT_CREATE_COLLATION
   151: box.error.WRONG_COLLATION_OPTIONS
   152: box.error.NULLABLE_PRIMARY
+  153: box.error.NO_SUCH_FIELD_NAME
   154: box.error.TRANSACTION_YIELD
   155: box.error.NO_SUCH_GROUP
   156: box.error.SQL_BIND_VALUE
@@ -502,6 +504,24 @@ t;
   172: box.error.ROWID_OVERFLOW
   173: box.error.DROP_COLLATION
   174: box.error.ILLEGAL_COLLATION_MIX
+  175: box.error.SQL_NO_SUCH_PRAGMA
+  176: box.error.SQL_CANT_RESOLVE_FIELD
+  177: box.error.INDEX_EXISTS_IN_SPACE
+  178: box.error.INCONSISTENT_TYPES
+  179: box.error.SQL_SYNTAX
+  180: box.error.SQL_STACK_OVERFLOW
+  181: box.error.SQL_SELECT_WILDCARD
+  182: box.error.SQL_STATEMENT_EMPTY
+  184: box.error.SQL_UNRECOGNIZED_SYNTAX
+  185: box.error.SQL_UNKNOWN_TOKEN
+  186: box.error.SQL_PARSER_GENERIC
+  187: box.error.SQL_ANALYZE_ARGUMENT
+  188: box.error.SQL_COLUMN_COUNT_MAX
+  189: box.error.HEX_LITERAL_MAX
+  190: box.error.INT_LITERAL_MAX
+  191: box.error.SQL_PARSER_LIMIT
+  192: box.error.INDEX_DEF_UNSUPPORTED
+  193: box.error.CK_DEF_UNSUPPORTED
 ...
 test_run:cmd("setopt delimiter ''");
 ---
@@ -1248,165 +1268,4 @@ box.cfg{too_long_threshold = too_long_threshold}
 ...
 s:drop()
 ---
-...
---
--- gh-1607: on_shutdown triggers.
---
-f = function() print('on_shutdown 1') end
----
-...
-g = function() print('on_shutdown 2') end
----
-...
-h = function() print('on_shutdown 3') end
----
-...
--- Check that on_shutdown triggers may yield
--- and perform some complicated actions.
-fiber = require('fiber')
----
-...
-test_run:cmd("setopt delimiter ';'")
----
-- true
-...
-trig = function()
-    fiber.sleep(0.01)
-    fiber.yield()
-    box.schema.space.create("shutdown")
-    box.space.shutdown:create_index("pk")
-    box.space.shutdown:insert{1,2,3}
-    print('on_shutdown 4')
-end;
----
-...
-test_run:cmd("setopt delimiter ''");
----
-- true
-...
-_ = box.ctl.on_shutdown(f)
----
-...
-_ = box.ctl.on_shutdown(g)
----
-...
--- Check that replacing triggers works
-_ = box.ctl.on_shutdown(h, g)
----
-...
-_ = box.ctl.on_shutdown(trig)
----
-...
-test_run:cmd('restart server default')
-test_run:grep_log('default', 'on_shutdown 1', nil, {noreset=true})
----
-- on_shutdown 1
-...
-test_run:grep_log('default', 'on_shutdown 2', nil, {noreset=true})
----
-- null
-...
-test_run:grep_log('default', 'on_shutdown 3', nil, {noreset=true})
----
-- on_shutdown 3
-...
-test_run:grep_log('default', 'on_shutdown 4', nil, {noreset=true})
----
-- on_shutdown 4
-...
-box.space.shutdown:select{}
----
-- - [1, 2, 3]
-...
-box.space.shutdown:drop()
----
-...
--- Check that os.exit invokes triggers
-fiber = require("fiber")
----
-...
-test_run:cmd("create server test with script='box/proxy.lua'")
----
-- true
-...
-test_run:cmd("start server test")
----
-- true
-...
-logfile = test_run:eval("test", "box.cfg.log")[1]
----
-...
-test_run:cmd("stop server test")
----
-- true
-...
--- clean up any leftover logs
-require("fio").unlink(logfile)
----
-- true
-...
-test_run:cmd("start server test")
----
-- true
-...
-test_run:cmd("switch test")
----
-- true
-...
-_ = box.ctl.on_shutdown(function() print("on_shutdown 5") end)
----
-...
--- Check that we don't hang infinitely after os.exit()
--- even if the following code doesn't yield.
-fiber = require("fiber")
----
-...
-_ = fiber.create(function() fiber.sleep(0.05) os.exit() while true do end end)
----
-...
-test_run:cmd("switch default")
----
-- true
-...
-fiber.sleep(0.1)
----
-...
--- The server should be already stopped by os.exit(),
--- but start doesn't work without a prior call to stop.
-test_run:cmd("stop server test")
----
-- true
-...
-test_run:cmd("start server test")
----
-- true
-...
-test_run:cmd("switch test")
----
-- true
-...
-test_run:grep_log('test', 'on_shutdown 5', nil, {noreset=true})
----
-- on_shutdown 5
-...
--- make sure we exited because of os.exit(), not a signal.
-test_run:grep_log('test', 'signal', nil, {noreset=true})
----
-- null
-...
-test_run:cmd("switch default")
----
-- true
-...
-test_run:cmd("stop server test")
----
-- true
-...
-test_run:cmd("cleanup server test")
----
-- true
-...
-test_run:cmd("delete server test")
----
-- true
 ...

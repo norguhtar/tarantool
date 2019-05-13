@@ -157,7 +157,7 @@ test:do_catchsql_test("select3-2.10", [[
   SELECT log, count(*) FROM t1 GROUP BY 0 ORDER BY log;
 ]], {
   -- <select3-2.10>
-  1, "1st GROUP BY term out of range - should be between 1 and 2"
+  1, "Error at GROUP BY in place 1: term out of range - should be between 1 and 2"
   -- </select3-2.10>
 })
 
@@ -165,7 +165,7 @@ test:do_catchsql_test("select3-2.11", [[
   SELECT log, count(*) FROM t1 GROUP BY 3 ORDER BY log;
 ]], {
   -- <select3-2.11>
-  1, "1st GROUP BY term out of range - should be between 1 and 2"
+  1, "Error at GROUP BY in place 1: term out of range - should be between 1 and 2"
   -- </select3-2.11>
 })
 
@@ -182,7 +182,7 @@ test:do_catchsql_test("select3-2.13", [[
   SELECT log, count(*) FROM t1 GROUP BY ORDER BY log;
 ]], {
   -- <select3-2.13>
-  1, [[keyword "ORDER" is reserved]]
+  1, [[Keyword 'ORDER' is reserved. Please use double quotes if 'ORDER' is an identifier.]]
   -- </select3-2.13>
 })
 
@@ -190,7 +190,7 @@ test:do_catchsql_test("select3-2.14", [[
   SELECT log, count(*) FROM t1 GROUP BY;
 ]], {
   -- <select3-2.14>
-  1, [[near ";": syntax error]]
+  1, [[Syntax error near ';']]
   -- </select3-2.14>
 })
 
@@ -386,7 +386,7 @@ test:do_execsql_test("select3-8.1", [[
   SELECT typeof(sum(a3)) FROM a;
 ]], {
   -- <select3-8.1>
-  "real"
+  "number"
   -- </select3-8.1>
 })
 
@@ -394,7 +394,7 @@ test:do_execsql_test("select3-8.2", [[
   SELECT typeof(sum(a3)) FROM a GROUP BY a1;
 ]], {
   -- <select3-8.2>
-  "real"
+  "number"
   -- </select3-8.2>
 })
 

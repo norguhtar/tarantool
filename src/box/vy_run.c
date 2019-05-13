@@ -41,7 +41,6 @@
 
 #include "replication.h"
 #include "tuple_bloom.h"
-#include "tuple_compare.h"
 #include "xlog.h"
 #include "xrow.h"
 #include "vy_history.h"
@@ -71,6 +70,9 @@ const char *vy_file_suffix[] = {
 	"run",				/* VY_FILE_RUN */
 	"run" inprogress_suffix, 	/* VY_FILE_RUN_INPROGRESS */
 };
+
+/* sync run and index files very 16 MB */
+#define VY_RUN_SYNC_INTERVAL (1 << 24)
 
 /**
  * We read runs in background threads so as not to stall tx.
@@ -450,21 +452,21 @@ vy_slice_cut(struct vy_slice *slice, int64_t id, struct tuple *begin,
 	*result = NULL;
 
 	if (begin != NULL && slice->end != NULL &&
-	    vy_key_compare(begin, slice->end, cmp_def) >= 0)
+	    vy_stmt_compare(begin, slice->end, cmp_def) >= 0)
 		return 0; /* no intersection: begin >= slice->end */
 
 	if (end != NULL && slice->begin != NULL &&
-	    vy_key_compare(end, slice->begin, cmp_def) <= 0)
+	    vy_stmt_compare(end, slice->begin, cmp_def) <= 0)
 		return 0; /* no intersection: end <= slice->end */
 
 	/* begin = MAX(begin, slice->begin) */
 	if (slice->begin != NULL &&
-	    (begin == NULL || vy_key_compare(begin, slice->begin, cmp_def) < 0))
+	    (begin == NULL || vy_stmt_compare(begin, slice->begin, cmp_def) < 0))
 		begin = slice->begin;
 
 	/* end = MIN(end, slice->end) */
 	if (slice->end != NULL &&
-	    (end == NULL || vy_key_compare(end, slice->end, cmp_def) > 0))
+	    (end == NULL || vy_stmt_compare(end, slice->end, cmp_def) > 0))
 		end = slice->end;
 
 	*result = vy_slice_new(id, slice->run, begin, end, cmp_def);
@@ -699,7 +701,7 @@ vy_page_xrow(struct vy_page *page, uint32_t stmt_no,
 	const char *data_end = stmt_no + 1 < page->row_count ?
 			       page->data + page->row_index[stmt_no + 1] :
 			       page->data + page->unpacked_size;
-	return xrow_header_decode(xrow, &data, data_end);
+	return xrow_header_decode(xrow, &data, data_end, false);
 }
 
 /* {{{ vy_run_iterator vy_run_iterator support functions */
@@ -708,22 +710,19 @@ vy_page_xrow(struct vy_page *page, uint32_t stmt_no,
  * Read raw stmt data from the page
  * @param page          Page.
  * @param stmt_no       Statement position in the page.
- * @param cmp_def       Key definition, including primary key parts.
  * @param format        Format for REPLACE/DELETE tuples.
- * @param is_primary    True if the index is primary.
  *
  * @retval not NULL Statement read from page.
  * @retval     NULL Memory error.
  */
 static struct tuple *
 vy_page_stmt(struct vy_page *page, uint32_t stmt_no,
-	     const struct key_def *cmp_def, struct tuple_format *format,
-	     bool is_primary)
+	     struct tuple_format *format)
 {
 	struct xrow_header xrow;
 	if (vy_page_xrow(page, stmt_no, &xrow) != 0)
 		return NULL;
-	return vy_stmt_decode(&xrow, cmp_def, format, is_primary);
+	return vy_stmt_decode(&xrow, format);
 }
 
 /**
@@ -822,6 +821,12 @@ vy_page_read(struct vy_page *page, const struct vy_page_info *page_info,
 	if (inj != NULL && inj->dparam > 0)
 		usleep(inj->dparam * 1000000);
 
+	inj = errinj(ERRINJ_VY_READ_PAGE_DELAY, ERRINJ_BOOL);
+	if (inj != NULL) {
+		while (inj->bparam)
+			usleep(10000);
+	}
+
 	/* decode xlog tx */
 	const char *data_pos = data;
 	const char *data_end = data + readen;
@@ -833,7 +838,7 @@ vy_page_read(struct vy_page *page, const struct vy_page_info *page_info,
 	struct xrow_header xrow;
 	data_pos = page->data + page_info->row_index_offset;
 	data_end = page->data + page_info->unpacked_size;
-	if (xrow_header_decode(&xrow, &data_pos, data_end) == -1)
+	if (xrow_header_decode(&xrow, &data_pos, data_end, true) == -1)
 		goto error;
 	if (xrow.type != VY_RUN_ROW_INDEX) {
 		diag_set(ClientError, ER_INVALID_RUN_FILE,
@@ -1026,8 +1031,7 @@ vy_run_iterator_read(struct vy_run_iterator *itr,
 	int rc = vy_run_iterator_load_page(itr, pos.page_no, &page);
 	if (rc != 0)
 		return rc;
-	*stmt = vy_page_stmt(page, pos.pos_in_page, itr->cmp_def,
-			     itr->format, itr->is_primary);
+	*stmt = vy_page_stmt(page, pos.pos_in_page, itr->format);
 	if (*stmt == NULL)
 		return -1;
 	return 0;
@@ -1053,9 +1057,7 @@ vy_run_iterator_search_in_page(struct vy_run_iterator *itr,
 			iterator_type == ITER_LE ? -1 : 0);
 	while (beg != end) {
 		uint32_t mid = beg + (end - beg) / 2;
-		struct tuple *fnd_key = vy_page_stmt(page, mid, itr->cmp_def,
-						     itr->format,
-						     itr->is_primary);
+		struct tuple *fnd_key = vy_page_stmt(page, mid, itr->format);
 		if (fnd_key == NULL)
 			return end;
 		int cmp = vy_stmt_compare(fnd_key, key, itr->cmp_def);
@@ -1207,8 +1209,8 @@ vy_run_iterator_find_lsn(struct vy_run_iterator *itr,
 				return -1;
 			if (vy_stmt_lsn(test_stmt) > (**itr->read_view).vlsn ||
 			    vy_stmt_flags(test_stmt) & VY_STMT_SKIP_READ ||
-			    vy_tuple_compare(itr->curr_stmt, test_stmt,
-					     cmp_def) != 0) {
+			    vy_stmt_compare(itr->curr_stmt, test_stmt,
+					    cmp_def) != 0) {
 				tuple_unref(test_stmt);
 				break;
 			}
@@ -1220,8 +1222,7 @@ vy_run_iterator_find_lsn(struct vy_run_iterator *itr,
 	/* Check if the result is within the slice boundaries. */
 	if (iterator_type == ITER_LE || iterator_type == ITER_LT) {
 		if (slice->begin != NULL &&
-		    vy_tuple_compare_with_key(itr->curr_stmt, slice->begin,
-					      cmp_def) < 0) {
+		    vy_stmt_compare(itr->curr_stmt, slice->begin, cmp_def) < 0) {
 			vy_run_iterator_stop(itr);
 			return 0;
 		}
@@ -1229,8 +1230,7 @@ vy_run_iterator_find_lsn(struct vy_run_iterator *itr,
 		assert(iterator_type == ITER_GE || iterator_type == ITER_GT ||
 		       iterator_type == ITER_EQ);
 		if (slice->end != NULL &&
-		    vy_tuple_compare_with_key(itr->curr_stmt, slice->end,
-					      cmp_def) >= 0) {
+		    vy_stmt_compare(itr->curr_stmt, slice->end, cmp_def) >= 0) {
 			vy_run_iterator_stop(itr);
 			return 0;
 		}
@@ -1251,22 +1251,11 @@ vy_run_iterator_do_seek(struct vy_run_iterator *itr,
 
 	struct tuple_bloom *bloom = run->info.bloom;
 	struct key_def *key_def = itr->key_def;
-	if (iterator_type == ITER_EQ && bloom != NULL) {
-		bool need_lookup;
-		if (vy_stmt_type(key) == IPROTO_SELECT) {
-			const char *data = tuple_data(key);
-			uint32_t part_count = mp_decode_array(&data);
-			need_lookup = tuple_bloom_maybe_has_key(bloom, data,
-							part_count, key_def);
-		} else {
-			need_lookup = tuple_bloom_maybe_has(bloom, key,
-							    key_def);
-		}
-		if (!need_lookup) {
-			itr->search_ended = true;
-			itr->stat->bloom_hit++;
-			return 0;
-		}
+	if (iterator_type == ITER_EQ && bloom != NULL &&
+	    !vy_stmt_bloom_maybe_has(bloom, key, key_def)) {
+		itr->search_ended = true;
+		itr->stat->bloom_hit++;
+		return 0;
 	}
 
 	itr->stat->lookup++;
@@ -1274,7 +1263,7 @@ vy_run_iterator_do_seek(struct vy_run_iterator *itr,
 	struct vy_run_iterator_pos end_pos = {run->info.page_count, 0};
 	bool equal_found = false;
 	int rc;
-	if (tuple_field_count(key) > 0) {
+	if (!vy_stmt_is_empty_key(key)) {
 		rc = vy_run_iterator_search(itr, iterator_type, key,
 					    &itr->curr_pos, &equal_found);
 		if (rc != 0 || itr->search_ended)
@@ -1361,9 +1350,10 @@ vy_run_iterator_seek(struct vy_run_iterator *itr,
 		 *         | ge  | begin | ge  |
 		 *         | eq  |    stop     |
 		 */
-		cmp = vy_stmt_compare_with_key(key, slice->begin, cmp_def);
+		cmp = vy_stmt_compare(key, slice->begin, cmp_def);
 		if (cmp < 0 && iterator_type == ITER_EQ) {
 			vy_run_iterator_stop(itr);
+			*ret = NULL;
 			return 0;
 		}
 		if (cmp < 0 || (cmp == 0 && iterator_type != ITER_GT)) {
@@ -1387,7 +1377,7 @@ vy_run_iterator_seek(struct vy_run_iterator *itr,
 		 * > end   | lt  | end   | lt  |
 		 *         | le  | end   | lt  |
 		 */
-		cmp = vy_stmt_compare_with_key(key, slice->end, cmp_def);
+		cmp = vy_stmt_compare(key, slice->end, cmp_def);
 		if (cmp > 0 || (cmp == 0 && iterator_type != ITER_LT)) {
 			iterator_type = ITER_LT;
 			key = slice->end;
@@ -1415,14 +1405,12 @@ vy_run_iterator_open(struct vy_run_iterator *itr,
 		     struct vy_slice *slice, enum iterator_type iterator_type,
 		     const struct tuple *key, const struct vy_read_view **rv,
 		     struct key_def *cmp_def, struct key_def *key_def,
-		     struct tuple_format *format,
-		     bool is_primary)
+		     struct tuple_format *format)
 {
 	itr->stat = stat;
 	itr->cmp_def = cmp_def;
 	itr->key_def = key_def;
 	itr->format = format;
-	itr->is_primary = is_primary;
 	itr->slice = slice;
 
 	itr->iterator_type = iterator_type;
@@ -1480,7 +1468,7 @@ vy_run_iterator_next_key(struct vy_run_iterator *itr, struct tuple **ret)
 
 		if (vy_run_iterator_read(itr, itr->curr_pos, &next_key) != 0)
 			return -1;
-	} while (vy_tuple_compare(itr->curr_stmt, next_key, itr->cmp_def) == 0);
+	} while (vy_stmt_compare(itr->curr_stmt, next_key, itr->cmp_def) == 0);
 
 	tuple_unref(itr->curr_stmt);
 	itr->curr_stmt = next_key;
@@ -1521,7 +1509,7 @@ next:
 	if (vy_run_iterator_read(itr, next_pos, &next_key) != 0)
 		return -1;
 
-	if (vy_tuple_compare(itr->curr_stmt, next_key, itr->cmp_def) != 0) {
+	if (vy_stmt_compare(itr->curr_stmt, next_key, itr->cmp_def) != 0) {
 		tuple_unref(next_key);
 		return 0;
 	}
@@ -1571,8 +1559,7 @@ vy_run_iterator_skip(struct vy_run_iterator *itr,
 	if (itr->search_started &&
 	    (itr->curr_stmt == NULL || last_stmt == NULL ||
 	     iterator_direction(itr->iterator_type) *
-	     vy_tuple_compare(itr->curr_stmt, last_stmt,
-			      itr->cmp_def) > 0))
+	     vy_stmt_compare(itr->curr_stmt, last_stmt, itr->cmp_def) > 0))
 		return 0;
 
 	vy_history_cleanup(history);
@@ -2035,10 +2022,11 @@ vy_run_write_index(struct vy_run *run, const char *dirpath,
 	struct xlog_meta meta;
 	xlog_meta_create(&meta, XLOG_META_TYPE_INDEX, &INSTANCE_UUID,
 			 NULL, NULL);
-	if (xlog_create(&index_xlog, path, 0, &meta) < 0)
+	struct xlog_opts opts = xlog_opts_default;
+	opts.rate_limit = run->env->snap_io_rate_limit;
+	opts.sync_interval = VY_RUN_SYNC_INTERVAL;
+	if (xlog_create(&index_xlog, path, 0, &meta, &opts) < 0)
 		return -1;
-
-	index_xlog.rate_limit = run->env->snap_io_rate_limit;
 
 	xlog_tx_begin(&index_xlog);
 	struct region *region = &fiber()->gc;
@@ -2088,7 +2076,7 @@ int
 vy_run_writer_create(struct vy_run_writer *writer, struct vy_run *run,
 		     const char *dirpath, uint32_t space_id, uint32_t iid,
 		     struct key_def *cmp_def, struct key_def *key_def,
-		     uint64_t page_size, double bloom_fpr)
+		     uint64_t page_size, double bloom_fpr, bool no_compression)
 {
 	memset(writer, 0, sizeof(*writer));
 	writer->run = run;
@@ -2099,6 +2087,7 @@ vy_run_writer_create(struct vy_run_writer *writer, struct vy_run *run,
 	writer->key_def = key_def;
 	writer->page_size = page_size;
 	writer->bloom_fpr = bloom_fpr;
+	writer->no_compression = no_compression;
 	if (bloom_fpr < 1) {
 		writer->bloom = tuple_bloom_builder_new(key_def->part_count);
 		if (writer->bloom == NULL)
@@ -2131,9 +2120,12 @@ vy_run_writer_create_xlog(struct vy_run_writer *writer)
 	struct xlog_meta meta;
 	xlog_meta_create(&meta, XLOG_META_TYPE_RUN, &INSTANCE_UUID,
 			 NULL, NULL);
-	if (xlog_create(&writer->data_xlog, path, 0, &meta) != 0)
+	struct xlog_opts opts = xlog_opts_default;
+	opts.rate_limit = writer->run->env->snap_io_rate_limit;
+	opts.sync_interval = VY_RUN_SYNC_INTERVAL;
+	opts.no_compression = writer->no_compression;
+	if (xlog_create(&writer->data_xlog, path, 0, &meta, &opts) != 0)
 		return -1;
-	writer->data_xlog.rate_limit = writer->run->env->snap_io_rate_limit;
 	return 0;
 }
 
@@ -2153,7 +2145,8 @@ vy_run_writer_start_page(struct vy_run_writer *writer,
 	if (run->info.page_count >= writer->page_info_capacity &&
 	    vy_run_alloc_page_info(run, &writer->page_info_capacity) != 0)
 		return -1;
-	const char *key = tuple_extract_key(first_stmt, writer->cmp_def, NULL);
+	const char *key = vy_stmt_is_key(first_stmt) ? tuple_data(first_stmt) :
+			  tuple_extract_key(first_stmt, writer->cmp_def, NULL);
 	if (key == NULL)
 		return -1;
 	if (run->info.page_count == 0) {
@@ -2180,13 +2173,10 @@ vy_run_writer_start_page(struct vy_run_writer *writer,
 static int
 vy_run_writer_write_to_page(struct vy_run_writer *writer, struct tuple *stmt)
 {
-	if (writer->bloom != NULL) {
-		uint32_t hashed_parts = writer->last_stmt == NULL ? 0 :
-			tuple_common_key_parts(stmt, writer->last_stmt,
-					       writer->key_def);
-		tuple_bloom_builder_add(writer->bloom, stmt,
-					writer->key_def, hashed_parts);
-	}
+	if (writer->bloom != NULL &&
+	    vy_stmt_bloom_builder_add(writer->bloom, stmt,
+				      writer->key_def) != 0)
+		return -1;
 	if (writer->last_stmt != NULL)
 		vy_stmt_unref_if_possible(writer->last_stmt);
 	writer->last_stmt = stmt;
@@ -2306,7 +2296,9 @@ vy_run_writer_commit(struct vy_run_writer *writer)
 	}
 
 	assert(writer->last_stmt != NULL);
-	const char *key = tuple_extract_key(writer->last_stmt,
+	const char *key = vy_stmt_is_key(writer->last_stmt) ?
+		          tuple_data(writer->last_stmt) :
+			  tuple_extract_key(writer->last_stmt,
 					    writer->cmp_def, NULL);
 	if (key == NULL)
 		goto out;
@@ -2377,6 +2369,7 @@ vy_run_rebuild_index(struct vy_run *run, const char *dir,
 	int64_t max_lsn = 0;
 	int64_t min_lsn = INT64_MAX;
 	struct tuple *prev_tuple = NULL;
+	char *page_min_key = NULL;
 
 	struct tuple_bloom_builder *bloom_builder = NULL;
 	if (opts->bloom_fpr < 1) {
@@ -2394,7 +2387,6 @@ vy_run_rebuild_index(struct vy_run *run, const char *dir,
 		if (run->info.page_count == page_info_capacity &&
 		    vy_run_alloc_page_info(run, &page_info_capacity) != 0)
 			goto close_err;
-		const char *page_min_key = NULL;
 		uint32_t page_row_count = 0;
 		uint64_t page_row_index_offset = 0;
 		uint64_t row_offset = xlog_cursor_tx_pos(&cursor);
@@ -2407,18 +2399,17 @@ vy_run_rebuild_index(struct vy_run *run, const char *dir,
 				continue;
 			}
 			++page_row_count;
-			struct tuple *tuple = vy_stmt_decode(&xrow, cmp_def,
-							     format, iid == 0);
+			struct tuple *tuple = vy_stmt_decode(&xrow, format);
 			if (tuple == NULL)
 				goto close_err;
-			if (bloom_builder != NULL) {
-				uint32_t hashed_parts = prev_tuple == NULL ? 0 :
-					tuple_common_key_parts(prev_tuple,
-							       tuple, key_def);
-				tuple_bloom_builder_add(bloom_builder, tuple,
-							key_def, hashed_parts);
+			if (bloom_builder != NULL &&
+			    vy_stmt_bloom_builder_add(bloom_builder, tuple,
+						      key_def) != 0) {
+				tuple_unref(tuple);
+				goto close_err;
 			}
-			key = tuple_extract_key(tuple, cmp_def, NULL);
+			key = vy_stmt_is_key(tuple) ? tuple_data(tuple) :
+			      tuple_extract_key(tuple, cmp_def, NULL);
 			if (prev_tuple != NULL)
 				tuple_unref(prev_tuple);
 			prev_tuple = tuple;
@@ -2429,8 +2420,11 @@ vy_run_rebuild_index(struct vy_run *run, const char *dir,
 				if (run->info.min_key == NULL)
 					goto close_err;
 			}
-			if (page_min_key == NULL)
-				page_min_key = key;
+			if (page_min_key == NULL) {
+				page_min_key = vy_key_dup(key);
+				if (page_min_key == NULL)
+					goto close_err;
+			}
 			if (xrow.lsn > max_lsn)
 				max_lsn = xrow.lsn;
 			if (xrow.lsn < min_lsn)
@@ -2447,11 +2441,9 @@ vy_run_rebuild_index(struct vy_run *run, const char *dir,
 		info->row_index_offset = page_row_index_offset;
 		++run->info.page_count;
 		vy_run_acct_page(run, info);
-	}
 
-	if (prev_tuple != NULL) {
-		tuple_unref(prev_tuple);
-		prev_tuple = NULL;
+		free(page_min_key);
+		page_min_key = NULL;
 	}
 
 	if (key != NULL) {
@@ -2462,6 +2454,10 @@ vy_run_rebuild_index(struct vy_run *run, const char *dir,
 	run->info.max_lsn = max_lsn;
 	run->info.min_lsn = min_lsn;
 
+	if (prev_tuple != NULL) {
+		tuple_unref(prev_tuple);
+		prev_tuple = NULL;
+	}
 	region_truncate(region, mem_used);
 	run->fd = cursor.fd;
 	xlog_cursor_close(&cursor, true);
@@ -2491,6 +2487,8 @@ close_err:
 	region_truncate(region, mem_used);
 	if (prev_tuple != NULL)
 		tuple_unref(prev_tuple);
+	if (page_min_key != NULL)
+		free(page_min_key);
 	if (bloom_builder != NULL)
 		tuple_bloom_builder_delete(bloom_builder);
 	if (xlog_cursor_is_open(&cursor))
@@ -2581,12 +2579,11 @@ vy_slice_stream_search(struct vy_stmt_stream *virt_stream)
 	while (beg != end) {
 		uint32_t mid = beg + (end - beg) / 2;
 		struct tuple *fnd_key = vy_page_stmt(stream->page, mid,
-					stream->cmp_def, stream->format,
-					stream->is_primary);
+						     stream->format);
 		if (fnd_key == NULL)
 			return -1;
-		int cmp = vy_tuple_compare_with_key(fnd_key,
-				stream->slice->begin, stream->cmp_def);
+		int cmp = vy_stmt_compare(fnd_key, stream->slice->begin,
+					  stream->cmp_def);
 		if (cmp < 0)
 			beg = mid + 1;
 		else
@@ -2629,16 +2626,14 @@ vy_slice_stream_next(struct vy_stmt_stream *virt_stream, struct tuple **ret)
 
 	/* Read current tuple from the page */
 	struct tuple *tuple = vy_page_stmt(stream->page, stream->pos_in_page,
-					   stream->cmp_def, stream->format,
-					   stream->is_primary);
+					   stream->format);
 	if (tuple == NULL) /* Read or memory error */
 		return -1;
 
 	/* Check that the tuple is not out of slice bounds = */
 	if (stream->slice->end != NULL &&
 	    stream->page_no >= stream->slice->last_page_no &&
-	    vy_tuple_compare_with_key(tuple, stream->slice->end,
-				      stream->cmp_def) >= 0) {
+	    vy_stmt_compare(tuple, stream->slice->end, stream->cmp_def) >= 0) {
 		tuple_unref(tuple);
 		return 0;
 	}
@@ -2673,9 +2668,9 @@ vy_slice_stream_next(struct vy_stmt_stream *virt_stream, struct tuple **ret)
  * Free resources.
  */
 static void
-vy_slice_stream_close(struct vy_stmt_stream *virt_stream)
+vy_slice_stream_stop(struct vy_stmt_stream *virt_stream)
 {
-	assert(virt_stream->iface->close == vy_slice_stream_close);
+	assert(virt_stream->iface->stop == vy_slice_stream_stop);
 	struct vy_slice_stream *stream = (struct vy_slice_stream *)virt_stream;
 	if (stream->page != NULL) {
 		vy_page_delete(stream->page);
@@ -2687,17 +2682,24 @@ vy_slice_stream_close(struct vy_stmt_stream *virt_stream)
 	}
 }
 
+static void
+vy_slice_stream_close(struct vy_stmt_stream *virt_stream)
+{
+	assert(virt_stream->iface->close == vy_slice_stream_close);
+	struct vy_slice_stream *stream = (struct vy_slice_stream *)virt_stream;
+	tuple_format_unref(stream->format);
+}
+
 static const struct vy_stmt_stream_iface vy_slice_stream_iface = {
 	.start = vy_slice_stream_search,
 	.next = vy_slice_stream_next,
-	.stop = NULL,
-	.close = vy_slice_stream_close
+	.stop = vy_slice_stream_stop,
+	.close = vy_slice_stream_close,
 };
 
 void
 vy_slice_stream_open(struct vy_slice_stream *stream, struct vy_slice *slice,
-		     struct key_def *cmp_def, struct tuple_format *format,
-		     bool is_primary)
+		     struct key_def *cmp_def, struct tuple_format *format)
 {
 	stream->base.iface = &vy_slice_stream_iface;
 
@@ -2709,5 +2711,5 @@ vy_slice_stream_open(struct vy_slice_stream *stream, struct vy_slice *slice,
 	stream->slice = slice;
 	stream->cmp_def = cmp_def;
 	stream->format = format;
-	stream->is_primary = is_primary;
+	tuple_format_ref(format);
 }

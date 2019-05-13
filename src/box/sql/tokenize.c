@@ -416,17 +416,38 @@ sql_token(const char *z, int *type, bool *is_reserved)
 	return i;
 }
 
-/*
- * Run the parser on the given SQL string.  The parser structure is
- * passed in.  An SQL_ status code is returned.  If an error occurs
- * then an and attempt is made to write an error message into
- * memory obtained from sql_malloc() and to make *pzErrMsg point to that
- * error message.
+/**
+ * This function is called to release parsing artifacts
+ * during table creation. The only objects allocated using
+ * malloc are index defs and check constraints.
+ * Note that this functions can't be called on ordinary
+ * space object. It's purpose is to clean-up parser->new_space.
+ *
+ * @param db Database handler.
+ * @param space Space to be deleted.
+ */
+static void
+parser_space_delete(struct sql *db, struct space *space)
+{
+	if (space == NULL || db == NULL || db->pnBytesFreed == 0)
+		return;
+	assert(space->def->opts.is_temporary);
+	for (uint32_t i = 0; i < space->index_count; ++i)
+		index_def_delete(space->index[i]->def);
+	sql_expr_list_delete(db, space->def->opts.checks);
+}
+
+/**
+ * Run the parser on the given SQL string.
+ *
+ * @param pParse Parser context.
+ * @param zSql SQL string.
+ * @retval 0 on success.
+ * @retval -1 on error.
  */
 int
-sqlRunParser(Parse * pParse, const char *zSql, char **pzErrMsg)
+sqlRunParser(Parse * pParse, const char *zSql)
 {
-	int nErr = 0;		/* Number of errors encountered */
 	int i;			/* Loop counter */
 	void *pEngine;		/* The LEMON-generated LALR(1) parser */
 	int tokenType;		/* type of the next token */
@@ -439,17 +460,15 @@ sqlRunParser(Parse * pParse, const char *zSql, char **pzErrMsg)
 	if (db->nVdbeActive == 0) {
 		db->u1.isInterrupted = 0;
 	}
-	pParse->rc = SQL_OK;
 	pParse->zTail = zSql;
 	i = 0;
-	assert(pzErrMsg != 0);
 	/* sqlParserTrace(stdout, "parser: "); */
 	pEngine = sqlParserAlloc(sqlMalloc);
 	if (pEngine == 0) {
 		sqlOomFault(db);
-		return SQL_NOMEM_BKPT;
+		return -1;
 	}
-	assert(pParse->pNewTable == 0);
+	assert(pParse->create_table_def.new_space == NULL);
 	assert(pParse->parsed_ast.trigger == NULL);
 	assert(pParse->nVar == 0);
 	assert(pParse->pVList == 0);
@@ -462,7 +481,9 @@ sqlRunParser(Parse * pParse, const char *zSql, char **pzErrMsg)
 				      &pParse->sLastToken.isReserved);
 			i += pParse->sLastToken.n;
 			if (i > mxSqlLen) {
-				pParse->rc = SQL_TOOBIG;
+				diag_set(ClientError, ER_SQL_PARSER_LIMIT,
+					 "SQL command length", i, mxSqlLen);
+				pParse->is_aborted = true;
 				break;
 			}
 		} else {
@@ -480,25 +501,21 @@ sqlRunParser(Parse * pParse, const char *zSql, char **pzErrMsg)
 		if (tokenType >= TK_SPACE) {
 			assert(tokenType == TK_SPACE
 			       || tokenType == TK_ILLEGAL);
-			if (db->u1.isInterrupted) {
-				pParse->rc = SQL_INTERRUPT;
-				break;
-			}
 			if (tokenType == TK_ILLEGAL) {
-				sqlErrorMsg(pParse,
-						"unrecognized token: \"%T\"",
-						&pParse->sLastToken);
+				diag_set(ClientError, ER_SQL_UNKNOWN_TOKEN,
+					 pParse->sLastToken.n,
+					 pParse->sLastToken.z);
+				pParse->is_aborted = true;
 				break;
 			}
 		} else {
 			sqlParser(pEngine, tokenType, pParse->sLastToken,
 				      pParse);
 			lastTokenParsed = tokenType;
-			if (pParse->rc != SQL_OK || db->mallocFailed)
+			if (pParse->is_aborted || db->mallocFailed)
 				break;
 		}
 	}
-	assert(nErr == 0);
 	pParse->zTail = &zSql[i];
 #ifdef YYTRACKMAXSTACKDEPTH
 	sqlStatusHighwater(SQL_STATUS_PARSER_STACK,
@@ -506,41 +523,18 @@ sqlRunParser(Parse * pParse, const char *zSql, char **pzErrMsg)
 	    );
 #endif				/* YYDEBUG */
 	sqlParserFree(pEngine, sql_free);
-	if (db->mallocFailed) {
-		pParse->rc = SQL_NOMEM_BKPT;
-	}
-	if (pParse->rc != SQL_OK && pParse->rc != SQL_DONE
-	    && pParse->zErrMsg == 0) {
-		const char *error;
-		if (is_tarantool_error(pParse->rc) &&
-		    tarantoolErrorMessage() != NULL)
-			error = tarantoolErrorMessage();
-		else
-			error = sqlErrStr(pParse->rc);
-		pParse->zErrMsg = sqlMPrintf(db, "%s", error);
-	}
-	assert(pzErrMsg != 0);
-	if (pParse->zErrMsg) {
-		*pzErrMsg = pParse->zErrMsg;
-		sql_log(pParse->rc, "%s", *pzErrMsg);
-		nErr++;
-	}
-	if (pParse->pVdbe != NULL && pParse->nErr > 0) {
+	if (db->mallocFailed)
+		pParse->is_aborted = true;
+	if (pParse->pVdbe != NULL && pParse->is_aborted) {
 		sqlVdbeDelete(pParse->pVdbe);
 		pParse->pVdbe = 0;
 	}
-	sqlDeleteTable(db, pParse->pNewTable);
+	parser_space_delete(db, pParse->create_table_def.new_space);
 
 	if (pParse->pWithToFree)
 		sqlWithDelete(db, pParse->pWithToFree);
 	sqlDbFree(db, pParse->pVList);
-	while (pParse->pZombieTab) {
-		Table *p = pParse->pZombieTab;
-		pParse->pZombieTab = p->pNextZombie;
-		sqlDeleteTable(db, p);
-	}
-	assert(nErr == 0 || pParse->rc != SQL_OK);
-	return nErr;
+	return pParse->is_aborted ? -1 : 0;
 }
 
 struct Expr *
@@ -561,11 +555,8 @@ sql_expr_compile(sql *db, const char *expr, int expr_len)
 	}
 	sprintf(stmt, "%s%.*s", outer, expr_len, expr);
 
-	char *sql_error = NULL;
-	if (sqlRunParser(&parser, stmt, &sql_error) != SQL_OK ||
-	    parser.parsed_ast_type != AST_TYPE_EXPR) {
-		diag_set(ClientError, ER_SQL, sql_error);
-	} else {
+	if (sqlRunParser(&parser, stmt) == 0 &&
+	    parser.parsed_ast_type == AST_TYPE_EXPR) {
 		expression = parser.parsed_ast.expr;
 		parser.parsed_ast.expr = NULL;
 	}
@@ -583,8 +574,7 @@ sql_view_compile(struct sql *db, const char *view_stmt)
 
 	struct Select *select = NULL;
 
-	char *unused;
-	if (sqlRunParser(&parser, view_stmt, &unused) != SQL_OK ||
+	if (sqlRunParser(&parser, view_stmt) != 0 ||
 	    parser.parsed_ast_type != AST_TYPE_SELECT) {
 		diag_set(ClientError, ER_SQL_EXECUTE, view_stmt);
 	} else {
@@ -602,13 +592,9 @@ sql_trigger_compile(struct sql *db, const char *sql)
 	struct Parse parser;
 	sql_parser_create(&parser, db);
 	parser.parse_only = true;
-	char *sql_error = NULL;
 	struct sql_trigger *trigger = NULL;
-	if (sqlRunParser(&parser, sql, &sql_error) != SQL_OK ||
-	    parser.parsed_ast_type != AST_TYPE_TRIGGER) {
-	    if (parser.rc != SQL_TARANTOOL_ERROR)
-		diag_set(ClientError, ER_SQL, sql_error);
-	} else {
+	if (sqlRunParser(&parser, sql) == 0 &&
+	    parser.parsed_ast_type == AST_TYPE_TRIGGER) {
 		trigger = parser.parsed_ast.trigger;
 		parser.parsed_ast.trigger = NULL;
 	}

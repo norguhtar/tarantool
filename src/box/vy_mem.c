@@ -146,7 +146,7 @@ vy_mem_older_lsn(struct vy_mem *mem, const struct tuple *stmt)
 
 	const struct tuple *result;
 	result = *vy_mem_tree_iterator_get_elem(&mem->tree, &itr);
-	if (vy_tuple_compare(result, stmt, mem->cmp_def) != 0)
+	if (vy_stmt_compare(result, stmt, mem->cmp_def) != 0)
 		return NULL;
 	return result;
 }
@@ -195,7 +195,7 @@ vy_mem_insert_upsert(struct vy_mem *mem, const struct tuple *stmt)
 	const struct tuple **older = vy_mem_tree_iterator_get_elem(&mem->tree,
 								   &inserted);
 	if (older == NULL || vy_stmt_type(*older) != IPROTO_UPSERT ||
-	    vy_tuple_compare(stmt, *older, mem->cmp_def) != 0)
+	    vy_stmt_compare(stmt, *older, mem->cmp_def) != 0)
 		return 0;
 	uint8_t n_upserts = vy_stmt_n_upserts(*older);
 	/*
@@ -215,7 +215,8 @@ vy_mem_insert(struct vy_mem *mem, const struct tuple *stmt)
 {
 	assert(vy_stmt_type(stmt) != IPROTO_UPSERT);
 	/* Check if the statement can be inserted in the vy_mem. */
-	assert(stmt->format_id == tuple_format_id(mem->format));
+	assert(vy_stmt_is_key(stmt) ||
+	       stmt->format_id == tuple_format_id(mem->format));
 	/* The statement must be from a lsregion. */
 	assert(!vy_stmt_is_refable(stmt));
 	size_t size = tuple_size(stmt);
@@ -282,15 +283,14 @@ vy_mem_iterator_curr_stmt(struct vy_mem_iterator *itr)
 }
 
 /**
- * Make a step in directions defined by @iterator_type.
+ * Make a step in the iterator direction.
  * @retval 0 success
  * @retval 1 EOF
  */
 static int
-vy_mem_iterator_step(struct vy_mem_iterator *itr,
-		     enum iterator_type iterator_type)
+vy_mem_iterator_step(struct vy_mem_iterator *itr)
 {
-	if (iterator_type == ITER_LE || iterator_type == ITER_LT)
+	if (itr->iterator_type == ITER_LE || itr->iterator_type == ITER_LT)
 		vy_mem_tree_iterator_prev(&itr->mem->tree, &itr->curr_pos);
 	else
 		vy_mem_tree_iterator_next(&itr->mem->tree, &itr->curr_pos);
@@ -309,83 +309,111 @@ vy_mem_iterator_step(struct vy_mem_iterator *itr,
  * @retval 1 Not found
  */
 static int
-vy_mem_iterator_find_lsn(struct vy_mem_iterator *itr,
-			 enum iterator_type iterator_type,
-			 const struct tuple *key)
+vy_mem_iterator_find_lsn(struct vy_mem_iterator *itr)
 {
+	/* Skip to the first statement visible in the read view. */
 	assert(!vy_mem_tree_iterator_is_invalid(&itr->curr_pos));
 	assert(itr->curr_stmt == vy_mem_iterator_curr_stmt(itr));
 	struct key_def *cmp_def = itr->mem->cmp_def;
 	while (vy_stmt_lsn(itr->curr_stmt) > (**itr->read_view).vlsn ||
 	       vy_stmt_flags(itr->curr_stmt) & VY_STMT_SKIP_READ) {
-		if (vy_mem_iterator_step(itr, iterator_type) != 0 ||
-		    (iterator_type == ITER_EQ &&
-		     vy_stmt_compare(key, itr->curr_stmt, cmp_def))) {
+		if (vy_mem_iterator_step(itr) != 0 ||
+		    (itr->iterator_type == ITER_EQ &&
+		     vy_stmt_compare(itr->key, itr->curr_stmt, cmp_def))) {
 			itr->curr_stmt = NULL;
 			return 1;
 		}
 	}
-	if (iterator_type == ITER_LE || iterator_type == ITER_LT) {
-		struct vy_mem_tree_iterator prev_pos = itr->curr_pos;
-		vy_mem_tree_iterator_prev(&itr->mem->tree, &prev_pos);
-
-		while (!vy_mem_tree_iterator_is_invalid(&prev_pos)) {
-			const struct tuple *prev_stmt =
-				*vy_mem_tree_iterator_get_elem(&itr->mem->tree,
-							       &prev_pos);
-			if (vy_stmt_lsn(prev_stmt) > (**itr->read_view).vlsn ||
-			    vy_stmt_flags(prev_stmt) & VY_STMT_SKIP_READ ||
-			    vy_tuple_compare(itr->curr_stmt, prev_stmt,
-					     cmp_def) != 0)
-				break;
-			itr->curr_pos = prev_pos;
-			itr->curr_stmt = prev_stmt;
-			vy_mem_tree_iterator_prev(&itr->mem->tree, &prev_pos);
-		}
+	if (iterator_direction(itr->iterator_type) > 0)
+		return 0;
+	/*
+	 * Since statements are sorted by LSN in descending order,
+	 * for LE/LT iterator we must skip to the statement with
+	 * max LSN visible in the read view.
+	 */
+	struct vy_mem_tree_iterator prev_pos = itr->curr_pos;
+	vy_mem_tree_iterator_prev(&itr->mem->tree, &prev_pos);
+	if (vy_mem_tree_iterator_is_invalid(&prev_pos)) {
+		/* No more statements. */
+		return 0;
 	}
-	assert(itr->curr_stmt != NULL);
+	const struct tuple *prev_stmt;
+	prev_stmt = *vy_mem_tree_iterator_get_elem(&itr->mem->tree, &prev_pos);
+	if (vy_stmt_lsn(prev_stmt) > (**itr->read_view).vlsn ||
+	    vy_stmt_compare(itr->curr_stmt, prev_stmt, cmp_def) != 0) {
+		/*
+		 * The next statement is either invisible in
+		 * the read view or for another key.
+		 */
+		return 0;
+	}
+	/*
+	 * We could iterate linearly until a statement invisible
+	 * in the read view is found, but there's a good chance
+	 * that this key is frequently updated and so the iteration
+	 * is going to take long. So instead we look it up - it's
+	 * pretty cheap anyway.
+	 */
+	struct tree_mem_key tree_key;
+	tree_key.stmt = itr->curr_stmt;
+	tree_key.lsn = (**itr->read_view).vlsn;
+	itr->curr_pos = vy_mem_tree_lower_bound(&itr->mem->tree,
+						&tree_key, NULL);
+	assert(!vy_mem_tree_iterator_is_invalid(&itr->curr_pos));
+	itr->curr_stmt = *vy_mem_tree_iterator_get_elem(&itr->mem->tree,
+							&itr->curr_pos);
+
+	/* Skip VY_STMT_SKIP_READ statements, if any. */
+	while (vy_stmt_flags(itr->curr_stmt) & VY_STMT_SKIP_READ) {
+		vy_mem_tree_iterator_next(&itr->mem->tree, &itr->curr_pos);
+		assert(!vy_mem_tree_iterator_is_invalid(&itr->curr_pos));
+		itr->curr_stmt = *vy_mem_tree_iterator_get_elem(&itr->mem->tree,
+								&itr->curr_pos);
+	}
 	return 0;
 }
 
 /**
- * Position the iterator to the first entry in the memory tree
- * satisfying the search criteria for a given key and direction.
+ * Position the iterator to the first statement satisfying the
+ * iterator search criteria and following the given key (pass
+ * NULL to start iteration).
  *
  * @retval 0 Found
  * @retval 1 Not found
  */
 static int
-vy_mem_iterator_seek(struct vy_mem_iterator *itr,
-		     enum iterator_type iterator_type,
-		     const struct tuple *key)
+vy_mem_iterator_seek(struct vy_mem_iterator *itr, const struct tuple *last_key)
 {
 	itr->stat->lookup++;
+	itr->search_started = true;
 	itr->version = itr->mem->version;
 	itr->curr_stmt = NULL;
 
+	const struct tuple *key = itr->key;
+	enum iterator_type iterator_type = itr->iterator_type;
+	if (last_key != NULL) {
+		key = last_key;
+		iterator_type = iterator_direction(itr->iterator_type) > 0 ?
+				ITER_GT : ITER_LT;
+	}
+
+	bool exact;
 	struct tree_mem_key tree_key;
 	tree_key.stmt = key;
 	/* (lsn == INT64_MAX - 1) means that lsn is ignored in comparison */
 	tree_key.lsn = INT64_MAX - 1;
-	if (tuple_field_count(key) > 0) {
-		if (iterator_type == ITER_EQ) {
-			bool exact;
-			itr->curr_pos =
-				vy_mem_tree_lower_bound(&itr->mem->tree,
-							&tree_key, &exact);
-			if (!exact)
-				return 1;
-		} else if (iterator_type == ITER_LE ||
-			   iterator_type == ITER_GT) {
+	if (!vy_stmt_is_empty_key(key)) {
+		if (iterator_type == ITER_LE || iterator_type == ITER_GT) {
 			itr->curr_pos =
 				vy_mem_tree_upper_bound(&itr->mem->tree,
-							&tree_key, NULL);
+							&tree_key, &exact);
 		} else {
-			assert(iterator_type == ITER_GE ||
+			assert(iterator_type == ITER_EQ ||
+			       iterator_type == ITER_GE ||
 			       iterator_type == ITER_LT);
 			itr->curr_pos =
 				vy_mem_tree_lower_bound(&itr->mem->tree,
-							&tree_key, NULL);
+							&tree_key, &exact);
 		}
 	} else if (iterator_type == ITER_LE) {
 		itr->curr_pos = vy_mem_tree_invalid_iterator();
@@ -399,21 +427,14 @@ vy_mem_iterator_seek(struct vy_mem_iterator *itr,
 	if (vy_mem_tree_iterator_is_invalid(&itr->curr_pos))
 		return 1;
 	itr->curr_stmt = vy_mem_iterator_curr_stmt(itr);
-	return vy_mem_iterator_find_lsn(itr, iterator_type, key);
-}
-
-/**
- * Start iteration.
- *
- * @retval 0 Found
- * @retval 1 Not found
- */
-static int
-vy_mem_iterator_start(struct vy_mem_iterator *itr)
-{
-	assert(!itr->search_started);
-	itr->search_started = true;
-	return vy_mem_iterator_seek(itr, itr->iterator_type, itr->key);
+	if (itr->iterator_type == ITER_EQ &&
+	    ((last_key == NULL && !exact) ||
+	     (last_key != NULL && vy_stmt_compare(itr->key, itr->curr_stmt,
+						  itr->mem->cmp_def) != 0))) {
+		itr->curr_stmt = NULL;
+		return 1;
+	}
+	return vy_mem_iterator_find_lsn(itr);
 }
 
 /* }}} vy_mem_iterator support functions */
@@ -449,7 +470,7 @@ static NODISCARD int
 vy_mem_iterator_next_key(struct vy_mem_iterator *itr)
 {
 	if (!itr->search_started)
-		return vy_mem_iterator_start(itr);
+		return vy_mem_iterator_seek(itr, NULL);
 	if (!itr->curr_stmt) /* End of search. */
 		return 1;
 	assert(itr->mem->version == itr->version);
@@ -458,19 +479,25 @@ vy_mem_iterator_next_key(struct vy_mem_iterator *itr)
 	struct key_def *cmp_def = itr->mem->cmp_def;
 
 	const struct tuple *prev_stmt = itr->curr_stmt;
-	do {
-		if (vy_mem_iterator_step(itr, itr->iterator_type) != 0) {
-			itr->curr_stmt = NULL;
-			return 1;
-		}
-	} while (vy_tuple_compare(prev_stmt, itr->curr_stmt, cmp_def) == 0);
+	if (vy_mem_iterator_step(itr) != 0) {
+		itr->curr_stmt = NULL;
+		return 1;
+	}
+	/*
+	 * If we are still on the same key after making a step,
+	 * there's a good chance there's a lot of statements
+	 * for this key so instead of iterating further we simply
+	 * look up the next key - it's pretty cheap anyway.
+	 */
+	if (vy_stmt_compare(prev_stmt, itr->curr_stmt, cmp_def) == 0)
+		return vy_mem_iterator_seek(itr, itr->curr_stmt);
 
 	if (itr->iterator_type == ITER_EQ &&
 	    vy_stmt_compare(itr->key, itr->curr_stmt, cmp_def) != 0) {
 		itr->curr_stmt = NULL;
 		return 1;
 	}
-	return vy_mem_iterator_find_lsn(itr, itr->iterator_type, itr->key);
+	return vy_mem_iterator_find_lsn(itr);
 }
 
 /*
@@ -497,7 +524,7 @@ next:
 
 	const struct tuple *next_stmt;
 	next_stmt = *vy_mem_tree_iterator_get_elem(&itr->mem->tree, &next_pos);
-	if (vy_tuple_compare(itr->curr_stmt, next_stmt, cmp_def) != 0)
+	if (vy_stmt_compare(itr->curr_stmt, next_stmt, cmp_def) != 0)
 		return 1;
 
 	itr->curr_pos = next_pos;
@@ -551,29 +578,11 @@ vy_mem_iterator_skip(struct vy_mem_iterator *itr,
 	if (itr->search_started &&
 	    (itr->curr_stmt == NULL || last_stmt == NULL ||
 	     iterator_direction(itr->iterator_type) *
-	     vy_tuple_compare(itr->curr_stmt, last_stmt,
-			      itr->mem->cmp_def) > 0))
+	     vy_stmt_compare(itr->curr_stmt, last_stmt, itr->mem->cmp_def) > 0))
 		return 0;
 
 	vy_history_cleanup(history);
-
-	const struct tuple *key = itr->key;
-	enum iterator_type iterator_type = itr->iterator_type;
-	if (last_stmt != NULL) {
-		key = last_stmt;
-		iterator_type = iterator_direction(iterator_type) > 0 ?
-				ITER_GT : ITER_LT;
-	}
-
-	itr->search_started = true;
-	vy_mem_iterator_seek(itr, iterator_type, key);
-
-	if (itr->iterator_type == ITER_EQ && last_stmt != NULL &&
-	    itr->curr_stmt != NULL && vy_stmt_compare(itr->key,
-			itr->curr_stmt, itr->mem->cmp_def) != 0)
-		itr->curr_stmt = NULL;
-
-	if (itr->curr_stmt != NULL)
+	if (vy_mem_iterator_seek(itr, last_stmt) == 0)
 		return vy_mem_iterator_get_history(itr, history);
 	return 0;
 }
@@ -586,21 +595,8 @@ vy_mem_iterator_restore(struct vy_mem_iterator *itr,
 	if (!itr->search_started || itr->version == itr->mem->version)
 		return 0;
 
-	const struct tuple *key = itr->key;
-	enum iterator_type iterator_type = itr->iterator_type;
-	if (last_stmt != NULL) {
-		key = last_stmt;
-		iterator_type = iterator_direction(iterator_type) > 0 ?
-				ITER_GT : ITER_LT;
-	}
-
 	const struct tuple *prev_stmt = itr->curr_stmt;
-	vy_mem_iterator_seek(itr, iterator_type, key);
-
-	if (itr->iterator_type == ITER_EQ && itr->curr_stmt != NULL &&
-	    vy_stmt_compare(itr->key, itr->curr_stmt, itr->mem->cmp_def) != 0)
-		itr->curr_stmt = NULL;
-
+	vy_mem_iterator_seek(itr, last_stmt);
 	if (prev_stmt == itr->curr_stmt)
 		return 0;
 

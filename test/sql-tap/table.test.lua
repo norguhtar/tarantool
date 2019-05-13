@@ -1,6 +1,6 @@
 #!/usr/bin/env tarantool
 test = require("sqltester")
-test:plan(78)
+test:plan(77)
 
 --!./tcltestrunner.lua
 -- 2001 September 15
@@ -131,7 +131,7 @@ test:do_test(
         return test:catchsql "CREATE TABLE test2(id primary key, two text default 'hi')"
     end, {
         -- <table-2.1>
-        1, "table TEST2 already exists"
+        1, "Space 'TEST2' already exists"
         -- </table-2.1>
     })
 
@@ -228,7 +228,7 @@ test:do_test(
 --
 local big_table = [[CREATE TABLE big(
   f1 varchar(20),
-  f2 char(10),
+  f2 varchar(10),
   f3 varchar(30) primary key,
   f4 text,
   f5 text,
@@ -266,7 +266,7 @@ test:do_catchsql_test(
         CREATE TABLE BIG(xyz int primary key)
     ]], {
         -- <table-3.2>
-        1, "table BIG already exists"
+        1, "Space 'BIG' already exists"
         -- </table-3.2>
     })
 
@@ -276,7 +276,7 @@ test:do_catchsql_test(
         CREATE TABLE biG(xyz int primary key)
     ]], {
         -- <table-3.3>
-        1, "table BIG already exists"
+        1, "Space 'BIG' already exists"
         -- </table-3.3>
     })
 
@@ -286,7 +286,7 @@ test:do_catchsql_test(
         CREATE TABLE bIg(xyz int primary key)
     ]], {
         -- <table-3.4>
-        1, "table BIG already exists"
+        1, "Space 'BIG' already exists"
         -- </table-3.4>
     })
 
@@ -377,7 +377,7 @@ test:do_catchsql_test(
         DROP TABLE test009
     ]], {
         -- <table-5.1.1>
-        1, "no such table: TEST009"
+        1, "Space 'TEST009' does not exist"
         -- </table-5.1.1>
     })
 
@@ -495,8 +495,8 @@ test:do_catchsql_test(
           key int,
           "14_vac" int,
           fuzzy_dog_12 varchar(10),
-          beginn blob,
-          endd blob
+          beginn SCALAR,
+          endd SCALAR
         )
     ]=], {
         -- <table-7.1>
@@ -551,8 +551,8 @@ test:do_execsql2_test(
           key int,
           "14_vac" int,
           fuzzy_dog_12 varchar(10),
-          beginn blob,
-          endd blob
+          beginn SCALAR,
+          endd SCALAR
         );
         INSERT INTO t2 SELECT * from weird;
         SELECT * FROM t2;
@@ -620,7 +620,7 @@ test:do_catchsql_test(
 		CREATE TEMP TABLE t1(a INTEGER PRIMARY KEY, b VARCHAR(10));
 	]], {
 	-- <temp>
-	1, "near \"TEMP\": syntax error"
+	1, "Syntax error near 'TEMP'"
 	-- <temp>
 	})
 
@@ -630,7 +630,7 @@ test:do_catchsql_test(
 		CREATE TEMPORARY TABLE t1(a INTEGER PRIMARY KEY, b VARCHAR(10));
 	]], {
 	-- <temporary>
-	1, "near \"TEMPORARY\": syntax error"
+	1, "Syntax error near 'TEMPORARY'"
 	-- <temporary>
 	})
 
@@ -650,7 +650,7 @@ test:do_catchsql_test(
         SELECT * FROM t5;
     ]], {
         -- <table-8.7>
-        1, "no such table: T5"
+        1, "Space 'T5' does not exist"
         -- </table-8.7>
     })
 
@@ -697,17 +697,17 @@ test:do_catchsql_test(
         CREATE TABLE t6(a int primary key,b int,a int);
     ]], {
         -- <table-9.1>
-        1, "duplicate column name: A"
+        1, "Space field 'A' is duplicate"
         -- </table-9.1>
     })
 
 test:do_catchsql_test(
     "table-9.2",
     [[
-        CREATE TABLE t6(a varchar(100) primary key, b blob, a integer);
+        CREATE TABLE t6(a varchar(100) primary key, b SCALAR, a integer);
     ]], {
         -- <table-9.2>
-        1, "duplicate column name: A"
+        1, "Space field 'A' is duplicate"
         -- </table-9.2>
     })
 
@@ -722,7 +722,7 @@ test:do_catchsql_test(
         INSERT INTO t6 VALUES(NULL);
     ]], {
         -- <table-10.1>
-        1, "NOT NULL constraint failed: T6.A"
+        1, "Failed to execute SQL statement: NOT NULL constraint failed: T6.A"
         -- </table-10.1>
     })
 
@@ -892,11 +892,11 @@ test:do_execsql_test(
     [[
         CREATE TABLE t7(
            a integer primary key,
-           b numeric(5,10),
-           c char(8),
+           b FLOAT,
+           c VARCHAR(8),
            d VARCHAR(9),
-           e blob,
-           f BLOB,
+           e SCALAR,
+           f SCALAR,
            g Text,
            h text
         );
@@ -945,6 +945,9 @@ test:do_execsql_test(
 -- Test the ability to have default values of CURRENT_TIME, CURRENT_DATE
 -- and CURRENT_TIMESTAMP.
 --
+--  Disabled until #3694 is resolved.
+--
+if false then
 test:do_execsql_test(
     "table-13.1",
     [[
@@ -960,6 +963,7 @@ test:do_execsql_test(
         
         -- </table-13.1>
     })
+end
 
 ----------------------------------------------------------------------
 -- Test cases table-14.*
@@ -973,7 +977,7 @@ test:do_execsql_test(
 -- MUST_WORK_TEST database should be locked #2554
 if 0>0 then
 local function try_drop_t9()
-    box.sql.execute("DROP TABLE t9;")
+    box.execute("DROP TABLE t9;")
     return 1
 end
 box.internal.sql_create_function("try_drop_t9", try_drop_t9)
@@ -1138,7 +1142,7 @@ test:do_test(
 --   DROP TABLE IF EXISTS t1;
 --   BEGIN;
 --   CREATE TABLE t1 AS SELECT zeroblob(2e20);
--- } {1 {string or blob too big}}
+-- } {1 {string or SCALAR too big}}
 -- do_execsql_test table-18.2 {
 --   COMMIT;
 --   PRAGMA integrity_check;
@@ -1207,7 +1211,7 @@ test:do_catchsql_test(
         INSERT INTO T21 VALUES(1, 2, 2);
     ]], {
         -- <table-21.2>
-        1, "Duplicate key exists in unique index 'pk_unnamed_T21_1' in space 'T21'"
+        1, "Failed to execute SQL statement: Duplicate key exists in unique index 'pk_unnamed_T21_1' in space 'T21'"
         -- </table-21.2>
     })
 
@@ -1217,7 +1221,7 @@ test:do_catchsql_test(
         INSERT INTO T21 VALUES(1, -1, 1);
     ]], {
         -- <table-21.3>
-        1, "CHECK constraint failed: T21"
+        1, "Failed to execute SQL statement: CHECK constraint failed: T21"
         -- </table-21.3>
     })
 
@@ -1227,7 +1231,7 @@ test:do_catchsql_test(
         INSERT INTO T21 VALUES(1, 1, -1);
     ]], {
         -- <table-21.4>
-        1, "CHECK constraint failed: T21"
+        1, "Failed to execute SQL statement: CHECK constraint failed: T21"
         -- </table-21.4>
     })
 
@@ -1253,7 +1257,7 @@ test:do_catchsql_test(
         );
     ]], {
         -- <table-22.1>
-        1,"keyword \"CONSTRAINT\" is reserved"
+        1,"Keyword 'CONSTRAINT' is reserved. Please use double quotes if 'CONSTRAINT' is an identifier."
         -- </table-22.1>
     })
 
@@ -1279,7 +1283,7 @@ test:do_catchsql_test(
         INSERT INTO T22 VALUES(2, 1, 1);
     ]], {
         -- <table-22.3>
-        1,"Duplicate key exists in unique index 'unique_ONE_2' in space 'T22'"
+        1,"Failed to execute SQL statement: Duplicate key exists in unique index 'unique_ONE_2' in space 'T22'"
         -- </table-22.3>
     })
 
@@ -1304,7 +1308,7 @@ test:do_catchsql_test(
         INSERT INTO T24 VALUES(2, 1, 1);
     ]], {
         -- <table-22.5>
-        1, "Duplicate key exists in unique index 'unique_TWO_2' in space 'T24'"
+        1, "Failed to execute SQL statement: Duplicate key exists in unique index 'unique_TWO_2' in space 'T24'"
         -- </table-22.5>
     })
 
@@ -1318,7 +1322,7 @@ test:do_catchsql_test(
         );
     ]], {
         -- <table-22.6>
-        1,"keyword \"CONSTRAINT\" is reserved"
+        1,"Keyword 'CONSTRAINT' is reserved. Please use double quotes if 'CONSTRAINT' is an identifier."
         -- </table-22.6>
     })
 
@@ -1332,7 +1336,7 @@ test:do_catchsql_test(
         );
     ]], {
         -- <table-22.7>
-        1,"keyword \"CONSTRAINT\" is reserved"
+        1,"Keyword 'CONSTRAINT' is reserved. Please use double quotes if 'CONSTRAINT' is an identifier."
         -- </table-22.7>
     })
 
@@ -1358,7 +1362,7 @@ test:do_catchsql_test(
         INSERT INTO T28 VALUES(11);
     ]], {
         -- <table-22.9>
-        1,"Duplicate key exists in unique index 'pk_unnamed_T28_1' in space 'T28'"
+        1,"Failed to execute SQL statement: Duplicate key exists in unique index 'pk_unnamed_T28_1' in space 'T28'"
         -- </table-22.9>
     })
 
@@ -1368,7 +1372,7 @@ test:do_catchsql_test(
         INSERT INTO T28 VALUES(0);
     ]], {
         -- <table-22.10>
-        1, "CHECK constraint failed: CHECK1"
+        1, "Failed to execute SQL statement: CHECK constraint failed: CHECK1"
         -- </table-22.10>
     })
 
@@ -1378,7 +1382,7 @@ test:do_catchsql_test(
         INSERT INTO T28 VALUES(9);
     ]], {
         -- <table-22.11>
-        1, "CHECK constraint failed: CHECK2"
+        1, "Failed to execute SQL statement: CHECK constraint failed: CHECK2"
         -- </table-22.11>
     })
 
@@ -1401,7 +1405,7 @@ test:do_execsql_test(
     [[
         CREATE TABLE T23(
            id INT PRIMARY KEY,
-           u CHAR
+           u VARCHAR(1)
         );
     ]], {
         -- <table-23.2>

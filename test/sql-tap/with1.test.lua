@@ -1,6 +1,6 @@
 #!/usr/bin/env tarantool
 test = require("sqltester")
-test:plan(65)
+test:plan(64)
 
 --!./tcltestrunner.lua
 -- 2014 January 11
@@ -134,7 +134,7 @@ test:do_catchsql_test(3.2, [[
   SELECT * FROM tmp;
 ]], {
   -- <3.2>
-  1, "duplicate WITH table name: TMP"
+  1, "Ambiguous table name in WITH query: TMP"
   -- </3.2>
 })
 
@@ -178,7 +178,7 @@ test:do_catchsql_test(3.6, [[
   SELECT * FROM tmp;
 ]], {
   -- <3.6>
-  1, [[keyword "SELECT" is reserved]]
+  1, [[Keyword 'SELECT' is reserved. Please use double quotes if 'SELECT' is an identifier.]]
   -- </3.6>
 })
 
@@ -595,11 +595,11 @@ test:do_execsql_test("8.2-soduko", [[
 
     /* The tricky bit. */
     x(s, ind) AS (
-      SELECT sud, instr(sud, '.') FROM input
+      SELECT sud, position('.', sud) FROM input
       UNION ALL
       SELECT
         substr(s, 1, ind-1) || z || substr(s, ind+1),
-        instr( substr(s, 1, ind-1) || z || substr(s, ind+1), '.' )
+        position('.', substr(s, 1, ind-1) || z || substr(s, ind+1))
        FROM x, digits AS z
       WHERE ind>0
         AND NOT EXISTS (
@@ -782,7 +782,7 @@ test:do_catchsql_test("10.7.1", [[
   SELECT * FROM t
 ]], {
   -- <10.7.1>
-  1, "1st ORDER BY term does not match any column in the result set"
+  1, "Error at ORDER BY in place 1: term does not match any column in the result set"
   -- </10.7.1>
 })
 
@@ -795,17 +795,6 @@ test:do_execsql_test("10.7.2", [[
   -- <10.7.2>
   1, 2, 3, 4, 5
   -- </10.7.2>
-})
-
-test:do_execsql_test("10.7.3", [[
-  WITH t(a) AS (
-    SELECT 1 AS b UNION ALL SELECT a+1 AS c FROM t WHERE a<5 ORDER BY c
-  ) 
-  SELECT * FROM t
-]], {
-  -- <10.7.3>
-  1, 2, 3, 4, 5
-  -- </10.7.3>
 })
 
 -- # Test COLLATE clauses attached to ORDER BY.
@@ -1029,7 +1018,7 @@ test:do_catchsql_test(13.1, [[
   SELECT i FROM c;
 ]], {
   -- <13.1>
-  1, "no tables specified"
+  1, "Failed to expand '*' in SELECT statement without FROM clause"
   -- </13.1>
 })
 
@@ -1038,7 +1027,7 @@ test:do_catchsql_test(13.2, [[
   SELECT i FROM c;
 ]], {
   -- <13.2>
-  1, "no tables specified"
+  1, "Failed to expand '*' in SELECT statement without FROM clause"
   -- </13.2>
 })
 
@@ -1076,7 +1065,7 @@ test:do_catchsql_test(16.1, [[
   SELECT * FROM i;
 ]], {
   -- <16.1>
-  1, "recursive aggregate queries not supported"
+  1, "Tarantool does not support recursive aggregate queries"
   -- </16.1>
 })
 

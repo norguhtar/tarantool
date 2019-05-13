@@ -39,40 +39,33 @@ test_run:cleanup_cluster()
 SERVERS = { 'autobootstrap1', 'autobootstrap2', 'autobootstrap3' }
 
 -- Deploy a cluster.
-test_run:create_cluster(SERVERS, "replication", {args="0.1"})
+test_run:create_cluster(SERVERS, "replication", {args="0.03"})
 test_run:wait_fullmesh(SERVERS)
-test_run:cmd("switch autobootstrap1")
-test_run = require('test_run').new()
-box.cfg{replication_timeout = 0.01, replication_connect_timeout=0.01}
-test_run:cmd("switch autobootstrap2")
-test_run = require('test_run').new()
-box.cfg{replication_timeout = 0.01, replication_connect_timeout=0.01}
 test_run:cmd("switch autobootstrap3")
 test_run = require('test_run').new()
-fiber=require('fiber')
-box.cfg{replication_timeout = 0.01, replication_connect_timeout=0.01}
+fiber = require('fiber')
 _ = box.schema.space.create('test_timeout'):create_index('pk')
 test_run:cmd("setopt delimiter ';'")
-function wait_follow(replicaA, replicaB)
+function wait_not_follow(replicaA, replicaB)
     return test_run:wait_cond(function()
         return replicaA.status ~= 'follow' or replicaB.status ~= 'follow'
-    end, 0.01)
-end ;
+    end, box.cfg.replication_timeout)
+end;
 function test_timeout()
     local replicaA = box.info.replication[1].upstream or box.info.replication[2].upstream
     local replicaB = box.info.replication[3].upstream or box.info.replication[2].upstream
     local follows = test_run:wait_cond(function()
         return replicaA.status == 'follow' or replicaB.status == 'follow'
-    end, 0.1)
-    if not follows then error('replicas not in follow status') end
-    for i = 0, 99 do 
+    end)
+    if not follows then error('replicas are not in the follow status') end
+    for i = 0, 99 do
         box.space.test_timeout:replace({1})
-        if wait_follow(replicaA, replicaB) then
+        if wait_not_follow(replicaA, replicaB) then
             return error(box.info.replication)
         end
     end
     return true
-end ;
+end;
 test_run:cmd("setopt delimiter ''");
 test_timeout()
 
@@ -143,8 +136,8 @@ box.schema.user.revoke('guest', 'replication')
 test_run:cmd('create server er_load1 with script="replication/er_load1.lua"')
 test_run:cmd('create server er_load2 with script="replication/er_load2.lua"')
 test_run:cmd('start server er_load1 with wait=False, wait_load=False')
--- instance er_load2 will fail with error ER_READONLY. this is ok.
--- We only test here that er_load1 doesn't assert.
+-- Instance er_load2 will fail with error ER_REPLICASET_UUID_MISMATCH.
+-- This is OK since we only test here that er_load1 doesn't assert.
 test_run:cmd('start server er_load2 with wait=True, wait_load=True, crash_expected = True')
 test_run:cmd('stop server er_load1')
 -- er_load2 exits automatically.

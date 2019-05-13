@@ -35,7 +35,7 @@
 #include <stddef.h>
 #include <sys/uio.h> /* struct iovec */
 
-#include "tt_uuid.h"
+#include "uuid/tt_uuid.h"
 #include "diag.h"
 #include "vclock.h"
 
@@ -47,7 +47,7 @@ enum {
 	XROW_HEADER_IOVMAX = 1,
 	XROW_BODY_IOVMAX = 2,
 	XROW_IOVMAX = XROW_HEADER_IOVMAX + XROW_BODY_IOVMAX,
-	XROW_HEADER_LEN_MAX = 40,
+	XROW_HEADER_LEN_MAX = 52,
 	XROW_BODY_LEN_MAX = 128,
 	IPROTO_HEADER_LEN = 28,
 	/** 7 = sizeof(iproto_body_bin). */
@@ -59,10 +59,33 @@ struct xrow_header {
 
 	uint32_t type;
 	uint32_t replica_id;
+	/**
+	 * Replication group identifier. 0 - replicaset,
+	 * 1 - replica-local.
+         */
 	uint32_t group_id;
 	uint64_t sync;
-	int64_t lsn; /* LSN must be signed for correct comparison */
+	/** Log sequence number.
+	 * LSN must be signed for correct comparison
+	 */
+	int64_t lsn;
+	/** Timestamp. Used only when writing to the write ahead
+	 * log.
+	 */
 	double tm;
+	/*
+	 * Transaction identifier. LSN of the first row in the
+	 * transaction.
+	 */
+	int64_t tsn;
+	/**
+	 * True for the last row in a multi-statement transaction,
+	 * or single-statement transaction. Is only encoded in the
+	 * write ahead log for multi-statement transactions.
+	 * Single-statement transactions do not encode
+	 * tsn and is_commit flag to save space.
+	 */
+	bool is_commit;
 
 	int bodycnt;
 	uint32_t schema_version;
@@ -105,14 +128,16 @@ xrow_header_encode(const struct xrow_header *header, uint64_t sync,
  * @param header[out] xrow to fill
  * @param pos[inout] the start of a packet
  * @param end the end of a packet
- *
+ * @param end_is_exact if set, raise an error in case the packet
+ *                     ends before @end
  * @retval 0 on success
  * @retval -1 on error (check diag)
- * @post *pos == end on success
+ * @post *pos <= end on success
+ * @post *pos == end on success if @end_is_exact is set
  */
 int
-xrow_header_decode(struct xrow_header *header,
-		   const char **pos, const char *end);
+xrow_header_decode(struct xrow_header *header, const char **pos,
+		   const char *end, bool end_is_exact);
 
 /**
  * DML request.
@@ -653,9 +678,9 @@ vclock_follow_xrow(struct vclock* vclock, const struct xrow_header *row)
 /** @copydoc xrow_header_decode. */
 static inline void
 xrow_header_decode_xc(struct xrow_header *header, const char **pos,
-		      const char *end)
+		      const char *end, bool end_is_exact)
 {
-	if (xrow_header_decode(header, pos, end) < 0)
+	if (xrow_header_decode(header, pos, end, end_is_exact) < 0)
 		diag_raise();
 }
 

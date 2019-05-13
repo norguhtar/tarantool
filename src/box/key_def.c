@@ -30,6 +30,7 @@
  */
 #include "json/json.h"
 #include "key_def.h"
+#include "tuple_format.h"
 #include "tuple_compare.h"
 #include "tuple_extract_key.h"
 #include "tuple_hash.h"
@@ -37,6 +38,7 @@
 #include "schema_def.h"
 #include "coll_id_cache.h"
 #include "small/region.h"
+#include "coll/coll.h"
 
 const char *sort_order_strs[] = { "asc", "desc", "undef" };
 
@@ -129,12 +131,11 @@ key_def_delete(struct key_def *def)
 }
 
 static void
-key_def_set_cmp(struct key_def *def)
+key_def_set_func(struct key_def *def)
 {
-	def->tuple_compare = tuple_compare_create(def);
-	def->tuple_compare_with_key = tuple_compare_with_key_create(def);
-	tuple_hash_func_set(def);
-	tuple_extract_key_set(def);
+	key_def_set_compare_func(def);
+	key_def_set_hash_func(def);
+	key_def_set_extract_func(def);
 }
 
 static void
@@ -208,7 +209,7 @@ key_def_new(const struct key_part_def *parts, uint32_t part_count)
 				 &path_pool, TUPLE_OFFSET_SLOT_NIL, 0);
 	}
 	assert(path_pool == (char *)def + sz);
-	key_def_set_cmp(def);
+	key_def_set_func(def);
 	return def;
 }
 
@@ -261,7 +262,7 @@ box_key_def_new(uint32_t *fields, uint32_t *types, uint32_t part_count)
 				 NULL, COLL_NONE, SORT_ORDER_ASC, NULL, 0,
 				 NULL, TUPLE_OFFSET_SLOT_NIL, 0);
 	}
-	key_def_set_cmp(key_def);
+	key_def_set_func(key_def);
 	return key_def;
 }
 
@@ -333,7 +334,7 @@ key_def_update_optionality(struct key_def *def, uint32_t min_field_count)
 		if (def->has_optional_parts)
 			break;
 	}
-	key_def_set_cmp(def);
+	key_def_set_func(def);
 }
 
 int
@@ -623,6 +624,24 @@ key_def_contains(const struct key_def *first, const struct key_def *second)
 	return true;
 }
 
+/**
+ * Return true if to_merge can be merged into key_def.
+ */
+static bool
+key_def_can_merge(const struct key_def *key_def,
+		  const struct key_part *to_merge)
+{
+	const struct key_part *part = key_def_find(key_def, to_merge);
+	if (part == NULL)
+		return true;
+	/*
+	 * If both key_def and to_merge have the same field, then
+	 * we can merge to_merge into key_def only if its collation
+	 * may impose a strict order on otherwise equal keys.
+	 */
+	return coll_can_merge(part->coll, to_merge->coll);
+}
+
 struct key_def *
 key_def_merge(const struct key_def *first, const struct key_def *second)
 {
@@ -639,7 +658,7 @@ key_def_merge(const struct key_def *first, const struct key_def *second)
 	part = second->parts;
 	end = part + second->part_count;
 	for (; part != end; part++) {
-		if (key_def_find(first, part) != NULL)
+		if (!key_def_can_merge(first, part))
 			--new_part_count;
 		else
 			sz += part->path_len;
@@ -677,7 +696,7 @@ key_def_merge(const struct key_def *first, const struct key_def *second)
 	part = second->parts;
 	end = part + second->part_count;
 	for (; part != end; part++) {
-		if (key_def_find(first, part) != NULL)
+		if (!key_def_can_merge(first, part))
 			continue;
 		key_def_set_part(new_def, pos++, part->fieldno, part->type,
 				 part->nullable_action, part->coll,
@@ -686,8 +705,45 @@ key_def_merge(const struct key_def *first, const struct key_def *second)
 				 part->offset_slot_cache, part->format_epoch);
 	}
 	assert(path_pool == (char *)new_def + sz);
-	key_def_set_cmp(new_def);
+	key_def_set_func(new_def);
 	return new_def;
+}
+
+struct key_def *
+key_def_find_pk_in_cmp_def(const struct key_def *cmp_def,
+			   const struct key_def *pk_def,
+			   struct region *region)
+{
+	struct key_def *extracted_def = NULL;
+	size_t region_svp = region_used(region);
+
+	/* First, dump primary key parts as is. */
+	struct key_part_def *parts = region_alloc(region,
+			pk_def->part_count * sizeof(*parts));
+	if (parts == NULL) {
+		diag_set(OutOfMemory, pk_def->part_count * sizeof(*parts),
+			 "region", "key def parts");
+		goto out;
+	}
+	if (key_def_dump_parts(pk_def, parts, region) != 0)
+		goto out;
+	/*
+	 * Second, update field numbers to match the primary key
+	 * parts in a secondary key.
+	 */
+	for (uint32_t i = 0; i < pk_def->part_count; i++) {
+		const struct key_part *part = key_def_find(cmp_def,
+							   &pk_def->parts[i]);
+		assert(part != NULL);
+		parts[i].fieldno = part - cmp_def->parts;
+		parts[i].path = NULL;
+	}
+
+	/* Finally, allocate the new key definition. */
+	extracted_def = key_def_new(parts, pk_def->part_count);
+out:
+	region_truncate(region, region_svp);
+	return extracted_def;
 }
 
 int

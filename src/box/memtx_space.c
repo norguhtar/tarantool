@@ -716,21 +716,21 @@ sequence_data_index_create_snapshot_iterator(struct index *index)
 static struct index *
 sequence_data_index_new(struct memtx_engine *memtx, struct index_def *def)
 {
-	struct memtx_hash_index *index = memtx_hash_index_new(memtx, def);
+	struct index *index = memtx_hash_index_new(memtx, def);
 	if (index == NULL)
 		return NULL;
 
 	static struct index_vtab vtab;
 	static bool vtab_initialized;
 	if (!vtab_initialized) {
-		vtab = *index->base.vtab;
+		vtab = *index->vtab;
 		vtab.create_snapshot_iterator =
 			sequence_data_index_create_snapshot_iterator;
 		vtab_initialized = true;
 	}
 
-	index->base.vtab = &vtab;
-	return &index->base;
+	index->vtab = &vtab;
+	return index;
 }
 
 static struct index *
@@ -751,13 +751,13 @@ memtx_space_create_index(struct space *space, struct index_def *index_def)
 
 	switch (index_def->type) {
 	case HASH:
-		return (struct index *)memtx_hash_index_new(memtx, index_def);
+		return memtx_hash_index_new(memtx, index_def);
 	case TREE:
-		return (struct index *)memtx_tree_index_new(memtx, index_def);
+		return memtx_tree_index_new(memtx, index_def);
 	case RTREE:
-		return (struct index *)memtx_rtree_index_new(memtx, index_def);
+		return memtx_rtree_index_new(memtx, index_def);
 	case BITSET:
-		return (struct index *)memtx_bitset_index_new(memtx, index_def);
+		return memtx_bitset_index_new(memtx, index_def);
 	default:
 		unreachable();
 		return NULL;
@@ -961,6 +961,7 @@ static const struct space_vtab memtx_space_vtab = {
 	/* .build_index = */ memtx_space_build_index,
 	/* .swap_index = */ generic_space_swap_index,
 	/* .prepare_alter = */ memtx_space_prepare_alter,
+	/* .invalidate = */ generic_space_invalidate,
 };
 
 struct space *
@@ -976,19 +977,11 @@ memtx_space_new(struct memtx_engine *memtx,
 
 	/* Create a format from key and field definitions. */
 	int key_count = 0;
-	struct index_def *index_def;
-	rlist_foreach_entry(index_def, key_list, link)
-		key_count++;
-	struct key_def **keys = region_alloc(&fiber()->gc,
-					     sizeof(*keys) * key_count);
+	struct key_def **keys = index_def_to_key_def(key_list, &key_count);
 	if (keys == NULL) {
 		free(memtx_space);
 		return NULL;
 	}
-	key_count = 0;
-	rlist_foreach_entry(index_def, key_list, link)
-		keys[key_count++] = index_def->key_def;
-
 	struct tuple_format *format =
 		tuple_format_new(&memtx_tuple_format_vtab, memtx, keys, key_count,
 				 def->fields, def->field_count,

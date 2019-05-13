@@ -192,7 +192,7 @@ struct Mem {
 	u32 flags;		/* Some combination of MEM_Null, MEM_Str, MEM_Dyn, etc. */
 	/** Subtype for this value. */
 	enum sql_subtype subtype;
-	int n;			/* Number of characters in string value, excluding '\0' */
+	int n;			/* size (in bytes) of string value, excluding trailing '\0' */
 	char *z;		/* String or BLOB value */
 	/* ShallowCopy only needs to copy the information above */
 	char *zMalloc;		/* Space to hold MEM_Str or MEM_Blob if szMalloc>0 */
@@ -253,6 +253,21 @@ struct Mem {
 #define MEM_Zero 0x0000
 #endif
 
+/**
+ * In contrast to Mem_TypeMask, this one allows to get
+ * pure type of memory cell, i.e. without _Dyn/_Zero and other
+ * auxiliary flags.
+ */
+enum {
+	MEM_PURE_TYPE_MASK = 0x1f
+};
+
+/**
+ * Simple type to str convertor. It is used to simplify
+ * error reporting.
+ */
+char *
+mem_type_to_str(const struct Mem *p);
 
 /* Return TRUE if Mem X contains dynamically allocated content - anything
  * that needs to be deallocated to avoid a leak.
@@ -547,7 +562,18 @@ int sqlVdbeCompareMsgpack(const char **key1,
  */
 int sqlVdbeRecordCompareMsgpack(const void *key1,
 				    struct UnpackedRecord *key2);
-u32 sqlVdbeMsgpackGet(const unsigned char *buf, Mem * pMem);
+
+/**
+ * Decode msgpack and save value into VDBE memory cell.
+ *
+ * @param buf Buffer to deserialize msgpack from.
+ * @param mem Memory cell to write value into.
+ * @param len[out] Length of decoded part.
+ * @retval Return code: < 0 in case of error.
+ * @retval 0 on success.
+ */
+int
+vdbe_decode_msgpack_into_mem(const char *buf, struct Mem *mem, uint32_t *len);
 
 struct mpstream;
 struct region;

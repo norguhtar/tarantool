@@ -270,6 +270,16 @@ t = box.tuple.new(require('yaml').decode("[17711728, {1000: 'xxx'}]"))
 t:update({{'=', 2, t[2]}})
 t
 t = nil
+
+--
+-- gh-4041: Invalid field on empty tuple update.
+--
+t = box.tuple.new{}
+t:update({{'=', 1, 1}})
+t:upsert({{'=', 1, 1}})
+t:update({{'+', 1, 1}})
+t = nil
+
 --------------------------------------------------------------------------------
 -- test msgpack.encode + tuple
 --------------------------------------------------------------------------------
@@ -354,9 +364,9 @@ box.tuple.bsize == t.bsize
 --
 format = {}
 format[1] = {name = 'aaa', type = 'unsigned'}
-format[2] = {name = 'bbb', type = 'unsigned'}
-format[3] = {name = 'ccc', type = 'unsigned'}
-format[4] = {name = 'ddd', type = 'unsigned'}
+format[2] = {name = 'bbb', type = 'unsigned', is_nullable = true}
+format[3] = {name = 'ccc', type = 'unsigned', is_nullable = true}
+format[4] = {name = 'ddd', type = 'unsigned', is_nullable = true}
 s = box.schema.create_space('test', {format = format})
 s:frommap({ddd = 1, aaa = 2, ccc = 3, bbb = 4})
 s:frommap({ddd = 1, aaa = 2, bbb = 3})
@@ -384,3 +394,35 @@ t2 = box.tuple.new(2)
 t1 = t1:update{{'+', 1, 1}}
 
 test_run:cmd("clear filter")
+
+--
+-- gh-3882: Inappropriate storage optimization for sparse arrays
+--          in box.tuple.new.
+--
+t = {}
+t[1] = 1
+t[2] = 2
+t[11] = 11
+box.tuple.new(t)
+
+s2 = box.schema.space.create('test')
+test_run:cmd("setopt delimiter ';'")
+s2:format({{name="a", type="str"}, {name="b", type="str", is_nullable=true},
+           {name="c", type="str", is_nullable=true},
+           {name="d", type="str", is_nullable=true},
+           {name="e", type="str", is_nullable=true},
+           {name="f", type="str", is_nullable=true},
+           {name="g", type="str", is_nullable=true},
+           {name="h", type="str", is_nullable=true},
+           {name="i", type="str", is_nullable=true},
+           {name="j", type="str", is_nullable=true},
+           {name="k", type="str", is_nullable=true}});
+test_run:cmd("setopt delimiter ''");
+s2:frommap({a="1", k="11"})
+
+--
+-- gh-4045: space:frommap():tomap() conversion fail
+--
+s2:frommap({a="1", k="11"}):tomap({names_only = true})
+
+s2:drop()

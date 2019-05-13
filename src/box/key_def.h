@@ -375,6 +375,21 @@ key_def_contains(const struct key_def *first, const struct key_def *second);
 struct key_def *
 key_def_merge(const struct key_def *first, const struct key_def *second);
 
+/**
+ * Create a key definition suitable for extracting primary key
+ * parts from an extended secondary key.
+ * @param cmp_def   Extended secondary key definition
+ *                  (must include primary key parts).
+ * @param pk_def    Primary key definition.
+ * @param region    Region used for temporary allocations.
+ * @retval not NULL Pointer to the extracted key definition.
+ * @retval NULL     Memory allocation error.
+ */
+struct key_def *
+key_def_find_pk_in_cmp_def(const struct key_def *cmp_def,
+			   const struct key_def *pk_def,
+			   struct region *region);
+
 /*
  * Check that parts of the key match with the key definition.
  * @param key_def Key definition.
@@ -464,6 +479,15 @@ key_part_cmp(const struct key_part *parts1, uint32_t part_count1,
 	     const struct key_part *parts2, uint32_t part_count2);
 
 /**
+ * Check if a key of @a tuple contains NULL.
+ * @param tuple Tuple to check.
+ * @param def Key def to check by.
+ * @retval Does the key contain NULL or not?
+ */
+bool
+tuple_key_contains_null(const struct tuple *tuple, struct key_def *def);
+
+/**
  * Extract key from tuple by given key definition and return
  * buffer allocated on box_txn_alloc with this key. This function
  * has O(n) complexity, where n is the number of key parts.
@@ -549,6 +573,59 @@ tuple_compare_with_key(const struct tuple *tuple, const char *key,
 		       uint32_t part_count, struct key_def *key_def)
 {
 	return key_def->tuple_compare_with_key(tuple, key, part_count, key_def);
+}
+
+/**
+ * Compute hash of a tuple field.
+ * @param ph1 - pointer to running hash
+ * @param pcarry - pointer to carry
+ * @param field - pointer to field data
+ * @param coll - collation to use for hashing strings or NULL
+ * @return size of processed data
+ *
+ * This function updates @ph1 and @pcarry and advances @field
+ * by the number of processed bytes.
+ */
+uint32_t
+tuple_hash_field(uint32_t *ph1, uint32_t *pcarry, const char **field,
+		 struct coll *coll);
+
+/**
+ * Compute hash of a key part.
+ * @param ph1 - pointer to running hash
+ * @param pcarry - pointer to carry
+ * @param tuple - tuple to hash
+ * @param part - key part
+ * @return size of processed data
+ *
+ * This function updates @ph1 and @pcarry.
+ */
+uint32_t
+tuple_hash_key_part(uint32_t *ph1, uint32_t *pcarry, const struct tuple *tuple,
+		    struct key_part *part);
+
+/**
+ * Calculates a common hash value for a tuple
+ * @param tuple - a tuple
+ * @param key_def - key_def for field description
+ * @return - hash value
+ */
+static inline uint32_t
+tuple_hash(const struct tuple *tuple, struct key_def *key_def)
+{
+	return key_def->tuple_hash(tuple, key_def);
+}
+
+/**
+ * Calculate a common hash value for a key
+ * @param key - full key (msgpack fields w/o array marker)
+ * @param key_def - key_def for field description
+ * @return - hash value
+ */
+static inline uint32_t
+key_hash(const char *key, struct key_def *key_def)
+{
+	return key_def->key_hash(key, key_def);
 }
 
 #if defined(__cplusplus)

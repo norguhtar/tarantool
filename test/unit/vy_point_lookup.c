@@ -24,7 +24,7 @@ write_run(struct vy_run *run, const char *dir_name,
 	if (vy_run_writer_create(&writer, run, dir_name,
 				 lsm->space_id, lsm->index_id,
 				 lsm->cmp_def, lsm->key_def,
-				 4096, 0.1) != 0)
+				 4096, 0.1, false) != 0)
 		goto fail;
 
 	if (wi->iface->start(wi) != 0)
@@ -66,7 +66,8 @@ test_basic()
 
 	int rc;
 	struct vy_lsm_env lsm_env;
-	rc = vy_lsm_env_create(&lsm_env, ".", &generation, NULL, NULL);
+	rc = vy_lsm_env_create(&lsm_env, ".", &generation,
+			       stmt_env.key_format, NULL, NULL);
 	is(rc, 0, "vy_lsm_env_create");
 
 	struct vy_run_env run_env;
@@ -83,10 +84,8 @@ test_basic()
 	isnt(key_def, NULL, "key_def is not NULL");
 
 	vy_cache_create(&cache, &cache_env, key_def, true);
-	struct tuple_format *format = tuple_format_new(&vy_tuple_format_vtab,
-						       NULL, &key_def, 1, NULL,
-						       0, 0, NULL, false,
-						       false);
+	struct tuple_format *format = vy_stmt_format_new(&stmt_env, &key_def, 1,
+							 NULL, 0, 0, NULL);
 	isnt(format, NULL, "tuple_format_new is not NULL");
 	tuple_format_ref(format);
 
@@ -192,9 +191,9 @@ test_basic()
 		tmpl_val.upsert_value = 8;
 		vy_mem_insert_template(run_mem, &tmpl_val);
 	}
-	struct vy_stmt_stream *write_stream
-		= vy_write_iterator_new(pk->cmp_def, pk->disk_format,
-					true, true, &read_views, NULL);
+	struct vy_stmt_stream *write_stream;
+	write_stream = vy_write_iterator_new(pk->cmp_def, true, true,
+					     &read_views, NULL);
 	vy_write_iterator_new_mem(write_stream, run_mem);
 	struct vy_run *run = vy_run_new(&run_env, 1);
 	isnt(run, NULL, "vy_run_new");
@@ -223,9 +222,8 @@ test_basic()
 		tmpl_val.upsert_value = 4;
 		vy_mem_insert_template(run_mem, &tmpl_val);
 	}
-	write_stream
-		= vy_write_iterator_new(pk->cmp_def, pk->disk_format,
-					true, true, &read_views, NULL);
+	write_stream = vy_write_iterator_new(pk->cmp_def, true, true,
+					     &read_views, NULL);
 	vy_write_iterator_new_mem(write_stream, run_mem);
 	run = vy_run_new(&run_env, 2);
 	isnt(run, NULL, "vy_run_new");

@@ -495,6 +495,7 @@ static const struct space_vtab sysview_space_vtab = {
 	/* .build_index = */ generic_space_build_index,
 	/* .swap_index = */ generic_space_swap_index,
 	/* .prepare_alter = */ generic_space_prepare_alter,
+	/* .invalidate = */ generic_space_invalidate,
 };
 
 static void
@@ -516,11 +517,36 @@ sysview_engine_create_space(struct engine *engine, struct space_def *def,
 			 "malloc", "struct space");
 		return NULL;
 	}
-	if (space_create(space, engine, &sysview_space_vtab,
-			 def, key_list, NULL) != 0) {
+	int key_count = 0;
+	/*
+	 * Despite the fact that space with sysview engine
+	 * actually doesn't own tuples, setup of format will be
+	 * useful in order to unify it with SQL views and to use
+	 * same machinery to do selects from such views from Lua
+	 * land.
+	 */
+	struct key_def **keys = index_def_to_key_def(key_list, &key_count);
+	if (keys == NULL) {
 		free(space);
 		return NULL;
 	}
+	struct tuple_format *format =
+		tuple_format_new(NULL, NULL, keys, key_count, def->fields,
+				 def->field_count, def->exact_field_count,
+				 def->dict, def->opts.is_temporary,
+				 def->opts.is_ephemeral);
+	if (format == NULL) {
+		free(space);
+		return NULL;
+	}
+	tuple_format_ref(format);
+	if (space_create(space, engine, &sysview_space_vtab,
+			 def, key_list, format) != 0) {
+		free(space);
+		return NULL;
+	}
+	/* Format is now referenced by the space. */
+	tuple_format_unref(format);
 	return space;
 }
 
@@ -534,6 +560,7 @@ static const struct engine_vtab sysview_engine_vtab = {
 	/* .commit = */ generic_engine_commit,
 	/* .rollback_statement = */ generic_engine_rollback_statement,
 	/* .rollback = */ generic_engine_rollback,
+	/* .switch_to_ro = */ generic_engine_switch_to_ro,
 	/* .bootstrap = */ generic_engine_bootstrap,
 	/* .begin_initial_recovery = */ generic_engine_begin_initial_recovery,
 	/* .begin_final_recovery = */ generic_engine_begin_final_recovery,

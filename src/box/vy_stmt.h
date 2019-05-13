@@ -49,6 +49,9 @@ extern "C" {
 struct xrow_header;
 struct region;
 struct tuple_format;
+struct tuple_dictionary;
+struct tuple_bloom;
+struct tuple_bloom_builder;
 struct iovec;
 
 #define MAX_LSN (INT64_MAX / 2)
@@ -61,14 +64,41 @@ static_assert(VY_UPSERT_THRESHOLD <= UINT8_MAX, "n_upserts max value");
 static_assert(VY_UPSERT_INF == VY_UPSERT_THRESHOLD + 1,
 	      "inf must be threshold + 1");
 
-/** Vinyl statement vtable. */
-extern struct tuple_format_vtab vy_tuple_format_vtab;
+/** Vinyl statement environment. */
+struct vy_stmt_env {
+	/** Vinyl statement vtable. */
+	struct tuple_format_vtab tuple_format_vtab;
+	/**
+	 * Max tuple size
+	 * @see box.cfg.vinyl_max_tuple_size
+	 */
+	size_t max_tuple_size;
+	/**
+	 * Tuple format used for creating key statements (e.g.
+	 * statements read from secondary index runs). It doesn't
+	 * impose any restrictions on tuple fields, neither does
+	 * it setup offset map.
+	 *
+	 * Note, all key statements must use this format, because
+	 * vy_stmt_is_key() is built upon that assumption.
+	 */
+	struct tuple_format *key_format;
+};
 
-/**
- * Max tuple size
- * @see box.cfg.vinyl_max_tuple_size
- */
-extern size_t vy_max_tuple_size;
+/** Initialize a vinyl statement environment. */
+void
+vy_stmt_env_create(struct vy_stmt_env *env);
+
+/** Destroy a vinyl statement environment. */
+void
+vy_stmt_env_destroy(struct vy_stmt_env *env);
+
+/** Create a vinyl statement format. */
+struct tuple_format *
+vy_stmt_format_new(struct vy_stmt_env *env, struct key_def *const *keys,
+		   uint16_t key_count, const struct field_def *fields,
+		   uint32_t field_count, uint32_t exact_field_count,
+		   struct tuple_dictionary *dict);
 
 /** Statement flags. */
 enum {
@@ -113,12 +143,9 @@ enum {
 };
 
 /**
- * There are two groups of statements:
+ * A vinyl statement can have either key or tuple format.
  *
- *  - SELECT is "key" statement.
- *  - DELETE, UPSERT and REPLACE are "tuple" statements.
- *
- * REPLACE/UPSERT/DELETE statements structure:
+ * Tuple statement structure:
  *                               data_offset
  *                                    ^
  * +----------------------------------+
@@ -134,7 +161,7 @@ enum {
  * indexed then before MessagePack data are stored offsets only for field 3 and
  * field 5.
  *
- * SELECT statements structure.
+ * Key statement structure:
  * +--------------+-----------------+
  * | array header | part1 ... partN |  -  MessagePack data
  * +--------------+-----------------+
@@ -144,7 +171,7 @@ enum {
 struct vy_stmt {
 	struct tuple base;
 	int64_t lsn;
-	uint8_t  type; /* IPROTO_SELECT/REPLACE/UPSERT/DELETE */
+	uint8_t  type; /* IPROTO_INSERT/REPLACE/UPSERT/DELETE */
 	uint8_t flags;
 	/**
 	 * Offsets array concatenated with MessagePack fields
@@ -219,12 +246,58 @@ vy_stmt_set_n_upserts(struct tuple *stmt, uint8_t n)
 	*((uint8_t *)stmt - 1) = n;
 }
 
+/** Return true if the given format is a key format. */
+static inline bool
+vy_stmt_is_key_format(const struct tuple_format *format)
+{
+	struct vy_stmt_env *env = format->engine;
+	return env->key_format == format;
+}
+
+/** Return true if the vinyl statement has key format. */
+static inline bool
+vy_stmt_is_key(const struct tuple *stmt)
+{
+	return vy_stmt_is_key_format(tuple_format(stmt));
+}
+
 /**
- * Free the tuple of a vinyl space.
- * @pre tuple->refs  == 0
+ * Return the number of key parts defined in the given vinyl
+ * statement.
+ *
+ * If the statement represents a tuple, we assume that it has
+ * all key parts defined.
  */
-void
-vy_tuple_delete(struct tuple_format *format, struct tuple *tuple);
+static inline uint32_t
+vy_stmt_key_part_count(const struct tuple *stmt, struct key_def *key_def)
+{
+	if (vy_stmt_is_key(stmt)) {
+		uint32_t part_count = tuple_field_count(stmt);
+		assert(part_count <= key_def->part_count);
+		return part_count;
+	}
+	return key_def->part_count;
+}
+
+/**
+ * Return true if the given vinyl statement contains all
+ * key parts, i.e. can be used for an exact match lookup.
+ */
+static inline bool
+vy_stmt_is_full_key(const struct tuple *stmt, struct key_def *key_def)
+{
+	return vy_stmt_key_part_count(stmt, key_def) == key_def->part_count;
+}
+
+/**
+ * Return true if the given vinyl statement stores an empty
+ * (match all) key.
+ */
+static inline bool
+vy_stmt_is_empty_key(const struct tuple *stmt)
+{
+	return tuple_field_count(stmt) == 0;
+}
 
 /**
  * Duplicate the statememnt.
@@ -290,133 +363,48 @@ vy_stmt_unref_if_possible(struct tuple *stmt)
 }
 
 /**
- * Specialized comparators are faster than general-purpose comparators.
- * For example, vy_stmt_compare - slowest comparator because it in worst case
- * checks all combinations of key and tuple types, but
- * vy_key_compare - fastest comparator, because it shouldn't check statement
- * types.
+ * Compare two vinyl statements taking into account their
+ * formats (key or tuple).
  */
-
-/**
- * Compare SELECT/DELETE statements using the key definition
- * @param a left operand (SELECT/DELETE)
- * @param b right operand (SELECT/DELETE)
- * @param cmp_def key definition, with primary parts
- *
- * @retval 0   if a == b
- * @retval > 0 if a > b
- * @retval < 0 if a < b
- *
- * @sa key_compare()
- */
-static inline int
-vy_key_compare(const struct tuple *a, const struct tuple *b,
-	       struct key_def *cmp_def)
-{
-	assert(vy_stmt_type(a) == IPROTO_SELECT);
-	assert(vy_stmt_type(b) == IPROTO_SELECT);
-	return key_compare(tuple_data(a), tuple_data(b), cmp_def);
-}
-
-/**
- * Compare REPLACE/UPSERTS statements.
- * @param a left operand (REPLACE/UPSERT)
- * @param b right operand (REPLACE/UPSERT)
- * @param cmp_def key definition with primary parts
- *
- * @retval 0   if a == b
- * @retval > 0 if a > b
- * @retval < 0 if a < b
- *
- * @sa tuple_compare()
- */
-static inline int
-vy_tuple_compare(const struct tuple *a, const struct tuple *b,
-		 struct key_def *cmp_def)
-{
-	enum iproto_type type;
-	type = vy_stmt_type(a);
-	assert(type == IPROTO_INSERT || type == IPROTO_REPLACE ||
-	       type == IPROTO_UPSERT || type == IPROTO_DELETE);
-	type = vy_stmt_type(b);
-	assert(type == IPROTO_INSERT || type == IPROTO_REPLACE ||
-	       type == IPROTO_UPSERT || type == IPROTO_DELETE);
-	(void)type;
-	return tuple_compare(a, b, cmp_def);
-}
-
-/**
- * Compare REPLACE/UPSERT with SELECT/DELETE using the key
- * definition
- * @param tuple Left operand (REPLACE/UPSERT)
- * @param key   MessagePack array of key fields, right operand.
- *
- * @retval > 0  tuple > key.
- * @retval == 0 tuple == key in all fields
- * @retval == 0 tuple is prefix of key
- * @retval == 0 key is a prefix of tuple
- * @retval < 0  tuple < key.
- *
- * @sa tuple_compare_with_key()
- */
-static inline int
-vy_tuple_compare_with_raw_key(const struct tuple *tuple, const char *key,
-			      struct key_def *key_def)
-{
-	uint32_t part_count = mp_decode_array(&key);
-	return tuple_compare_with_key(tuple, key, part_count, key_def);
-}
-
-/** @sa vy_tuple_compare_with_raw_key(). */
-static inline int
-vy_tuple_compare_with_key(const struct tuple *tuple, const struct tuple *key,
-			  struct key_def *key_def)
-{
-	const char *key_mp = tuple_data(key);
-	uint32_t part_count = mp_decode_array(&key_mp);
-	return tuple_compare_with_key(tuple, key_mp, part_count, key_def);
-}
-
-/** @sa tuple_compare. */
 static inline int
 vy_stmt_compare(const struct tuple *a, const struct tuple *b,
 		struct key_def *key_def)
 {
-	bool a_is_tuple = vy_stmt_type(a) != IPROTO_SELECT;
-	bool b_is_tuple = vy_stmt_type(b) != IPROTO_SELECT;
+	bool a_is_tuple = !vy_stmt_is_key(a);
+	bool b_is_tuple = !vy_stmt_is_key(b);
 	if (a_is_tuple && b_is_tuple) {
-		return vy_tuple_compare(a, b, key_def);
+		return tuple_compare(a, b, key_def);
 	} else if (a_is_tuple && !b_is_tuple) {
-		return vy_tuple_compare_with_key(a, b, key_def);
+		const char *key = tuple_data(b);
+		uint32_t part_count = mp_decode_array(&key);
+		return tuple_compare_with_key(a, key, part_count, key_def);
 	} else if (!a_is_tuple && b_is_tuple) {
-		return -vy_tuple_compare_with_key(b, a, key_def);
+		const char *key = tuple_data(a);
+		uint32_t part_count = mp_decode_array(&key);
+		return -tuple_compare_with_key(b, key, part_count, key_def);
 	} else {
 		assert(!a_is_tuple && !b_is_tuple);
-		return vy_key_compare(a, b, key_def);
+		return key_compare(tuple_data(a), tuple_data(b), key_def);
 	}
 }
 
-/** @sa tuple_compare_with_raw_key. */
+/**
+ * Compare a vinyl statement (key or tuple) with a raw key
+ * (msgpack array).
+ */
 static inline int
 vy_stmt_compare_with_raw_key(const struct tuple *stmt, const char *key,
 			     struct key_def *key_def)
 {
-	if (vy_stmt_type(stmt) != IPROTO_SELECT)
-		return vy_tuple_compare_with_raw_key(stmt, key, key_def);
+	if (!vy_stmt_is_key(stmt)) {
+		uint32_t part_count = mp_decode_array(&key);
+		return tuple_compare_with_key(stmt, key, part_count, key_def);
+	}
 	return key_compare(tuple_data(stmt), key, key_def);
 }
 
-/** @sa tuple_compare_with_key. */
-static inline int
-vy_stmt_compare_with_key(const struct tuple *stmt, const struct tuple *key,
-			 struct key_def *key_def)
-{
-	assert(vy_stmt_type(key) == IPROTO_SELECT);
-	return vy_stmt_compare_with_raw_key(stmt, tuple_data(key), key_def);
-}
-
 /**
- * Create the SELECT statement from raw MessagePack data.
+ * Create a key statement from raw MessagePack data.
  * @param format     Format of an index.
  * @param key        MessagePack data that contain an array of
  *                   fields WITHOUT the array header.
@@ -427,8 +415,7 @@ vy_stmt_compare_with_key(const struct tuple *stmt, const struct tuple *key,
  * @retval not NULL Success.
  */
 struct tuple *
-vy_stmt_new_select(struct tuple_format *format, const char *key,
-		   uint32_t part_count);
+vy_key_new(struct tuple_format *format, const char *key, uint32_t part_count);
 
 /**
  * Copy the key in a new memory area.
@@ -437,27 +424,6 @@ vy_stmt_new_select(struct tuple_format *format, const char *key,
  */
 char *
 vy_key_dup(const char *key);
-
-/**
- * Create a new surrogate DELETE from @a key using format.
- *
- * Example:
- * key: {a3, a5}
- * key_def: { 3, 5 }
- * result: {nil, nil, a3, nil, a5}
- *
- * @param key     MessagePack array with key fields.
- * @param cmp_def Key definition of the result statement (incudes
- *                primary key parts).
- * @param format  Target tuple format.
- *
- * @retval not NULL Success.
- * @retval     NULL Memory or format error.
- */
-struct tuple *
-vy_stmt_new_surrogate_delete_from_key(const char *key,
-				      struct key_def *cmp_def,
-				      struct tuple_format *format);
 
 /**
  * Create a new surrogate DELETE from @a tuple using @a format.
@@ -515,6 +481,20 @@ vy_stmt_new_replace(struct tuple_format *format, const char *tuple,
  */
 struct tuple *
 vy_stmt_new_insert(struct tuple_format *format, const char *tuple_begin,
+		   const char *tuple_end);
+
+/**
+ * Create the DELETE statement from raw MessagePack data.
+ * @param format Format of a tuple for offsets generating.
+ * @param tuple_begin MessagePack data that contain an array of fields WITH the
+ *                    array header.
+ * @param tuple_end End of the array that begins from @param tuple_begin.
+ *
+ * @retval NULL     Memory allocation error.
+ * @retval not NULL Success.
+ */
+struct tuple *
+vy_stmt_new_delete(struct tuple_format *format, const char *tuple_begin,
 		   const char *tuple_end);
 
  /**
@@ -583,7 +563,7 @@ vy_stmt_upsert_ops(const struct tuple *tuple, uint32_t *mp_size)
 }
 
 /**
- * Create the SELECT statement from MessagePack array.
+ * Create a key statement from MessagePack array.
  * @param format  Format of an index.
  * @param key     MessagePack array of key fields.
  *
@@ -593,18 +573,13 @@ vy_stmt_upsert_ops(const struct tuple *tuple, uint32_t *mp_size)
 static inline struct tuple *
 vy_key_from_msgpack(struct tuple_format *format, const char *key)
 {
-	uint32_t part_count;
-	/*
-	 * The statement already is a key, so simply copy it in
-	 * the new struct vy_stmt as SELECT.
-	 */
-	part_count = mp_decode_array(&key);
-	return vy_stmt_new_select(format, key, part_count);
+	uint32_t part_count = mp_decode_array(&key);
+	return vy_key_new(format, key, part_count);
 }
 
 /**
  * Extract the key from a tuple by the given key definition
- * and store the result in a SELECT statement allocated with
+ * and store the result in a key statement allocated with
  * malloc().
  */
 struct tuple *
@@ -613,13 +588,29 @@ vy_stmt_extract_key(const struct tuple *stmt, struct key_def *key_def,
 
 /**
  * Extract the key from msgpack by the given key definition
- * and store the result in a SELECT statement allocated with
+ * and store the result in a key statement allocated with
  * malloc().
  */
 struct tuple *
 vy_stmt_extract_key_raw(const char *data, const char *data_end,
 			struct key_def *key_def,
 			struct tuple_format *format);
+
+/**
+ * Add a statement hash to a bloom filter builder.
+ * See tuple_bloom_builder_add() for more details.
+ */
+int
+vy_stmt_bloom_builder_add(struct tuple_bloom_builder *builder,
+			  const struct tuple *stmt, struct key_def *key_def);
+
+/**
+ * Check if a statement hash is present in a bloom filter.
+ * See tuple_bloom_maybe_has() for more details.
+ */
+bool
+vy_stmt_bloom_maybe_has(const struct tuple_bloom *bloom,
+			const struct tuple *stmt, struct key_def *key_def);
 
 /**
  * Encode vy_stmt for a primary key as xrow_header
@@ -658,8 +649,7 @@ vy_stmt_encode_secondary(const struct tuple *value, struct key_def *cmp_def,
  * @retval NULL on error
  */
 struct tuple *
-vy_stmt_decode(struct xrow_header *xrow, const struct key_def *key_def,
-	       struct tuple_format *format, bool is_primary);
+vy_stmt_decode(struct xrow_header *xrow, struct tuple_format *format);
 
 /**
  * Format a statement into string.
@@ -675,28 +665,6 @@ vy_stmt_snprint(char *buf, int size, const struct tuple *stmt);
  */
 const char *
 vy_stmt_str(const struct tuple *stmt);
-
-/**
- * Check if a key of @a tuple contains NULL.
- * @param tuple Tuple to check.
- * @param def Key def to check by.
- * @retval Does the key contain NULL or not?
- */
-static inline bool
-vy_tuple_key_contains_null(const struct tuple *tuple, struct key_def *def)
-{
-	struct tuple_format *format = tuple_format(tuple);
-	const char *data = tuple_data(tuple);
-	const uint32_t *field_map = tuple_field_map(tuple);
-	for (struct key_part *part = def->parts, *end = part + def->part_count;
-	     part < end; ++part) {
-		const char *field =
-			tuple_field_raw_by_part(format, data, field_map, part);
-		if (field == NULL || mp_typeof(*field) == MP_NIL)
-			return true;
-	}
-	return false;
-}
 
 #if defined(__cplusplus)
 } /* extern "C" */

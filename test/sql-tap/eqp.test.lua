@@ -140,8 +140,8 @@ test:do_eqp_test(
         -- <1.9>
         {3, 0, 0, "SCAN TABLE T3"},
         {1, 0, 0, "COMPOUND SUBQUERIES 2 AND 3 USING TEMP B-TREE (EXCEPT)"},
-        {0, 0, 0,"SCAN TABLE T3"},
-        {0, 1, 1,"SCAN SUBQUERY 1"},
+        {0, 0, 1,"SCAN SUBQUERY 1"},
+        {0, 1, 0,"SCAN TABLE T3"},
 
         -- </1.9>
     })
@@ -727,8 +727,8 @@ test:drop_all_tables()
 test:do_execsql_test(
     7.0,
     [[
-        CREATE TABLE t1(idt1  INT primary key, a INT, b INT, ex CHAR(100));
-        CREATE TABLE t2(idt2  INT primary key, a INT, b INT, ex CHAR(100));
+        CREATE TABLE t1(idt1  INT primary key, a INT, b INT, ex VARCHAR(100));
+        CREATE TABLE t2(idt2  INT primary key, a INT, b INT, ex VARCHAR(100));
         CREATE INDEX i1 ON t2(a);
     ]])
 

@@ -122,12 +122,12 @@ fiber.sleep(0.1) -- wait for master to relay data
 -- the old snapshot.
 wait_gc(1) or box.info.gc()
 wait_xlog(2) or fio.listdir('./master')
-test_run:cmd("switch replica")
--- Unblock the replica and break replication.
-box.error.injection.set("ERRINJ_WAL_DELAY", false)
-box.cfg{replication = {}}
--- Restart the replica to reestablish replication.
-test_run:cmd("restart server replica")
+-- Imitate the replica crash and, then, wake up.
+-- Just 'stop server replica' (SIGTERM) is not sufficient to stop
+-- a tarantool instance when ERRINJ_WAL_DELAY is set, because
+-- "tarantool" thread wait for paused "wal" thread infinitely.
+test_run:cmd("stop server replica with signal=KILL")
+test_run:cmd("start server replica")
 -- Wait for the replica to catch up.
 test_run:cmd("switch replica")
 test_run:wait_cond(function() return box.space.test:count() == 310 end, 10)
@@ -189,7 +189,6 @@ box.cfg{replication = replica_port}
 -- Stop the replica and write a few WALs.
 test_run:cmd("stop server replica")
 test_run:cmd("cleanup server replica")
-test_run:cmd("delete server replica")
 _ = s:auto_increment{}
 box.snapshot()
 _ = s:auto_increment{}
@@ -207,7 +206,65 @@ wait_xlog(0, 10) or fio.listdir('./master')
 -- Restore the config.
 box.cfg{replication = {}}
 
+s:truncate()
+
+--
+-- Check that a master doesn't remove WAL files needed by a replica
+-- in case the replica has local changes due to which its vclock has
+-- greater signature than the master's (gh-4106).
+--
+test_run:cmd("start server replica")
+
+-- Temporarily disable replication.
+test_run:cmd("switch replica")
+replication = box.cfg.replication
+box.cfg{replication = {}}
+
+-- Generate some WALs on the master.
+test_run:cmd("switch default")
+test_run:cmd("setopt delimiter ';'")
+for i = 1, 4 do
+    for j = 1, 100 do
+        s:replace{1, i, j}
+    end
+    box.snapshot()
+end;
+test_run:cmd("setopt delimiter ''");
+
+-- Stall WAL writes on the replica and reestablish replication,
+-- then bump local LSN and break replication on WAL error so that
+-- the master sends all rows and receives ack with the replica's
+-- vclock, but not all rows are actually applied on the replica.
+-- The master must not delete unconfirmed WALs even though the
+-- replica's vclock has a greater signature (checked later on).
+test_run:cmd("switch replica")
+box.error.injection.set('ERRINJ_WAL_DELAY', true)
+box.cfg{replication_connect_quorum = 0} -- disable sync
+box.cfg{replication = replication}
+fiber = require('fiber')
+test_run:cmd("setopt delimiter ';'");
+_ = fiber.create(function()
+    box.begin()
+    for i = 1, 1000 do
+        box.space.test:replace{1, i}
+    end
+    box.commit()
+    box.error.injection.set('ERRINJ_WAL_WRITE_DISK', true)
+end);
+test_run:cmd("setopt delimiter ''");
+box.error.injection.set('ERRINJ_WAL_DELAY', false)
+
+-- Restart the replica and wait for it to sync.
+test_run:cmd("switch default")
+test_run:cmd("stop server replica")
+test_run:cmd("start server replica")
+test_run:wait_lsn('replica', 'default')
+
 -- Cleanup.
+test_run:cmd("stop server replica")
+test_run:cmd("cleanup server replica")
+test_run:cmd("delete server replica")
+test_run:cleanup_cluster()
 s:drop()
 box.error.injection.set("ERRINJ_RELAY_REPORT_INTERVAL", 0)
 box.schema.user.revoke('guest', 'replication')

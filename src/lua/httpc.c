@@ -34,12 +34,12 @@
  */
 #define DRIVER_LUA_UDATA_NAME	"httpc"
 
-#include <http_parser.h>
+#include "http_parser/http_parser.h"
 #include "src/httpc.h"
 #include "say.h"
 #include "lua/utils.h"
 #include "lua/httpc.h"
-#include "src/fiber.h"
+#include "core/fiber.h"
 
 /** Internal util functions
  * {{{
@@ -138,6 +138,8 @@ parse_headers(lua_State *L, char *buffer, size_t len,
 /** lib Lua API {{{
  */
 
+enum { MAX_HTTP_HEADER_NAME_LEN = 32 };
+
 static int
 luaT_httpc_request(lua_State *L)
 {
@@ -153,7 +155,7 @@ luaT_httpc_request(lua_State *L)
 		return luaT_error(L);
 
 	double timeout = TIMEOUT_INFINITY;
-	int max_header_name_length = HEADER_NAME_LEN;
+	int max_header_name_length = MAX_HTTP_HEADER_NAME_LEN;
 	if (lua_isstring(L, 4)) {
 		size_t len = 0;
 		const char *body = lua_tolstring(L, 4, &len);
@@ -175,6 +177,19 @@ luaT_httpc_request(lua_State *L)
 	if (!lua_isnil(L, -1)) {
 		lua_pushnil(L);
 		while (lua_next(L, -2) != 0) {
+			int header_type = lua_type(L, -1);
+			if (header_type != LUA_TSTRING) {
+				const char *err_msg =
+					"headers must be string or table "\
+					"with \"__tostring\"";
+				if (header_type != LUA_TTABLE) {
+					return luaL_error(L, err_msg);
+				} else if (!luaL_getmetafield(L, -1,
+							      "__tostring")) {
+					return luaL_error(L, err_msg);
+				}
+				lua_pop(L, 1);
+			}
 			if (httpc_set_header(req, "%s: %s",
 					     lua_tostring(L, -2),
 					     lua_tostring(L, -1)) < 0) {
@@ -238,11 +253,7 @@ luaT_httpc_request(lua_State *L)
 		keepalive_interval = (long) lua_tonumber(L, -1);
 	lua_pop(L, 1);
 
-	if (httpc_set_keepalive(req, keepalive_idle,
-				keepalive_interval) < 0) {
-		httpc_request_delete(req);
-		return luaT_error(L);
-	}
+	httpc_set_keepalive(req, keepalive_idle, keepalive_interval);
 
 	lua_getfield(L, 5, "low_speed_limit");
 	if (!lua_isnil(L, -1))
@@ -274,6 +285,11 @@ luaT_httpc_request(lua_State *L)
 	lua_getfield(L, 5, "interface");
 	if (!lua_isnil(L, -1))
 		httpc_set_interface(req, lua_tostring(L, -1));
+	lua_pop(L, 1);
+
+	lua_getfield(L, 5, "follow_location");
+	if (!lua_isnil(L, -1) && lua_isboolean(L, -1))
+		httpc_set_follow_location(req, lua_toboolean(L, -1));
 	lua_pop(L, 1);
 
 	if (httpc_execute(req, timeout) != 0) {

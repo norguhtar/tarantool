@@ -4,39 +4,105 @@ test_run = require('test_run').new()
 engine = test_run:get_cfg('engine')
 ---
 ...
-box.sql.execute('pragma sql_default_engine=\''..engine..'\'')
+box.execute('pragma sql_default_engine=\''..engine..'\'')
 ---
+- row_count: 0
 ...
 -- Forbid multistatement queries.
-box.sql.execute('select 1;')
+box.execute('select 1;')
 ---
-- - [1]
+- metadata:
+  - name: '1'
+    type: integer
+  rows:
+  - [1]
 ...
-box.sql.execute('select 1; select 2;')
+box.execute('select 1; select 2;')
 ---
-- error: keyword "select" is reserved
+- error: Keyword 'select' is reserved. Please use double quotes if 'select' is an
+    identifier.
 ...
-box.sql.execute('create table t1 (id INT primary key); select 100;')
+box.execute('create table t1 (id INT primary key); select 100;')
 ---
-- error: keyword "select" is reserved
+- error: Keyword 'select' is reserved. Please use double quotes if 'select' is an
+    identifier.
 ...
 box.space.t1 == nil
 ---
 - true
 ...
-box.sql.execute(';')
+box.execute(';')
 ---
-- error: 'syntax error: empty request'
+- error: Failed to execute an empty SQL statement
 ...
-box.sql.execute('')
+box.execute('')
 ---
-- error: 'syntax error: empty request'
+- error: Failed to execute an empty SQL statement
 ...
-box.sql.execute('     ;')
+box.execute('     ;')
 ---
-- error: 'syntax error: empty request'
+- error: Failed to execute an empty SQL statement
 ...
-box.sql.execute('\n\n\n\t\t\t   ')
+box.execute('\n\n\n\t\t\t   ')
 ---
-- error: 'syntax error: empty request'
+- error: Failed to execute an empty SQL statement
+...
+-- gh-3820: only table constraints can have a name.
+--
+box.execute('CREATE TABLE test (id INTEGER PRIMARY KEY, b INTEGER CONSTRAINT c1 NULL)')
+---
+- error: Keyword 'NULL' is reserved. Please use double quotes if 'NULL' is an identifier.
+...
+box.execute('CREATE TABLE test (id INTEGER PRIMARY KEY, b INTEGER CONSTRAINT c1 DEFAULT 300)')
+---
+- error: Keyword 'DEFAULT' is reserved. Please use double quotes if 'DEFAULT' is an
+    identifier.
+...
+box.execute('CREATE TABLE test (id INTEGER PRIMARY KEY, b TEXT CONSTRAINT c1 COLLATE "binary")')
+---
+- error: Keyword 'COLLATE' is reserved. Please use double quotes if 'COLLATE' is an
+    identifier.
+...
+-- Make sure that type of literals in meta complies with its real
+-- type. For instance, typeof(0.5) is number, not integer.
+--
+box.execute('SELECT 1;')
+---
+- metadata:
+  - name: '1'
+    type: integer
+  rows:
+  - [1]
+...
+box.execute('SELECT 1.5;')
+---
+- metadata:
+  - name: '1.5'
+    type: number
+  rows:
+  - [1.5]
+...
+box.execute('SELECT 1.0;')
+---
+- metadata:
+  - name: '1.0'
+    type: number
+  rows:
+  - [1]
+...
+box.execute('SELECT \'abc\';')
+---
+- metadata:
+  - name: '''abc'''
+    type: string
+  rows:
+  - ['abc']
+...
+box.execute('SELECT X\'4D6564766564\'')
+---
+- metadata:
+  - name: X'4D6564766564'
+    type: scalar
+  rows:
+  - ['Medved']
 ...

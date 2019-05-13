@@ -135,7 +135,7 @@ local function local_eval(storage, line)
         return preprocess(storage, line:sub(2))
     end
     if storage.language == 'sql' then
-        return format(pcall(box.sql.execute, line))
+        return format(pcall(box.execute, line))
     end
     --
     -- Attempt to append 'return ' before the chunk: if the chunk is
@@ -344,8 +344,14 @@ end
 -- Read command from connected client console.listen()
 --
 local function client_read(self)
-    local delim = self.delimiter .. "\n"
-    local buf = self.client:read(delim)
+    --
+    -- Byte sequences that come over the network and come from
+    -- the local client console may have a different terminal
+    -- character. We support both possible options: LF and CRLF.
+    --
+    local delim_cr = self.delimiter .. "\r"
+    local delim_lf = self.delimiter .. "\n"
+    local buf = self.client:read({delimiter = {delim_lf, delim_cr}})
     if buf == nil then
         return nil
     elseif buf == "" then
@@ -355,7 +361,7 @@ local function client_read(self)
         return nil
     end
     -- remove trailing delimiter
-    return buf:sub(1, -#delim-1)
+    return buf:sub(1, -#self.delimiter-2)
 end
 
 --

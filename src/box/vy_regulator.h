@@ -76,6 +76,11 @@ struct vy_regulator {
 	 */
 	size_t write_rate;
 	/**
+	 * Max write rate observed since the last time when
+	 * memory dump was triggered, in bytes per second.
+	 */
+	size_t write_rate_max;
+	/**
 	 * Amount of memory that was used when the timer was
 	 * executed last time. Needed to update @write_rate.
 	 */
@@ -150,6 +155,12 @@ vy_regulator_quota_exceeded(struct vy_regulator *regulator);
 void
 vy_regulator_dump_complete(struct vy_regulator *regulator,
 			   size_t mem_dumped, double dump_duration);
+
+/**
+ * Set memory limit and update the dump watermark accordingly.
+ */
+void
+vy_regulator_set_memory_limit(struct vy_regulator *regulator, size_t limit);
 
 /**
  * Reset dump bandwidth histogram and update initial estimate.

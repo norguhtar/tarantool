@@ -122,10 +122,6 @@ static fiber_cond ro_cond;
  */
 static bool is_orphan;
 
-/* Use the shared instance of xstream for all appliers */
-static struct xstream join_stream;
-static struct xstream subscribe_stream;
-
 /**
  * The pool of fibers in the transaction processor thread
  * working on incoming messages from net, wal and other
@@ -203,25 +199,14 @@ box_process_rw(struct request *request, struct space *space,
 	return rc;
 }
 
-/**
- * Process a no-op request.
- *
- * A no-op request does not affect any space, but it
- * promotes vclock and is written to WAL.
- */
-static int
-process_nop(struct request *request)
-{
-	assert(request->type == IPROTO_NOP);
-	struct txn *txn = txn_begin_stmt(NULL);
-	if (txn == NULL)
-		return -1;
-	return txn_commit_stmt(txn, request);
-}
-
 void
 box_set_ro(bool ro)
 {
+	if (ro == is_ro)
+		return; /* nothing to do */
+	if (ro)
+		engine_switch_to_ro();
+
 	is_ro = ro;
 	fiber_cond_broadcast(&ro_cond);
 }
@@ -252,6 +237,8 @@ box_set_orphan(bool orphan)
 {
 	if (is_orphan == orphan)
 		return; /* nothing to do */
+	if (orphan)
+		engine_switch_to_ro();
 
 	is_orphan = orphan;
 	fiber_cond_broadcast(&ro_cond);
@@ -305,29 +292,18 @@ recovery_journal_create(struct recovery_journal *journal, struct vclock *v)
 	journal->vclock = v;
 }
 
-static inline void
-apply_row(struct xstream *stream, struct xrow_header *row)
-{
-	(void) stream;
-	struct request request;
-	xrow_decode_dml_xc(row, &request, dml_request_key_map(row->type));
-	if (request.type == IPROTO_NOP) {
-		if (process_nop(&request) != 0)
-			diag_raise();
-		return;
-	}
-	struct space *space = space_cache_find_xc(request.space_id);
-	if (box_process_rw(&request, space, NULL) != 0) {
-		say_error("error applying row: %s", request_str(&request));
-		diag_raise();
-	}
-}
-
 static void
 apply_wal_row(struct xstream *stream, struct xrow_header *row)
 {
-	apply_row(stream, row);
-
+	struct request request;
+	xrow_decode_dml_xc(row, &request, dml_request_key_map(row->type));
+	if (request.type != IPROTO_NOP) {
+		struct space *space = space_cache_find_xc(request.space_id);
+		if (box_process_rw(&request, space, NULL) != 0) {
+			say_error("error applying row: %s", request_str(&request));
+			diag_raise();
+		}
+	}
 	struct wal_stream *xstream =
 		container_of(stream, struct wal_stream, base);
 	/**
@@ -350,17 +326,6 @@ wal_stream_create(struct wal_stream *ctx, size_t wal_max_rows)
 	 * so we can't afford many of them during recovery.
 	 */
 	ctx->yield = (wal_max_rows >> 4)  + 1;
-}
-
-static void
-apply_initial_join_row(struct xstream *stream, struct xrow_header *row)
-{
-	(void) stream;
-	struct request request;
-	xrow_decode_dml_xc(row, &request, dml_request_key_map(row->type));
-	struct space *space = space_cache_find_xc(request.space_id);
-	/* no access checks here - applier always works with admin privs */
-	space_apply_initial_join_row_xc(space, &request);
 }
 
 /* {{{ configuration bindings */
@@ -656,9 +621,7 @@ cfg_get_replication(int *p_count)
 
 	for (int i = 0; i < count; i++) {
 		const char *source = cfg_getarr_elem("replication", i);
-		struct applier *applier = applier_new(source,
-						      &join_stream,
-						      &subscribe_stream);
+		struct applier *applier = applier_new(source);
 		if (applier == NULL) {
 			/* Delete created appliers */
 			while (--i >= 0)
@@ -1215,21 +1178,25 @@ box_upsert(uint32_t space_id, uint32_t index_id, const char *tuple,
 static void
 space_truncate(struct space *space)
 {
-	char tuple_buf[32];
+	size_t buf_size = 3 * mp_sizeof_array(UINT32_MAX) +
+			  4 * mp_sizeof_uint(UINT64_MAX) + mp_sizeof_str(1);
+	char *buf = (char *)region_alloc_xc(&fiber()->gc, buf_size);
+
+	char *tuple_buf = buf;
 	char *tuple_buf_end = tuple_buf;
 	tuple_buf_end = mp_encode_array(tuple_buf_end, 2);
 	tuple_buf_end = mp_encode_uint(tuple_buf_end, space_id(space));
 	tuple_buf_end = mp_encode_uint(tuple_buf_end, 1);
-	assert(tuple_buf_end < tuple_buf + sizeof(tuple_buf));
+	assert(tuple_buf_end < buf + buf_size);
 
-	char ops_buf[128];
+	char *ops_buf = tuple_buf_end;
 	char *ops_buf_end = ops_buf;
 	ops_buf_end = mp_encode_array(ops_buf_end, 1);
 	ops_buf_end = mp_encode_array(ops_buf_end, 3);
 	ops_buf_end = mp_encode_str(ops_buf_end, "+", 1);
 	ops_buf_end = mp_encode_uint(ops_buf_end, 1);
 	ops_buf_end = mp_encode_uint(ops_buf_end, 1);
-	assert(ops_buf_end < ops_buf + sizeof(ops_buf));
+	assert(ops_buf_end < buf + buf_size);
 
 	if (box_upsert(BOX_TRUNCATE_ID, 0, tuple_buf, tuple_buf_end,
 		       ops_buf, ops_buf_end, 0, NULL) != 0)
@@ -1509,6 +1476,9 @@ box_process_join(struct ev_io *io, struct xrow_header *header)
 	row.sync = header->sync;
 	coio_write_xrow(io, &row);
 
+	say_info("joining replica %s at %s",
+		 tt_uuid_str(&instance_uuid), sio_socketname(io->fd));
+
 	/*
 	 * Initial stream: feed replica with dirty data from engines.
 	 */
@@ -1600,6 +1570,9 @@ box_process_subscribe(struct ev_io *io, struct xrow_header *header)
 			  "wal_mode = 'none'");
 	}
 
+	struct vclock vclock;
+	vclock_create(&vclock);
+	vclock_copy(&vclock, &replicaset.vclock);
 	/*
 	 * Send a response to SUBSCRIBE request, tell
 	 * the replica how many rows we have in stock for it,
@@ -1612,9 +1585,7 @@ box_process_subscribe(struct ev_io *io, struct xrow_header *header)
 	 * the additional field.
 	 */
 	struct xrow_header row;
-	xrow_encode_subscribe_response_xc(&row,
-					  &REPLICASET_UUID,
-					  &replicaset.vclock);
+	xrow_encode_subscribe_response_xc(&row, &REPLICASET_UUID, &vclock);
 	/*
 	 * Identify the message with the replica id of this
 	 * instance, this is the only way for a replica to find
@@ -1625,6 +1596,11 @@ box_process_subscribe(struct ev_io *io, struct xrow_header *header)
 	row.replica_id = self->id;
 	row.sync = header->sync;
 	coio_write_xrow(io, &row);
+
+	say_info("subscribed replica %s at %s",
+		 tt_uuid_str(&replica_uuid), sio_socketname(io->fd));
+	say_info("remote vclock %s local vclock %s",
+		 vclock_to_string(&replica_clock), vclock_to_string(&vclock));
 
 	/*
 	 * Process SUBSCRIBE request via replication relay
@@ -1661,7 +1637,7 @@ box_set_replicaset_uuid(const struct tt_uuid *replicaset_uuid)
 	else
 		tt_uuid_create(&uu);
 	/* Save replica set UUID in _schema */
-	if (boxk(IPROTO_REPLACE, BOX_SCHEMA_ID, "[%s%s]", "cluster",
+	if (boxk(IPROTO_INSERT, BOX_SCHEMA_ID, "[%s%s]", "cluster",
 		 tt_uuid_str(&uu)))
 		diag_raise();
 }
@@ -1682,6 +1658,7 @@ box_free(void)
 		tuple_free();
 		port_free();
 #endif
+		iproto_free();
 		replication_free();
 		sequence_free();
 		gc_free();
@@ -1735,10 +1712,6 @@ bootstrap_master(const struct tt_uuid *replicaset_uuid)
 	engine_bootstrap_xc();
 
 	uint32_t replica_id = 1;
-
-	/* Unregister a local replica if it was registered by bootstrap.bin */
-	if (boxk(IPROTO_DELETE, BOX_CLUSTER_ID, "[%u]", 1) != 0)
-		diag_raise();
 
 	/* Register the first replica in the replica set */
 	box_register_replica(replica_id, &INSTANCE_UUID);
@@ -1852,6 +1825,9 @@ bootstrap(const struct tt_uuid *instance_uuid,
 		INSTANCE_UUID = *instance_uuid;
 	else
 		tt_uuid_create(&INSTANCE_UUID);
+
+	say_info("instance uuid %s", tt_uuid_str(&INSTANCE_UUID));
+
 	/*
 	 * Begin listening on the socket to enable
 	 * master-master replication leader election.
@@ -1909,6 +1885,8 @@ local_recovery(const struct tt_uuid *instance_uuid,
 			  tt_uuid_str(&INSTANCE_UUID));
 	}
 
+	say_info("instance uuid %s", tt_uuid_str(&INSTANCE_UUID));
+
 	struct wal_stream wal_stream;
 	wal_stream_create(&wal_stream, cfg_geti64("rows_per_wal"));
 
@@ -1934,6 +1912,7 @@ local_recovery(const struct tt_uuid *instance_uuid,
 	 * not attempt to apply these rows twice.
 	 */
 	recovery_scan(recovery, &replicaset.vclock, &gc.vclock);
+	say_info("instance vclock %s", vclock_to_string(&replicaset.vclock));
 
 	if (wal_dir_lock >= 0) {
 		box_listen();
@@ -2059,6 +2038,9 @@ box_init(void)
 	 */
 	session_init();
 
+	if (module_init() != 0)
+		diag_raise();
+
 	if (tuple_init(lua_hash) != 0)
 		diag_raise();
 
@@ -2086,8 +2068,6 @@ box_cfg_xc(void)
 
 	gc_init();
 	engine_init();
-	if (module_init() != 0)
-		diag_raise();
 	schema_init();
 	replication_init();
 	port_init();
@@ -2110,6 +2090,7 @@ box_cfg_xc(void)
 	box_check_replicaset_uuid(&replicaset_uuid);
 
 	box_set_net_msg_max();
+	box_set_readahead();
 	box_set_too_long_threshold();
 	box_set_replication_timeout();
 	box_set_replication_connect_timeout();
@@ -2117,8 +2098,6 @@ box_cfg_xc(void)
 	box_set_replication_sync_lag();
 	box_set_replication_sync_timeout();
 	box_set_replication_skip_conflict();
-	xstream_create(&join_stream, apply_initial_join_row);
-	xstream_create(&subscribe_stream, apply_row);
 
 	struct gc_checkpoint *checkpoint = gc_last_checkpoint();
 
@@ -2163,8 +2142,6 @@ box_cfg_xc(void)
 
 	/* Follow replica */
 	replicaset_follow();
-
-	sql_load_schema();
 
 	fiber_gc();
 	is_box_configured = true;

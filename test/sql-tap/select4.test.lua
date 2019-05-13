@@ -411,7 +411,7 @@ test:do_catchsql_test(
         ORDER BY log;
     ]], {
         -- <select4-5.1>
-        1, "no such table: T2"
+        1, "Space 'T2' does not exist"
         -- </select4-5.1>
     })
 
@@ -450,7 +450,7 @@ test:do_catchsql_test(
         ORDER BY "xyzzy";
     ]], {
         -- <select4-5.2c>
-        1, "1st ORDER BY term does not match any column in the result set"
+        1, "Error at ORDER BY in place 1: term does not match any column in the result set"
         -- </select4-5.2c>
     })
 
@@ -463,7 +463,7 @@ test:do_catchsql_test(
         ORDER BY "xyzzy";
     ]], {
         -- <select4-5.2d>
-        1, "1st ORDER BY term does not match any column in the result set"
+        1, "Error at ORDER BY in place 1: term does not match any column in the result set"
         -- </select4-5.2d>
     })
 
@@ -515,7 +515,7 @@ test:do_catchsql_test(
         ORDER BY 2;
     ]], {
         -- <select4-5.2h>
-        1, "1st ORDER BY term out of range - should be between 1 and 1"
+        1, "Error at ORDER BY in place 1: term out of range - should be between 1 and 1"
         -- </select4-5.2h>
     })
 
@@ -631,8 +631,8 @@ test:do_execsql_test(
     "select4-6.3",
     [[
         SELECT NULL UNION SELECT NULL UNION
-        SELECT 1 UNION SELECT 2 as "X"
-        ORDER BY x;
+        SELECT 1 UNION SELECT 2
+        ORDER BY 1;
     ]], {
         -- <select4-6.3>
         "", 1, 2
@@ -643,8 +643,8 @@ test:do_execsql_test(
     "select4-6.3.1",
     [[
         SELECT NULL UNION ALL SELECT NULL UNION ALL
-        SELECT 1 UNION ALL SELECT 2 as "X"
-        ORDER BY x;
+        SELECT 1 UNION ALL SELECT 2
+        ORDER BY 1;
     ]], {
         -- <select4-6.3.1>
         "", "", 1, 2

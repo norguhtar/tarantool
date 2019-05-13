@@ -233,6 +233,11 @@ tuple_format_add_field(struct tuple_format *format, uint32_t fieldno,
 	json_lexer_create(&lexer, path, path_len, TUPLE_INDEX_BASE);
 	while ((rc = json_lexer_next_token(&lexer, &field->token)) == 0 &&
 	       field->token.type != JSON_TOKEN_END) {
+		if (field->token.type == JSON_TOKEN_ANY) {
+			diag_set(ClientError, ER_UNSUPPORTED,
+				"Tarantool", "multikey indexes");
+			goto fail;
+		}
 		enum field_type expected_type =
 			field->token.type == JSON_TOKEN_STR ?
 			FIELD_TYPE_MAP : FIELD_TYPE_ARRAY;
@@ -436,7 +441,6 @@ tuple_format_create(struct tuple_format *format, struct key_def * const *keys,
 			 "malloc", "required field bitmap");
 		return -1;
 	}
-	format->min_tuple_size = mp_sizeof_array(format->index_field_count);
 	struct tuple_field *field;
 	json_tree_foreach_entry_preorder(field, &format->fields.root,
 					 struct tuple_field, token) {
@@ -448,44 +452,6 @@ tuple_format_create(struct tuple_format *format, struct key_def * const *keys,
 		if (json_token_is_leaf(&field->token) &&
 		    !tuple_field_is_nullable(field))
 			bit_set(format->required_fields, field->id);
-
-		/*
-		 * Update format::min_tuple_size by field.
-		 * Skip fields not involved in index.
-		 */
-		if (!field->is_key_part)
-			continue;
-		if (field->token.type == JSON_TOKEN_NUM) {
-			/*
-			 * Account a gap between omitted array
-			 * items.
-			 */
-			struct json_token **neighbors =
-				field->token.parent->children;
-			for (int i = field->token.sibling_idx - 1; i >= 0; i--) {
-				if (neighbors[i] != NULL &&
-				    json_tree_entry(neighbors[i],
-						    struct tuple_field,
-						    token)->is_key_part)
-					break;
-				format->min_tuple_size += mp_sizeof_nil();
-			}
-		} else {
-			/* Account a key string for map member. */
-			assert(field->token.type == JSON_TOKEN_STR);
-			format->min_tuple_size +=
-				mp_sizeof_str(field->token.len);
-		}
-		int max_child_idx = field->token.max_child_idx;
-		if (json_token_is_leaf(&field->token)) {
-			format->min_tuple_size += mp_sizeof_nil();
-		} else if (field->type == FIELD_TYPE_ARRAY) {
-			format->min_tuple_size +=
-				mp_sizeof_array(max_child_idx + 1);
-		} else if (field->type == FIELD_TYPE_MAP) {
-			format->min_tuple_size +=
-				mp_sizeof_map(max_child_idx + 1);
-		}
 	}
 	format->hash = tuple_format_hash(format);
 	return 0;
@@ -618,7 +584,6 @@ tuple_format_alloc(struct key_def * const *keys, uint16_t key_count,
 	format->total_field_count = field_count;
 	format->required_fields = NULL;
 	format->fields_depth = 1;
-	format->min_tuple_size = 0;
 	format->refs = 0;
 	format->id = FORMAT_ID_NIL;
 	format->index_field_count = index_field_count;
@@ -732,7 +697,10 @@ tuple_format_new(struct tuple_format_vtab *vtab, void *engine,
 		tuple_format_alloc(keys, key_count, space_field_count, dict);
 	if (format == NULL)
 		return NULL;
-	format->vtab = *vtab;
+	if (vtab != NULL)
+		format->vtab = *vtab;
+	else
+		memset(&format->vtab, 0, sizeof(format->vtab));
 	format->engine = engine;
 	format->is_temporary = is_temporary;
 	format->is_ephemeral = is_ephemeral;
@@ -802,17 +770,27 @@ tuple_format1_can_store_format2_tuples(struct tuple_format *format1,
 
 /** @sa declaration for details. */
 int
-tuple_init_field_map(struct tuple_format *format, uint32_t *field_map,
-		     const char *tuple, bool validate)
+tuple_field_map_create(struct tuple_format *format, const char *tuple,
+		       bool validate, uint32_t **field_map,
+		       uint32_t *field_map_size)
 {
-	if (tuple_format_field_count(format) == 0)
+	if (tuple_format_field_count(format) == 0) {
+		*field_map = NULL;
+		*field_map_size = 0;
 		return 0; /* Nothing to initialize */
-
+	}
 	struct region *region = &fiber()->gc;
-	size_t region_svp = region_used(region);
+	*field_map_size = format->field_map_size;
+	*field_map = region_alloc(region, *field_map_size);
+	if (*field_map == NULL) {
+		diag_set(OutOfMemory, *field_map_size, "region_alloc",
+			 "field_map");
+		return -1;
+	}
+	*field_map = (uint32_t *)((char *)*field_map + *field_map_size);
+
 	const char *pos = tuple;
 	int rc = 0;
-
 	/* Check to see if the tuple has a sufficient number of fields. */
 	uint32_t field_count = mp_decode_array(&pos);
 	if (validate && format->exact_field_count > 0 &&
@@ -853,8 +831,7 @@ tuple_init_field_map(struct tuple_format *format, uint32_t *field_map,
 	 * Nullify field map to be able to detect by 0,
 	 * which key fields are absent in tuple_field().
 	 */
-	memset((char *)field_map - format->field_map_size, 0,
-		format->field_map_size);
+	memset((char *)*field_map - *field_map_size, 0, *field_map_size);
 	/*
 	 * Prepare mp stack of the size equal to the maximum depth
 	 * of the indexed field in the format::fields tree
@@ -937,7 +914,7 @@ tuple_init_field_map(struct tuple_format *format, uint32_t *field_map,
 				goto error;
 			}
 			if (field->offset_slot != TUPLE_OFFSET_SLOT_NIL)
-				field_map[field->offset_slot] = pos - tuple;
+				(*field_map)[field->offset_slot] = pos - tuple;
 			if (required_fields != NULL)
 				bit_clear(required_fields, field->id);
 		}
@@ -978,7 +955,7 @@ finish:
 		}
 	}
 out:
-	region_truncate(region, region_svp);
+	*field_map = (uint32_t *)((char *)*field_map - *field_map_size);
 	return rc;
 error:
 	rc = -1;

@@ -185,8 +185,8 @@ sqlMatchSpanName(const char *zSpan,
  *
  *    pExpr->iTable        Set to the cursor number for the table obtained
  *                         from pSrcList.
- *    pExpr->pTab          Points to the Table structure of X.Y (even if
- *                         X and/or Y are implied.)
+ *    pExpr->space_def     Points to the space_def structure of X.Y
+ *                         (even if X and/or Y are implied.)
  *    pExpr->iColumn       Set to the column number within the table.
  *    pExpr->op            Set to TK_COLUMN.
  *    pExpr->pLeft         Any expression this points to is deleted
@@ -218,7 +218,6 @@ lookupName(Parse * pParse,	/* The parsing context */
 	struct SrcList_item *pMatch = 0;	/* The matching pSrcList item */
 	NameContext *pTopNC = pNC;	/* First namecontext in the list */
 	int isTrigger = 0;	/* True if resolved to a trigger column */
-	Table *pTab = 0;	/* Table hold the row */
 
 	assert(pNC);		/* the name context cannot be NULL. */
 	assert(zCol);		/* The Z in X.Y.Z cannot be NULL */
@@ -237,9 +236,10 @@ lookupName(Parse * pParse,	/* The parsing context */
 		if (pSrcList) {
 			for (i = 0, pItem = pSrcList->a; i < pSrcList->nSrc;
 			     i++, pItem++) {
-				pTab = pItem->pTab;
-				assert(pTab != 0 && pTab->def->name != NULL);
-				assert(pTab->def->field_count > 0);
+				assert(pItem->space != NULL &&
+				       pItem->space->def->name != NULL);
+				struct space_def *space_def = pItem->space->def;
+				assert(space_def->field_count > 0);
 				if (pItem->pSelect
 				    && (pItem->pSelect->
 					selFlags & SF_NestedFrom) != 0) {
@@ -262,7 +262,7 @@ lookupName(Parse * pParse,	/* The parsing context */
 				if (zTab) {
 					const char *zTabName =
 					    pItem->zAlias ? pItem->
-					    zAlias : pTab->def->name;
+					    zAlias : space_def->name;
 					assert(zTabName != 0);
 					if (strcmp(zTabName, zTab) != 0) {
 						continue;
@@ -271,9 +271,9 @@ lookupName(Parse * pParse,	/* The parsing context */
 				if (0 == (cntTab++)) {
 					pMatch = pItem;
 				}
-				for (j = 0; j < (int)pTab->def->field_count;
+				for (j = 0; j < (int)space_def->field_count;
 				     j++) {
-					if (strcmp(pTab->def->fields[j].name,
+					if (strcmp(space_def->fields[j].name,
 						   zCol) == 0) {
 						/* If there has been exactly one prior match and this match
 						 * is for the right-hand table of a NATURAL JOIN or is in a
@@ -298,7 +298,7 @@ lookupName(Parse * pParse,	/* The parsing context */
 			}
 			if (pMatch) {
 				pExpr->iTable = pMatch->iCursor;
-				pExpr->space_def = pMatch->pTab->def;
+				pExpr->space_def = pMatch->space->def;
 				/* RIGHT JOIN not (yet) supported */
 				assert((pMatch->fg.jointype & JT_RIGHT) == 0);
 				if ((pMatch->fg.jointype & JT_LEFT) != 0) {
@@ -310,33 +310,32 @@ lookupName(Parse * pParse,	/* The parsing context */
 		/* If we have not already resolved the name, then maybe
 		 * it is a new.* or old.* trigger argument reference
 		 */
-		if (zTab != 0 && cntTab == 0
-		    && pParse->pTriggerTab != 0) {
+		if (zTab != NULL && cntTab == 0 &&
+		    pParse->triggered_space != NULL) {
 			int op = pParse->eTriggerOp;
 			assert(op == TK_DELETE || op == TK_UPDATE
 			       || op == TK_INSERT);
+			struct space_def *space_def = NULL;
 			if (op != TK_DELETE && sqlStrICmp("new", zTab) == 0) {
 				pExpr->iTable = 1;
-				pTab = pParse->pTriggerTab;
+				space_def = pParse->triggered_space->def;
 			} else if (op != TK_INSERT
 				   && sqlStrICmp("old", zTab) == 0) {
 				pExpr->iTable = 0;
-				pTab = pParse->pTriggerTab;
-			} else {
-				pTab = 0;
+				space_def = pParse->triggered_space->def;
 			}
 
-			if (pTab) {
+			if (space_def != NULL) {
 				int iCol;
 				cntTab++;
 				for (iCol = 0; iCol <
-				     (int)pTab->def->field_count; iCol++) {
-					if (strcmp(pTab->def->fields[iCol].name,
+				     (int)space_def->field_count; iCol++) {
+					if (strcmp(space_def->fields[iCol].name,
 						   zCol) == 0) {
 						break;
 					}
 				}
-				if (iCol < (int)pTab->def->field_count) {
+				if (iCol < (int)space_def->field_count) {
 					cnt++;
 					if (iCol < 0) {
 						pExpr->type =
@@ -357,7 +356,7 @@ lookupName(Parse * pParse,	/* The parsing context */
 						     : (((u32) 1) << iCol));
 					}
 					pExpr->iColumn = (i16) iCol;
-					pExpr->space_def = pTab->def;
+					pExpr->space_def = space_def;
 					isTrigger = 1;
 				}
 			}
@@ -391,16 +390,21 @@ lookupName(Parse * pParse,	/* The parsing context */
 					assert(pExpr->x.pList == 0);
 					assert(pExpr->x.pSelect == 0);
 					pOrig = pEList->a[j].pExpr;
+					const char *err = "misuse of aliased "\
+							  "aggregate %s";
 					if ((pNC->ncFlags & NC_AllowAgg) == 0
 					    && ExprHasProperty(pOrig, EP_Agg)) {
-						sqlErrorMsg(pParse,
-								"misuse of aliased aggregate %s",
-								zAs);
+						diag_set(ClientError,
+							 ER_SQL_PARSER_GENERIC,
+							 tt_sprintf(err, zAs));
+						pParse->is_aborted = true;
 						return WRC_Abort;
 					}
 					if (sqlExprVectorSize(pOrig) != 1) {
-						sqlErrorMsg(pParse,
-								"row value misused");
+						diag_set(ClientError,
+							 ER_SQL_PARSER_GENERIC,
+							 "row value misused");
+						pParse->is_aborted = true;
 						return WRC_Abort;
 					}
 					resolveAlias(pParse, pEList, j, pExpr,
@@ -426,14 +430,26 @@ lookupName(Parse * pParse,	/* The parsing context */
 	 * cnt==0 means there was not match.  cnt>1 means there were two or
 	 * more matches.  Either way, we have an error.
 	 */
-	if (cnt != 1) {
-		const char *zErr;
-		zErr = cnt == 0 ? "no such column" : "ambiguous column name";
+	if (cnt > 1) {
+		const char *err;
 		if (zTab) {
-			sqlErrorMsg(pParse, "%s: %s.%s", zErr, zTab, zCol);
+			err = tt_sprintf("ambiguous column name: %s.%s", zTab,
+					 zCol);
 		} else {
-			sqlErrorMsg(pParse, "%s: %s", zErr, zCol);
+			err = tt_sprintf("ambiguous column name: %s", zCol);
 		}
+		diag_set(ClientError, ER_SQL_PARSER_GENERIC, err);
+		pParse->is_aborted = true;
+		pTopNC->nErr++;
+	}
+	if (cnt == 0) {
+		if (zTab == NULL) {
+			diag_set(ClientError, ER_SQL_CANT_RESOLVE_FIELD, zCol);
+		} else {
+			diag_set(ClientError, ER_NO_SUCH_FIELD_NAME, zCol,
+				 zTab);
+		}
+		pParse->is_aborted = true;
 		pTopNC->nErr++;
 	}
 
@@ -479,50 +495,20 @@ lookupName(Parse * pParse,	/* The parsing context */
 	}
 }
 
-/*
- * Allocate and return a pointer to an expression to load the column iCol
- * from datasource iSrc in SrcList pSrc.
- */
-Expr *
-sqlCreateColumnExpr(sql * db, SrcList * pSrc, int iSrc, int iCol)
+struct Expr *
+sql_expr_new_column(struct sql *db, struct SrcList *src_list, int src_idx,
+		    int column)
 {
-	Expr *p = sqlExprAlloc(db, TK_COLUMN, 0, 0);
-	if (p) {
-		struct SrcList_item *pItem = &pSrc->a[iSrc];
-		p->space_def = pItem->pTab->def;
-		p->iTable = pItem->iCursor;
-		p->iColumn = (ynVar) iCol;
-		testcase(iCol == BMS);
-		testcase(iCol == BMS - 1);
-		pItem->colUsed |=
-			((Bitmask) 1) << (iCol >= BMS ? BMS - 1 : iCol);
-		ExprSetProperty(p, EP_Resolved);
-	}
-	return p;
-}
-
-/*
- * Report an error that an expression is not valid for some set of
- * pNC->ncFlags values determined by validMask.
- */
-static void
-notValid(Parse * pParse,	/* Leave error message here */
-	 NameContext * pNC,	/* The name context */
-	 const char *zMsg,	/* Type of error */
-	 int validMask		/* Set of contexts for which prohibited */
-    )
-{
-	assert((validMask & ~(NC_IsCheck | NC_IdxExpr)) == 0);
-	if ((pNC->ncFlags & validMask) != 0) {
-		const char *zIn;
-		if (pNC->ncFlags & NC_IdxExpr)
-			zIn = "index expressions";
-		else if (pNC->ncFlags & NC_IsCheck)
-			zIn = "CHECK constraints";
-		else
-			unreachable();
-		sqlErrorMsg(pParse, "%s prohibited in %s", zMsg, zIn);
-	}
+	struct Expr *expr = sql_expr_new_anon(db, TK_COLUMN);
+	if (expr == NULL)
+		return NULL;
+	struct SrcList_item *item = &src_list->a[src_idx];
+	expr->space_def = item->space->def;
+	expr->iTable = item->iCursor;
+	expr->iColumn = column;
+	item->colUsed |= ((Bitmask) 1) << (column >= BMS ? BMS - 1 : column);
+	ExprSetProperty(expr, EP_Resolved);
+	return expr;
 }
 
 /*
@@ -597,7 +583,11 @@ resolveExprStep(Walker * pWalker, Expr * pExpr)
 			Expr *pRight;
 
 			/* if( pSrcList==0 ) break; */
-			notValid(pParse, pNC, "the \".\" operator", NC_IdxExpr);
+			if (pNC->ncFlags & NC_IdxExpr) {
+				diag_set(ClientError, ER_INDEX_DEF_UNSUPPORTED,
+					 "Expressions");
+				pParse->is_aborted = true;
+			}
 			pRight = pExpr->pRight;
 			if (pRight->op == TK_ID) {
 				zTable = pExpr->pLeft->u.zToken;
@@ -638,6 +628,9 @@ resolveExprStep(Walker * pWalker, Expr * pExpr)
 			} else {
 				is_agg = pDef->xFinalize != 0;
 				pExpr->type = pDef->ret_type;
+				const char *err =
+					"second argument to likelihood() must "\
+					"be a constant between 0.0 and 1.0";
 				if (pDef->funcFlags & SQL_FUNC_UNLIKELY) {
 					ExprSetProperty(pExpr,
 							EP_Unlikely | EP_Skip);
@@ -646,9 +639,11 @@ resolveExprStep(Walker * pWalker, Expr * pExpr)
 						    exprProbability(pList->a[1].
 								    pExpr);
 						if (pExpr->iTable < 0) {
-							sqlErrorMsg(pParse,
-									"second argument to likelihood() must be a "
-									"constant between 0.0 and 1.0");
+							diag_set(ClientError,
+								 ER_ILLEGAL_PARAMS,
+								 err);
+							pParse->is_aborted =
+								true;
 							pNC->nErr++;
 						}
 					} else {
@@ -682,15 +677,15 @@ resolveExprStep(Walker * pWalker, Expr * pExpr)
 					 * that might change over time cannot be used
 					 * in an index.
 					 */
-					notValid(pParse, pNC,
-						 "non-deterministic functions",
-						 NC_IdxExpr);
+					assert((pNC->ncFlags & NC_IdxExpr) == 0);
 				}
 			}
 			if (is_agg && (pNC->ncFlags & NC_AllowAgg) == 0) {
-				sqlErrorMsg(pParse,
-						"misuse of aggregate function %.*s()",
-						nId, zId);
+				const char *err =
+					tt_sprintf("misuse of aggregate "\
+						   "function %.*s()", nId, zId);
+				diag_set(ClientError, ER_SQL_PARSER_GENERIC, err);
+				pParse->is_aborted = true;
 				pNC->nErr++;
 				is_agg = 0;
 			} else if (no_such_func && pParse->db->init.busy == 0
@@ -698,14 +693,15 @@ resolveExprStep(Walker * pWalker, Expr * pExpr)
 				   && pParse->explain == 0
 #endif
 			    ) {
-				sqlErrorMsg(pParse,
-						"no such function: %.*s", nId,
-						zId);
+				diag_set(ClientError, ER_NO_SUCH_FUNCTION, zId);
+				pParse->is_aborted = true;
 				pNC->nErr++;
 			} else if (wrong_num_args) {
-				sqlErrorMsg(pParse,
-						"wrong number of arguments to function %.*s()",
-						nId, zId);
+				const char *err = "wrong number of arguments "\
+						  "to function %.*s()";
+				diag_set(ClientError, ER_SQL_PARSER_GENERIC,
+					 tt_sprintf(err, nId, zId));
+				pParse->is_aborted = true;
 				pNC->nErr++;
 			}
 			if (is_agg)
@@ -747,8 +743,13 @@ resolveExprStep(Walker * pWalker, Expr * pExpr)
 			testcase(pExpr->op == TK_IN);
 			if (ExprHasProperty(pExpr, EP_xIsSelect)) {
 				int nRef = pNC->nRef;
-				notValid(pParse, pNC, "subqueries",
-					 NC_IsCheck | NC_IdxExpr);
+				assert((pNC->ncFlags & NC_IdxExpr) == 0);
+				if (pNC->ncFlags & NC_IsCheck) {
+					diag_set(ClientError,
+						 ER_CK_DEF_UNSUPPORTED,
+						 "Subqueries");
+					pParse->is_aborted = true;
+				}
 				sqlWalkSelect(pWalker, pExpr->x.pSelect);
 				assert(pNC->nRef >= nRef);
 				if (nRef != pNC->nRef) {
@@ -759,8 +760,12 @@ resolveExprStep(Walker * pWalker, Expr * pExpr)
 			break;
 		}
 	case TK_VARIABLE:{
-			notValid(pParse, pNC, "parameters",
-				 NC_IsCheck | NC_IdxExpr);
+			assert((pNC->ncFlags & NC_IsCheck) == 0);
+			if (pNC->ncFlags & NC_IdxExpr) {
+				diag_set(ClientError, ER_INDEX_DEF_UNSUPPORTED,
+					 "Parameter markers");
+				pParse->is_aborted = true;
+			}
 			break;
 		}
 	case TK_BETWEEN:
@@ -797,12 +802,14 @@ resolveExprStep(Walker * pWalker, Expr * pExpr)
 				testcase(pExpr->op == TK_GT);
 				testcase(pExpr->op == TK_GE);
 				testcase(pExpr->op == TK_BETWEEN);
-				sqlErrorMsg(pParse, "row value misused");
+				diag_set(ClientError, ER_SQL_PARSER_GENERIC,
+					 "row value misused");
+				pParse->is_aborted = true;
 			}
 			break;
 		}
 	}
-	return (pParse->nErr
+	return (pParse->is_aborted
 		|| pParse->db->mallocFailed) ? WRC_Abort : WRC_Continue;
 }
 
@@ -867,9 +874,7 @@ resolveOrderByTermToExprList(Parse * pParse,	/* Parsing context for error messag
 	int i;			/* Loop counter */
 	ExprList *pEList;	/* The columns of the result set */
 	NameContext nc;		/* Name context for resolving pE */
-	sql *db;		/* Database connection */
 	int rc;			/* Return code from subprocedures */
-	u8 savedSuppErr;	/* Saved value of db->suppressErr */
 
 	assert(sqlExprIsInteger(pE, &i) == 0);
 	pEList = pSelect->pEList;
@@ -882,11 +887,7 @@ resolveOrderByTermToExprList(Parse * pParse,	/* Parsing context for error messag
 	nc.pEList = pEList;
 	nc.ncFlags = NC_AllowAgg;
 	nc.nErr = 0;
-	db = pParse->db;
-	savedSuppErr = db->suppressErr;
-	db->suppressErr = 1;
 	rc = sqlResolveExprNames(&nc, pE);
-	db->suppressErr = savedSuppErr;
 	if (rc)
 		return 0;
 
@@ -902,21 +903,6 @@ resolveOrderByTermToExprList(Parse * pParse,	/* Parsing context for error messag
 
 	/* If no match, return 0. */
 	return 0;
-}
-
-/*
- * Generate an ORDER BY or GROUP BY term out-of-range error.
- */
-static void
-resolveOutOfRangeError(Parse * pParse,	/* The error context into which to write the error */
-		       const char *zType,	/* "ORDER" or "GROUP" */
-		       int i,	/* The index (1-based) of the term out of range */
-		       int mx	/* Largest permissible value of i */
-    )
-{
-	sqlErrorMsg(pParse,
-			"%r %s BY term out of range - should be "
-			"between 1 and %d", i, zType, mx);
 }
 
 /*
@@ -951,7 +937,10 @@ resolveCompoundOrderBy(Parse * pParse,	/* Parsing context.  Leave error messages
 	db = pParse->db;
 #if SQL_MAX_COLUMN
 	if (pOrderBy->nExpr > db->aLimit[SQL_LIMIT_COLUMN]) {
-		sqlErrorMsg(pParse, "too many terms in ORDER BY clause");
+		diag_set(ClientError, ER_SQL_PARSER_LIMIT,
+			 "The number of terms in ORDER BY clause",
+			 pOrderBy->nExpr, db->aLimit[SQL_LIMIT_COLUMN]);
+		pParse->is_aborted = true;
 		return 1;
 	}
 #endif
@@ -977,9 +966,15 @@ resolveCompoundOrderBy(Parse * pParse,	/* Parsing context.  Leave error messages
 			pE = sqlExprSkipCollate(pItem->pExpr);
 			if (sqlExprIsInteger(pE, &iCol)) {
 				if (iCol <= 0 || iCol > pEList->nExpr) {
-					resolveOutOfRangeError(pParse, "ORDER",
-							       i + 1,
-							       pEList->nExpr);
+					const char *err =
+						"Error at ORDER BY in place "\
+						"%d: term out of range - "\
+						"should be between 1 and %d";
+					err = tt_sprintf(err, i + 1,
+							 pEList->nExpr);
+					diag_set(ClientError,
+						 ER_SQL_PARSER_GENERIC, err);
+					pParse->is_aborted = true;
 					return 1;
 				}
 			} else {
@@ -999,9 +994,12 @@ resolveCompoundOrderBy(Parse * pParse,	/* Parsing context.  Leave error messages
 				/* Convert the ORDER BY term into an integer column number iCol,
 				 * taking care to preserve the COLLATE clause if it exists
 				 */
-				Expr *pNew = sqlExpr(db, TK_INTEGER, 0);
-				if (pNew == 0)
+				struct Expr *pNew =
+					sql_expr_new_anon(db, TK_INTEGER);
+				if (pNew == NULL) {
+					pParse->is_aborted = true;
 					return 1;
+				}
 				pNew->flags |= EP_IntValue;
 				pNew->u.iValue = iCol;
 				if (pItem->pExpr == pE) {
@@ -1025,9 +1023,12 @@ resolveCompoundOrderBy(Parse * pParse,	/* Parsing context.  Leave error messages
 	}
 	for (i = 0; i < pOrderBy->nExpr; i++) {
 		if (pOrderBy->a[i].done == 0) {
-			sqlErrorMsg(pParse,
-					"%r ORDER BY term does not match any "
-					"column in the result set", i + 1);
+			const char *err = "Error at ORDER BY in place %d: "\
+					  "term does not match any column in "\
+					  "the result set";
+			diag_set(ClientError, ER_SQL_PARSER_GENERIC,
+				 tt_sprintf(err, i + 1));
+			pParse->is_aborted = true;
 			return 1;
 		}
 	}
@@ -1041,8 +1042,7 @@ resolveCompoundOrderBy(Parse * pParse,	/* Parsing context.  Leave error messages
  * field) then convert that term into a copy of the corresponding result set
  * column.
  *
- * If any errors are detected, add an error message to pParse and
- * return non-zero.  Return zero if no errors are seen.
+ * @retval 0 On success, not 0 elsewhere.
  */
 int
 sqlResolveOrderGroupBy(Parse * pParse,	/* Parsing context.  Leave error messages here */
@@ -1060,8 +1060,11 @@ sqlResolveOrderGroupBy(Parse * pParse,	/* Parsing context.  Leave error messages
 		return 0;
 #if SQL_MAX_COLUMN
 	if (pOrderBy->nExpr > db->aLimit[SQL_LIMIT_COLUMN]) {
-		sqlErrorMsg(pParse, "too many terms in %s BY clause",
-				zType);
+		const char *err = tt_sprintf("The number of terms in %s BY "\
+					     "clause", zType);
+		diag_set(ClientError, ER_SQL_PARSER_LIMIT, err,
+			 pOrderBy->nExpr, db->aLimit[SQL_LIMIT_COLUMN]);
+		pParse->is_aborted = true;
 		return 1;
 	}
 #endif
@@ -1070,8 +1073,14 @@ sqlResolveOrderGroupBy(Parse * pParse,	/* Parsing context.  Leave error messages
 	for (i = 0, pItem = pOrderBy->a; i < pOrderBy->nExpr; i++, pItem++) {
 		if (pItem->u.x.iOrderByCol) {
 			if (pItem->u.x.iOrderByCol > pEList->nExpr) {
-				resolveOutOfRangeError(pParse, zType, i + 1,
-						       pEList->nExpr);
+				const char *err = "Error at %s BY in place "\
+						  "%d: term out of range - "\
+						  "should be between 1 and %d";
+				err = tt_sprintf(err, zType, i + 1,
+						 pEList->nExpr);
+				diag_set(ClientError, ER_SQL_PARSER_GENERIC,
+					 err);
+				pParse->is_aborted = true;
 				return 1;
 			}
 			resolveAlias(pParse, pEList, pItem->u.x.iOrderByCol - 1,
@@ -1095,9 +1104,7 @@ sqlResolveOrderGroupBy(Parse * pParse,	/* Parsing context.  Leave error messages
  * result-set expression.  Otherwise, the expression is resolved in
  * the usual way - using sqlResolveExprNames().
  *
- * This routine returns the number of errors.  If errors occur, then
- * an appropriate error message might be left in pParse.  (OOM errors
- * excepted.)
+ * @retval 0 On success, not 0 elsewhere.
  */
 static int
 resolveOrderGroupBy(NameContext * pNC,	/* The name context of the SELECT statement */
@@ -1137,8 +1144,13 @@ resolveOrderGroupBy(NameContext * pNC,	/* The name context of the SELECT stateme
 			 * order-by term to a copy of the result-set expression
 			 */
 			if (iCol < 1 || iCol > 0xffff) {
-				resolveOutOfRangeError(pParse, zType, i + 1,
-						       nResult);
+				const char *err = "Error at %s BY in place "\
+						  "%d: term out of range - "\
+						  "should be between 1 and %d";
+				err = tt_sprintf(err, zType, i + 1, nResult);
+				diag_set(ClientError, ER_SQL_PARSER_GENERIC,
+					 err);
+				pParse->is_aborted = true;
 				return 1;
 			}
 			pItem->u.x.iOrderByCol = (u16) iCol;
@@ -1194,7 +1206,7 @@ resolveSelectStep(Walker * pWalker, Select * p)
 	 */
 	if ((p->selFlags & SF_Expanded) == 0) {
 		sqlSelectPrep(pParse, p, pOuterNC);
-		return (pParse->nErr
+		return (pParse->is_aborted
 			|| db->mallocFailed) ? WRC_Abort : WRC_Prune;
 	}
 
@@ -1251,7 +1263,7 @@ resolveSelectStep(Walker * pWalker, Select * p)
 				sqlResolveSelectNames(pParse,
 							  pItem->pSelect,
 							  pOuterNC);
-				if (pParse->nErr || db->mallocFailed)
+				if (pParse->is_aborted || db->mallocFailed)
 					return WRC_Abort;
 
 				for (pNC = pOuterNC; pNC; pNC = pNC->pNext)
@@ -1294,12 +1306,16 @@ resolveSelectStep(Walker * pWalker, Select * p)
 				return WRC_Abort;
 		}
 
-		/* If there are no aggregate functions in the result-set, and no GROUP BY
-		 * expression, do not allow aggregates in any of the other expressions.
+		/*
+		 * If there are no aggregate functions in the
+		 * result-set, and no GROUP BY or HAVING
+		 * expression, do not allow aggregates in any
+		 * of the other expressions.
 		 */
 		assert((p->selFlags & SF_Aggregate) == 0);
 		pGroupBy = p->pGroupBy;
-		if (pGroupBy || (sNC.ncFlags & NC_HasAgg) != 0) {
+		if (pGroupBy != NULL || p->pHaving != NULL ||
+		    (sNC.ncFlags & NC_HasAgg) != 0) {
 			assert(NC_MinMaxAgg == SF_MinMaxAgg);
 			p->selFlags |=
 			    SF_Aggregate | (sNC.ncFlags & NC_MinMaxAgg);
@@ -1335,8 +1351,7 @@ resolveSelectStep(Walker * pWalker, Select * p)
 					 "argument must appear in the GROUP BY "
 					 "clause or be used in an aggregate "
 					 "function");
-				pParse->nErr++;
-				pParse->rc = SQL_TARANTOOL_ERROR;
+				pParse->is_aborted = true;
 				return WRC_Abort;
 			}
 			/*
@@ -1347,9 +1362,10 @@ resolveSelectStep(Walker * pWalker, Select * p)
 			 * restrict it directly).
 			 */
 			sql_expr_delete(db, p->pLimit, false);
-			p->pLimit =
-			    sqlExprAlloc(db, TK_INTEGER,
-					     &sqlIntTokens[1], 0);
+			p->pLimit = sql_expr_new(db, TK_INTEGER,
+						 &sqlIntTokens[1]);
+			if (p->pLimit == NULL)
+				pParse->is_aborted = true;
 		} else {
 			if (sqlResolveExprNames(&sNC, p->pHaving))
 				return WRC_Abort;
@@ -1415,12 +1431,15 @@ resolveSelectStep(Walker * pWalker, Select * p)
 			    || db->mallocFailed) {
 				return WRC_Abort;
 			}
+			const char *err_msg = "aggregate functions are not "\
+					      "allowed in the GROUP BY clause";
 			for (i = 0, pItem = pGroupBy->a; i < pGroupBy->nExpr;
 			     i++, pItem++) {
 				if (ExprHasProperty(pItem->pExpr, EP_Agg)) {
-					sqlErrorMsg(pParse,
-							"aggregate functions are not allowed in "
-							"the GROUP BY clause");
+					diag_set(ClientError,
+						 ER_SQL_PARSER_GENERIC,
+						 err_msg);
+					pParse->is_aborted = true;
 					return WRC_Abort;
 				}
 			}
@@ -1430,10 +1449,23 @@ resolveSelectStep(Walker * pWalker, Select * p)
 		 * number of expressions in the select list.
 		 */
 		if (p->pNext && p->pEList->nExpr != p->pNext->pEList->nExpr) {
-			sqlSelectWrongNumTermsError(pParse, p->pNext);
+			if (p->pNext->selFlags & SF_Values) {
+				diag_set(ClientError, ER_SQL_PARSER_GENERIC,
+					 "all VALUES must have the same "\
+					 "number of terms");
+			} else {
+				const char *err =
+					"SELECTs to the left and right of %s "\
+					"do not have the same number of "\
+					"result columns";
+				const char *op =
+					sql_select_op_name(p->pNext->op);
+				diag_set(ClientError, ER_SQL_PARSER_GENERIC,
+					 tt_sprintf(err, op));
+			}
+			pParse->is_aborted = true;
 			return WRC_Abort;
 		}
-
 		/* Advance to the next term of the compound
 		 */
 		p = p->pPrior;
@@ -1531,7 +1563,7 @@ sqlResolveExprNames(NameContext * pNC,	/* Namespace to resolve expressions in. *
 #if SQL_MAX_EXPR_DEPTH>0
 	pNC->pParse->nHeight -= pExpr->nHeight;
 #endif
-	if (pNC->nErr > 0 || w.pParse->nErr > 0) {
+	if (pNC->nErr > 0 || w.pParse->is_aborted) {
 		ExprSetProperty(pExpr, EP_Error);
 	}
 	if (pNC->ncFlags & NC_HasAgg) {
@@ -1591,20 +1623,24 @@ sqlResolveSelectNames(Parse * pParse,	/* The parser context */
 }
 
 void
-sql_resolve_self_reference(struct Parse *parser, struct Table *table, int type,
-			   struct Expr *expr, struct ExprList *expr_list)
+sql_resolve_self_reference(struct Parse *parser, struct space_def *def,
+			   int type, struct Expr *expr,
+			   struct ExprList *expr_list)
 {
-	/* Fake SrcList for parser->pNewTable */
+	/* Fake SrcList for parser->create_table_def */
 	SrcList sSrc;
-	/* Name context for parser->pNewTable */
+	/* Name context for parser->create_table_def  */
 	NameContext sNC;
 
 	assert(type == NC_IsCheck || type == NC_IdxExpr);
 	memset(&sNC, 0, sizeof(sNC));
 	memset(&sSrc, 0, sizeof(sSrc));
 	sSrc.nSrc = 1;
-	sSrc.a[0].zName = table->def->name;
-	sSrc.a[0].pTab = table;
+	sSrc.a[0].zName = def->name;
+	struct space tmp_space;
+	memset(&tmp_space, 0, sizeof(tmp_space));
+	tmp_space.def = def;
+	sSrc.a[0].space = &tmp_space;
 	sSrc.a[0].iCursor = -1;
 	sNC.pParse = parser;
 	sNC.pSrcList = &sSrc;

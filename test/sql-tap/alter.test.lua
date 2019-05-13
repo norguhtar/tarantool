@@ -1,6 +1,6 @@
 #!/usr/bin/env tarantool
 test = require("sqltester")
-test:plan(43)
+test:plan(50)
 
 test:do_execsql_test(
     "alter-1.1",
@@ -128,7 +128,7 @@ test:do_execsql_test(
     [[
         CREATE TABLE t6(id  INT PRIMARY KEY, a INT , b INT , c INT );
         CREATE TABLE tab(id  INT PRIMARY KEY);
-        CREATE TRIGGER trig1 AFTER INSERT ON T6 BEGIN INSERT INTO tab VALUES(new.id); END;
+        CREATE TRIGGER trig1 AFTER INSERT ON T6 FOR EACH ROW BEGIN INSERT INTO tab VALUES(new.id); END;
         INSERT INTO t6 VALUES(1, 1, 2, 3);
         SELECT * FROM tab;
 
@@ -164,7 +164,7 @@ test:do_execsql_test(
 test:do_execsql_test(
     "alter-3.4",
     [[
-        CREATE TRIGGER trig2 AFTER INSERT ON t7 BEGIN INSERT INTO tab VALUES(new.id); END;
+        CREATE TRIGGER trig2 AFTER INSERT ON t7 FOR EACH ROW BEGIN INSERT INTO tab VALUES(new.id); END;
         INSERT INTO t7 VALUES(3, 1, 2, 3);
         SELECT * FROM tab;
     ]], {
@@ -197,7 +197,7 @@ test:do_execsql_test(
 test:do_execsql_test(
     "alter-3.7",
     [[
-        CREATE TRIGGER trig3 AFTER INSERT ON "t8" BEGIN INSERT INTO tab VALUES(new.id); END;
+        CREATE TRIGGER trig3 AFTER INSERT ON "t8" FOR EACH ROW BEGIN INSERT INTO tab VALUES(new.id); END;
         INSERT INTO "t8" VALUES(5, 1, 2, 3);
         SELECT * FROM tab;
     ]], {
@@ -285,9 +285,9 @@ test:do_execsql_test(
         CREATE TABLE t1(id  INT PRIMARY KEY, b INT , c INT );
         INSERT INTO t1 VALUES(1,2,3), (3,2,1);
         CREATE TABLE t2(id  INT PRIMARY KEY);
-        CREATE TRIGGER on_t1 AFTER INSERT ON t1 BEGIN INSERT INTO t2 VALUES(new.id + 100); END;
-        CREATE TRIGGER on_t2 AFTER INSERT ON t1 BEGIN INSERT INTO t2 VALUES(new.id + 101); END;
-        CREATE TRIGGER on_t3 AFTER INSERT ON t1 BEGIN INSERT INTO t2 values(new.id + 102); END;
+        CREATE TRIGGER on_t1 AFTER INSERT ON t1 FOR EACH ROW BEGIN INSERT INTO t2 VALUES(new.id + 100); END;
+        CREATE TRIGGER on_t2 AFTER INSERT ON t1 FOR EACH ROW BEGIN INSERT INTO t2 VALUES(new.id + 101); END;
+        CREATE TRIGGER on_t3 AFTER INSERT ON t1 FOR EACH ROW BEGIN INSERT INTO t2 values(new.id + 102); END;
         ALTER TABLE t1 RENAME TO "a";
         INSERT INTO "a" VALUES(8, 5, 9);
         SELECT * FROM t2;
@@ -359,7 +359,7 @@ test:do_catchsql_test(
         INSERT INTO t5 VALUES(2, 1, 3);
     ]], {
         -- <alter-7.2>
-        1, "FOREIGN KEY constraint failed"
+        1, "Failed to execute SQL statement: FOREIGN KEY constraint failed"
         -- </alter-7.2>
     })
 
@@ -369,7 +369,7 @@ test:do_catchsql_test(
         INSERT INTO t5 VALUES(2, 2, 2);
     ]], {
         -- <alter-7.3>
-        1, "FOREIGN KEY constraint failed"
+        1, "Failed to execute SQL statement: FOREIGN KEY constraint failed"
         -- </alter-7.3>
     })
 
@@ -403,7 +403,7 @@ test:do_catchsql_test(
         SELECT * FROM t1;
     ]], {
         -- <alter-7.6>
-        1, "no such table: T1"
+        1, "Space 'T1' does not exist"
         -- </alter-7.6>
     })
 
@@ -435,7 +435,7 @@ test:do_catchsql_test(
         INSERT INTO t5 VALUES(4, 5, 3);
     ]], {
         -- <alter-7.9>
-        1, "FOREIGN KEY constraint failed"
+        1, "Failed to execute SQL statement: FOREIGN KEY constraint failed"
         -- </alter-7.9>
     })
 
@@ -490,7 +490,7 @@ test:do_catchsql_test(
         INSERT INTO t5 VALUES(6, 5, 10);
     ]], {
         -- <alter-7.14>
-        1, "FOREIGN KEY constraint failed"
+        1, "Failed to execute SQL statement: FOREIGN KEY constraint failed"
         -- </alter-7.14>
     })
 
@@ -517,6 +517,61 @@ test:do_catchsql_test(
         -- </alter-7.11>
     })
 
+test:do_test(
+    "alter-8.1.0",
+    function()
+        format = {}
+        format[1] = { name = 'id', type = 'scalar'}
+        format[2] = { name = 'f2', type = 'scalar'}
+        s = box.schema.create_space('T', {format = format})
+    end,
+    {})
+
+test:do_catchsql_test(
+    "alter-8.1.1",
+    [[
+        ALTER TABLE t ADD CONSTRAINT pk PRIMARY KEY("id");
+    ]], {
+        0
+    })
+
+test:do_test(
+    "alter-8.1.2",
+    function()
+        return box.space.T.index[0].id
+    end, 0)
+
+test:do_catchsql_test(
+    "alter-8.2",
+    [[
+        ALTER TABLE t ADD CONSTRAINT pk1 PRIMARY KEY("f2");
+    ]], {
+        1, "Duplicate key exists in unique index 'primary' in space '_index'"
+    })
+
+test:do_catchsql_test(
+    "alter-8.3.1",
+    [[
+        ALTER TABLE t ADD CONSTRAINT i1 UNIQUE("f2");
+    ]], {
+        0
+    })
+
+test:do_test(
+    "alter-8.3.2",
+    function()
+        i = box.space.T.index[1]
+        return i.id
+    end, 1)
+
+test:do_catchsql_test(
+    "alter-8.4",
+    [[
+        DROP INDEX i1 ON t;
+        DROP INDEX pk ON t;
+    ]], {
+    0
+})
 
 -- Commented due to #2953
 --

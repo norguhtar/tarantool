@@ -63,6 +63,18 @@ size_t
 iproto_mem_used(void);
 
 /**
+ * Return the number of active iproto connections.
+ */
+size_t
+iproto_connection_count(void);
+
+/**
+ * Return the number of iproto requests in flight.
+ */
+size_t
+iproto_request_count(void);
+
+/**
  * Reset network statistics.
  */
 void
@@ -79,6 +91,9 @@ iproto_listen(const char *uri);
 
 void
 iproto_set_msg_max(int iproto_msg_max);
+
+void
+iproto_free();
 
 #endif /* defined(__cplusplus) */
 

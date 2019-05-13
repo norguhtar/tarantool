@@ -37,7 +37,8 @@
 #include "sqlInt.h"
 #include "vdbeInt.h"
 #include "version.h"
-#include "coll.h"
+#include "coll/coll.h"
+#include "tarantoolInt.h"
 #include <unicode/ustring.h>
 #include <unicode/ucasemap.h>
 #include <unicode/ucnv.h>
@@ -113,13 +114,13 @@ typeofFunc(sql_context * context, int NotUsed, sql_value ** argv)
 		z = "integer";
 		break;
 	case SQL_TEXT:
-		z = "text";
+		z = "string";
 		break;
 	case SQL_FLOAT:
-		z = "real";
+		z = "number";
 		break;
 	case SQL_BLOB:
-		z = "blob";
+		z = "scalar";
 		break;
 	default:
 		z = "null";
@@ -150,11 +151,7 @@ lengthFunc(sql_context * context, int argc, sql_value ** argv)
 			const unsigned char *z = sql_value_text(argv[0]);
 			if (z == 0)
 				return;
-			len = 0;
-			while (*z) {
-				len++;
-				SQL_SKIP_UTF8(z);
-			}
+			len = sql_utf8_char_count(z, sql_value_bytes(argv[0]));
 			sql_result_int(context, len);
 			break;
 		}
@@ -215,61 +212,140 @@ absFunc(sql_context * context, int argc, sql_value ** argv)
 	}
 }
 
-/*
- * Implementation of the instr() function.
+/**
+ * Implementation of the position() function.
  *
- * instr(haystack,needle) finds the first occurrence of needle
- * in haystack and returns the number of previous characters plus 1,
- * or 0 if needle does not occur within haystack.
+ * position(needle, haystack) finds the first occurrence of needle
+ * in haystack and returns the number of previous characters
+ * plus 1, or 0 if needle does not occur within haystack.
  *
- * If both haystack and needle are BLOBs, then the result is one more than
- * the number of bytes in haystack prior to the first occurrence of needle,
- * or 0 if needle never occurs in haystack.
+ * If both haystack and needle are BLOBs, then the result is one
+ * more than the number of bytes in haystack prior to the first
+ * occurrence of needle, or 0 if needle never occurs in haystack.
  */
 static void
-instrFunc(sql_context * context, int argc, sql_value ** argv)
+position_func(struct sql_context *context, int argc, struct Mem **argv)
 {
-	const unsigned char *zHaystack;
-	const unsigned char *zNeedle;
-	int nHaystack;
-	int nNeedle;
-	int typeHaystack, typeNeedle;
-	int N = 1;
-	int isText;
-
 	UNUSED_PARAMETER(argc);
-	typeHaystack = sql_value_type(argv[0]);
-	typeNeedle = sql_value_type(argv[1]);
-	if (typeHaystack == SQL_NULL || typeNeedle == SQL_NULL)
+	struct Mem *needle = argv[0];
+	struct Mem *haystack = argv[1];
+	int needle_type = sql_value_type(needle);
+	int haystack_type = sql_value_type(haystack);
+
+	if (haystack_type == SQL_NULL || needle_type == SQL_NULL)
 		return;
-	nHaystack = sql_value_bytes(argv[0]);
-	nNeedle = sql_value_bytes(argv[1]);
-	if (nNeedle > 0) {
-		if (typeHaystack == SQL_BLOB && typeNeedle == SQL_BLOB) {
-			zHaystack = sql_value_blob(argv[0]);
-			zNeedle = sql_value_blob(argv[1]);
-			assert(zNeedle != 0);
-			assert(zHaystack != 0 || nHaystack == 0);
-			isText = 0;
-		} else {
-			zHaystack = sql_value_text(argv[0]);
-			zNeedle = sql_value_text(argv[1]);
-			isText = 1;
-			if (zHaystack == 0 || zNeedle == 0)
-				return;
-		}
-		while (nNeedle <= nHaystack
-		       && memcmp(zHaystack, zNeedle, nNeedle) != 0) {
-			N++;
-			do {
-				nHaystack--;
-				zHaystack++;
-			} while (isText && (zHaystack[0] & 0xc0) == 0x80);
-		}
-		if (nNeedle > nHaystack)
-			N = 0;
+	/*
+	 * Position function can be called only with string
+	 * or blob params.
+	 */
+	struct Mem *inconsistent_type_arg = NULL;
+	if (needle_type != SQL_TEXT && needle_type != SQL_BLOB)
+		inconsistent_type_arg = needle;
+	if (haystack_type != SQL_TEXT && haystack_type != SQL_BLOB)
+		inconsistent_type_arg = haystack;
+	if (inconsistent_type_arg != NULL) {
+		diag_set(ClientError, ER_INCONSISTENT_TYPES, "TEXT or BLOB",
+			 mem_type_to_str(inconsistent_type_arg));
+		context->isError = SQL_TARANTOOL_ERROR;
+		context->fErrorOrAux = 1;
+		return;
 	}
-	sql_result_int(context, N);
+	/*
+	 * Both params of Position function must be of the same
+	 * type.
+	 */
+	if (haystack_type != needle_type) {
+		diag_set(ClientError, ER_INCONSISTENT_TYPES,
+			 mem_type_to_str(needle), mem_type_to_str(haystack));
+		context->isError = SQL_TARANTOOL_ERROR;
+		context->fErrorOrAux = 1;
+		return;
+	}
+
+	int n_needle_bytes = sql_value_bytes(needle);
+	int n_haystack_bytes = sql_value_bytes(haystack);
+	int position = 1;
+	if (n_needle_bytes > 0) {
+		const unsigned char *haystack_str;
+		const unsigned char *needle_str;
+		if (haystack_type == SQL_BLOB) {
+			needle_str = sql_value_blob(needle);
+			haystack_str = sql_value_blob(haystack);
+			assert(needle_str != NULL);
+			assert(haystack_str != NULL || n_haystack_bytes == 0);
+			/*
+			 * Naive implementation of substring
+			 * searching: matching time O(n * m).
+			 * Can be improved.
+			 */
+			while (n_needle_bytes <= n_haystack_bytes &&
+			       memcmp(haystack_str, needle_str, n_needle_bytes) != 0) {
+				position++;
+				n_haystack_bytes--;
+				haystack_str++;
+			}
+			if (n_needle_bytes > n_haystack_bytes)
+				position = 0;
+		} else {
+			/*
+			 * Code below handles not only simple
+			 * cases like position('a', 'bca'), but
+			 * also more complex ones:
+			 * position('a', 'bcá' COLLATE "unicode_ci")
+			 * To do so, we need to use comparison
+			 * window, which has constant character
+			 * size, but variable byte size.
+			 * Character size is equal to
+			 * needle char size.
+			 */
+			haystack_str = sql_value_text(haystack);
+			needle_str = sql_value_text(needle);
+
+			int n_needle_chars =
+				sql_utf8_char_count(needle_str, n_needle_bytes);
+			int n_haystack_chars =
+				sql_utf8_char_count(haystack_str,
+						    n_haystack_bytes);
+
+			if (n_haystack_chars < n_needle_chars) {
+				position = 0;
+				goto finish;
+			}
+			/*
+			 * Comparison window is determined by
+			 * beg_offset and end_offset. beg_offset
+			 * is offset in bytes from haystack
+			 * beginning to window beginning.
+			 * end_offset is offset in bytes from
+			 * haystack beginning to window end.
+			 */
+			int end_offset = 0;
+			for (int c = 0; c < n_needle_chars; c++) {
+				SQL_UTF8_FWD_1(haystack_str, end_offset,
+					       n_haystack_bytes);
+			}
+			int beg_offset = 0;
+			struct coll *coll = sqlGetFuncCollSeq(context);
+			int c;
+			for (c = 0; c + n_needle_chars <= n_haystack_chars; c++) {
+				if (coll->cmp((const char *) haystack_str + beg_offset,
+					      end_offset - beg_offset,
+					      (const char *) needle_str,
+					      n_needle_bytes, coll) == 0)
+					goto finish;
+				position++;
+				/* Update offsets. */
+				SQL_UTF8_FWD_1(haystack_str, beg_offset,
+					       n_haystack_bytes);
+				SQL_UTF8_FWD_1(haystack_str, end_offset,
+					       n_haystack_bytes);
+			}
+			/* Needle was not found in the haystack. */
+			position = 0;
+		}
+	}
+finish:
+	sql_result_int(context, position);
 }
 
 /*
@@ -340,11 +416,8 @@ substrFunc(sql_context * context, int argc, sql_value ** argv)
 		if (z == 0)
 			return;
 		len = 0;
-		if (p1 < 0) {
-			for (z2 = z; *z2; len++) {
-				SQL_SKIP_UTF8(z2);
-			}
-		}
+		if (p1 < 0)
+			len = sql_utf8_char_count(z, sql_value_bytes(argv[0]));
 	}
 #ifdef SQL_SUBSTR_COMPATIBILITY
 	/* If SUBSTR_COMPATIBILITY is defined then substr(X,0,N) work the same as
@@ -388,13 +461,27 @@ substrFunc(sql_context * context, int argc, sql_value ** argv)
 	}
 	assert(p1 >= 0 && p2 >= 0);
 	if (p0type != SQL_BLOB) {
-		while (*z && p1) {
-			SQL_SKIP_UTF8(z);
+		/*
+		 * In the code below 'cnt' and 'n_chars' is
+		 * used because '\0' is not supposed to be
+		 * end-of-string symbol.
+		 */
+		int byte_size = sql_value_bytes(argv[0]);
+		int n_chars = sql_utf8_char_count(z, byte_size);
+		int cnt = 0;
+		int i = 0;
+		while (cnt < n_chars && p1) {
+			SQL_UTF8_FWD_1(z, i, byte_size);
+			cnt++;
 			p1--;
 		}
-		for (z2 = z; *z2 && p2; p2--) {
-			SQL_SKIP_UTF8(z2);
+		z += i;
+		i = 0;
+		for (z2 = z; cnt < n_chars && p2; p2--) {
+			SQL_UTF8_FWD_1(z2, i, byte_size);
+			cnt++;
 		}
+		z2 += i;
 		sql_result_text64(context, (char *)z, z2 - z,
 				      SQL_TRANSIENT);
 	} else {
@@ -620,8 +707,14 @@ enum pattern_match_status {
  * This routine is usually quick, but can be N**2 in the worst
  * case.
  *
+ * 'pattern_end' and 'string_end' params are used to determine
+ * the end of strings, because '\0' is not supposed to be
+ * end-of-string signal.
+ *
  * @param pattern String containing comparison pattern.
  * @param string String being compared.
+ * @param pattern_end Ptr to pattern last symbol.
+ * @param string_end Ptr to string last symbol.
  * @param is_like_ci true if LIKE is case insensitive.
  * @param match_other The escape char for LIKE.
  *
@@ -630,6 +723,8 @@ enum pattern_match_status {
 static int
 sql_utf8_pattern_compare(const char *pattern,
 			 const char *string,
+			 const char *pattern_end,
+			 const char *string_end,
 			 const int is_like_ci,
 			 UChar32 match_other)
 {
@@ -637,8 +732,6 @@ sql_utf8_pattern_compare(const char *pattern,
 	UChar32 c, c2;
 	/* One past the last escaped input char. */
 	const char *zEscaped = 0;
-	const char *pattern_end = pattern + strlen(pattern);
-	const char *string_end = string + strlen(string);
 	UErrorCode status = U_ZERO_ERROR;
 
 	while (pattern < pattern_end) {
@@ -721,6 +814,8 @@ sql_utf8_pattern_compare(const char *pattern,
 				}
 				bMatch = sql_utf8_pattern_compare(pattern,
 								  string,
+								  pattern_end,
+								  string_end,
 								  is_like_ci,
 								  match_other);
 				if (bMatch != NO_MATCH)
@@ -768,7 +863,9 @@ sql_utf8_pattern_compare(const char *pattern,
 int
 sql_strlike_cs(const char *zPattern, const char *zStr, unsigned int esc)
 {
-	return sql_utf8_pattern_compare(zPattern, zStr, 0, esc);
+	return sql_utf8_pattern_compare(zPattern, zStr,
+		                        zPattern + strlen(zPattern),
+		                        zStr + strlen(zStr), 0, esc);
 }
 
 /**
@@ -778,16 +875,10 @@ sql_strlike_cs(const char *zPattern, const char *zStr, unsigned int esc)
 int
 sql_strlike_ci(const char *zPattern, const char *zStr, unsigned int esc)
 {
-	return sql_utf8_pattern_compare(zPattern, zStr, 1, esc);
+	return sql_utf8_pattern_compare(zPattern, zStr,
+		                        zPattern + strlen(zPattern),
+		                        zStr + strlen(zStr), 1, esc);
 }
-
-/**
- * Count the number of times that the LIKE operator gets called.
- * This is used for testing only.
- */
-#ifdef SQL_TEST
-int sql_like_count = 0;
-#endif
 
 /**
  * Implementation of the like() SQL function. This function
@@ -798,28 +889,36 @@ int sql_like_count = 0;
  *       A LIKE B
  *
  * are implemented as like(B,A).
+ *
+ * Both arguments (A and B) must be of type TEXT. If one arguments
+ * is NULL then result is NULL as well.
  */
 static void
 likeFunc(sql_context *context, int argc, sql_value **argv)
 {
-	const char *zA, *zB;
 	u32 escape = SQL_END_OF_STRING;
 	int nPat;
 	sql *db = sql_context_db_handle(context);
 	int is_like_ci = SQL_PTR_TO_INT(sql_user_data(context));
+	int rhs_type = sql_value_type(argv[0]);
+	int lhs_type = sql_value_type(argv[1]);
 
-#ifdef SQL_LIKE_DOESNT_MATCH_BLOBS
-	if (sql_value_type(argv[0]) == SQL_BLOB
-	    || sql_value_type(argv[1]) == SQL_BLOB) {
-#ifdef SQL_TEST
-		sql_like_count++;
-#endif
-		sql_result_int(context, 0);
+	if (lhs_type != SQL_TEXT || rhs_type != SQL_TEXT) {
+		if (lhs_type == SQL_NULL || rhs_type == SQL_NULL)
+			return;
+		char *inconsistent_type = rhs_type != SQL_TEXT ?
+					  mem_type_to_str(argv[0]) :
+					  mem_type_to_str(argv[1]);
+		diag_set(ClientError, ER_INCONSISTENT_TYPES, "TEXT",
+			 inconsistent_type);
+		context->fErrorOrAux = 1;
+		context->isError = SQL_TARANTOOL_ERROR;
 		return;
 	}
-#endif
-	zB = (const char *) sql_value_text(argv[0]);
-	zA = (const char *) sql_value_text(argv[1]);
+	const char *zB = (const char *) sql_value_text(argv[0]);
+	const char *zA = (const char *) sql_value_text(argv[1]);
+	const char *zB_end = zB + sql_value_bytes(argv[0]);
+	const char *zA_end = zA + sql_value_bytes(argv[1]);
 
 	/*
 	 * Limit the length of the LIKE pattern to avoid problems
@@ -848,7 +947,7 @@ likeFunc(sql_context *context, int argc, sql_value **argv)
 			return;
 		const char *const err_msg =
 			"ESCAPE expression must be a single character";
-		if (sqlUtf8CharLen((char *)zEsc, -1) != 1) {
+		if (sql_utf8_char_count(zEsc, sql_value_bytes(argv[2])) != 1) {
 			sql_result_error(context, err_msg, -1);
 			return;
 		}
@@ -856,11 +955,9 @@ likeFunc(sql_context *context, int argc, sql_value **argv)
 	}
 	if (!zA || !zB)
 		return;
-#ifdef SQL_TEST
-	sql_like_count++;
-#endif
 	int res;
-	res = sql_utf8_pattern_compare(zB, zA, is_like_ci, escape);
+	res = sql_utf8_pattern_compare(zB, zA, zB_end, zA_end,
+				       is_like_ci, escape);
 	if (res == INVALID_PATTERN) {
 		const char *const err_msg =
 			"LIKE pattern can only contain UTF-8 characters";
@@ -1135,12 +1232,12 @@ replaceFunc(sql_context * context, int argc, sql_value ** argv)
 		       || sql_context_db_handle(context)->mallocFailed);
 		return;
 	}
-	if (zPattern[0] == 0) {
+	nPattern = sql_value_bytes(argv[1]);
+	if (nPattern == 0) {
 		assert(sql_value_type(argv[1]) != SQL_NULL);
 		sql_result_value(context, argv[0]);
 		return;
 	}
-	nPattern = sql_value_bytes(argv[1]);
 	assert(zPattern == sql_value_text(argv[1]));	/* No encoding change */
 	zRep = sql_value_text(argv[2]);
 	if (zRep == 0)
@@ -1225,8 +1322,6 @@ trimFunc(sql_context * context, int argc, sql_value ** argv)
 	} else {
 		const unsigned char *z = zCharSet;
 		int trim_set_sz = sql_value_bytes(argv[1]);
-		int handled_bytes_cnt = trim_set_sz;
-		nChar = 0;
 		/*
 		* Count the number of UTF-8 characters passing
 		* through the entire char set, but not up
@@ -1234,12 +1329,7 @@ trimFunc(sql_context * context, int argc, sql_value ** argv)
 		* to handle trimming set containing such
 		* characters.
 		*/
-		while(handled_bytes_cnt > 0) {
-		const unsigned char *prev_byte = z;
-			SQL_SKIP_UTF8(z);
-			handled_bytes_cnt -= (z - prev_byte);
-			nChar++;
-		}
+		nChar = sql_utf8_char_count(z, trim_set_sz);
 		if (nChar > 0) {
 			azChar =
 			    contextMalloc(context,
@@ -1249,12 +1339,13 @@ trimFunc(sql_context * context, int argc, sql_value ** argv)
 			}
 			aLen = (unsigned char *)&azChar[nChar];
 			z = zCharSet;
+			i = 0;
 			nChar = 0;
-			handled_bytes_cnt = trim_set_sz;
+			int handled_bytes_cnt = trim_set_sz;
 			while(handled_bytes_cnt > 0) {
-				azChar[nChar] = (unsigned char *)z;
-				SQL_SKIP_UTF8(z);
-				aLen[nChar] = (u8) (z - azChar[nChar]);
+				azChar[nChar] = (unsigned char *)(z + i);
+				SQL_UTF8_FWD_1(z, i, trim_set_sz);
+				aLen[nChar] = (u8) (z + i - azChar[nChar]);
 				handled_bytes_cnt -= aLen[nChar];
 				nChar++;
 			}
@@ -1595,8 +1686,8 @@ groupConcatFinalize(sql_context * context)
 			sql_result_error_nomem(context);
 		} else {
 			sql_result_text(context,
-					    sqlStrAccumFinish(pAccum), -1,
-					    sql_free);
+					    sqlStrAccumFinish(pAccum),
+					    pAccum->nChar, sql_free);
 		}
 	}
 }
@@ -1614,7 +1705,7 @@ sql_overload_function(sql * db, const char *zName,
 
 #ifdef SQL_ENABLE_API_ARMOR
 	if (!sqlSafetyCheckOk(db) || zName == 0 || nArg < -2) {
-		return SQL_MISUSE_BKPT;
+		return SQL_MISUSE;
 	}
 #endif
 	if (sqlFindFunction(db, zName, nArg, 0) == 0) {
@@ -1727,12 +1818,12 @@ sqlRegisterBuiltinFunctions(void)
 			  FIELD_TYPE_INTEGER),
 		FUNCTION2(likely, 1, 0, 0, noopFunc, SQL_FUNC_UNLIKELY,
 			  FIELD_TYPE_INTEGER),
-		FUNCTION(ltrim, 1, 1, 0, trimFunc, FIELD_TYPE_STRING),
-		FUNCTION(ltrim, 2, 1, 0, trimFunc, FIELD_TYPE_STRING),
-		FUNCTION(rtrim, 1, 2, 0, trimFunc, FIELD_TYPE_STRING),
-		FUNCTION(rtrim, 2, 2, 0, trimFunc, FIELD_TYPE_STRING),
-		FUNCTION(trim, 1, 3, 0, trimFunc, FIELD_TYPE_STRING),
-		FUNCTION(trim, 2, 3, 0, trimFunc, FIELD_TYPE_STRING),
+		FUNCTION_COLL(ltrim, 1, 1, 0, trimFunc),
+		FUNCTION_COLL(ltrim, 2, 1, 0, trimFunc),
+		FUNCTION_COLL(rtrim, 1, 2, 0, trimFunc),
+		FUNCTION_COLL(rtrim, 2, 2, 0, trimFunc),
+		FUNCTION_COLL(trim, 1, 3, 0, trimFunc),
+		FUNCTION_COLL(trim, 2, 3, 0, trimFunc),
 		FUNCTION(min, -1, 0, 1, minmaxFunc, FIELD_TYPE_SCALAR),
 		FUNCTION(min, 0, 0, 1, 0, FIELD_TYPE_SCALAR),
 		AGGREGATE2(min, 1, 0, 1, minmaxStep, minMaxFinalize,
@@ -1745,7 +1836,7 @@ sqlRegisterBuiltinFunctions(void)
 			  FIELD_TYPE_STRING),
 		FUNCTION2(length, 1, 0, 0, lengthFunc, SQL_FUNC_LENGTH,
 			  FIELD_TYPE_INTEGER),
-		FUNCTION(instr, 2, 0, 0, instrFunc, FIELD_TYPE_INTEGER),
+		FUNCTION(position, 2, 0, 1, position_func, FIELD_TYPE_INTEGER),
 		FUNCTION(printf, -1, 0, 0, printfFunc, FIELD_TYPE_STRING),
 		FUNCTION(unicode, 1, 0, 0, unicodeFunc, FIELD_TYPE_STRING),
 		FUNCTION(char, -1, 0, 0, charFunc, FIELD_TYPE_STRING),
@@ -1754,21 +1845,21 @@ sqlRegisterBuiltinFunctions(void)
 		FUNCTION(round, 1, 0, 0, roundFunc, FIELD_TYPE_INTEGER),
 		FUNCTION(round, 2, 0, 0, roundFunc, FIELD_TYPE_INTEGER),
 #endif
-		FUNCTION(upper, 1, 0, 1, UpperICUFunc, FIELD_TYPE_STRING),
-		FUNCTION(lower, 1, 0, 1, LowerICUFunc, FIELD_TYPE_STRING),
+		FUNCTION_COLL(upper, 1, 0, 1, UpperICUFunc),
+		FUNCTION_COLL(lower, 1, 0, 1, LowerICUFunc),
 		FUNCTION(hex, 1, 0, 0, hexFunc, FIELD_TYPE_STRING),
 		FUNCTION2(ifnull, 2, 0, 0, noopFunc, SQL_FUNC_COALESCE,
 			  FIELD_TYPE_INTEGER),
-		VFUNCTION(random, 0, 0, 0, randomFunc, FIELD_TYPE_NUMBER),
+		VFUNCTION(random, 0, 0, 0, randomFunc, FIELD_TYPE_INTEGER),
 		VFUNCTION(randomblob, 1, 0, 0, randomBlob, FIELD_TYPE_SCALAR),
 		FUNCTION(nullif, 2, 0, 1, nullifFunc, FIELD_TYPE_SCALAR),
 		FUNCTION(version, 0, 0, 0, sql_func_version, FIELD_TYPE_STRING),
 		FUNCTION(quote, 1, 0, 0, quoteFunc, FIELD_TYPE_STRING),
 		VFUNCTION(row_count, 0, 0, 0, sql_row_count, FIELD_TYPE_INTEGER),
-		FUNCTION(replace, 3, 0, 0, replaceFunc, FIELD_TYPE_STRING),
+		FUNCTION_COLL(replace, 3, 0, 0, replaceFunc),
 		FUNCTION(zeroblob, 1, 0, 0, zeroblobFunc, FIELD_TYPE_SCALAR),
-		FUNCTION(substr, 2, 0, 0, substrFunc, FIELD_TYPE_STRING),
-		FUNCTION(substr, 3, 0, 0, substrFunc, FIELD_TYPE_STRING),
+		FUNCTION_COLL(substr, 2, 0, 0, substrFunc),
+		FUNCTION_COLL(substr, 3, 0, 0, substrFunc),
 		AGGREGATE(sum, 1, 0, 0, sumStep, sumFinalize, FIELD_TYPE_NUMBER),
 		AGGREGATE(total, 1, 0, 0, sumStep, totalFinalize, FIELD_TYPE_NUMBER),
 		AGGREGATE(avg, 1, 0, 0, sumStep, avgFinalize, FIELD_TYPE_NUMBER),

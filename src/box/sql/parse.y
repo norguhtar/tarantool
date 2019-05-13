@@ -33,13 +33,16 @@
   UNUSED_PARAMETER(yymajor);  /* Silence some compiler warnings */
   assert( TOKEN.z[0] );  /* The tokenizer always gives us a token */
   if (yypParser->is_fallback_failed && TOKEN.isReserved) {
-    sqlErrorMsg(pParse, "keyword \"%T\" is reserved", &TOKEN);
+    diag_set(ClientError, ER_SQL_KEYWORD_IS_RESERVED, TOKEN.n, TOKEN.z,
+             TOKEN.n, TOKEN.z);
   } else {
-    sqlErrorMsg(pParse, "near \"%T\": syntax error", &TOKEN);
+    diag_set(ClientError, ER_SQL_UNRECOGNIZED_SYNTAX, TOKEN.n, TOKEN.z);
   }
+  pParse->is_aborted = true;
 }
 %stack_overflow {
-  sqlErrorMsg(pParse, "parser stack overflow");
+  diag_set(ClientError, ER_SQL_STACK_OVERFLOW);
+  pParse->is_aborted = true;
 }
 
 // The name of the generated procedure that implements the parser
@@ -51,7 +54,7 @@
 //
 %include {
 #include "sqlInt.h"
-#include "box/fkey.h"
+#include "box/fk_constraint.h"
 
 /*
 ** Disable all error recovery processing in the parser push-down
@@ -114,7 +117,8 @@ ecmd ::= explain cmdx SEMI. {
 		sql_finish_coding(pParse);
 }
 ecmd ::= SEMI. {
-  sqlErrorMsg(pParse, "syntax error: empty request");
+  diag_set(ClientError, ER_SQL_STATEMENT_EMPTY);
+  pParse->is_aborted = true;
 }
 explain ::= .
 explain ::= EXPLAIN.              { pParse->explain = 1; }
@@ -168,7 +172,8 @@ cmd ::= ROLLBACK TO savepoint_opt nm(X). {
 //
 cmd ::= create_table create_table_args.
 create_table ::= createkw TABLE ifnotexists(E) nm(Y). {
-   sqlStartTable(pParse,&Y,E);
+  create_table_def_init(&pParse->create_table_def, &Y, E);
+  pParse->create_table_def.new_space = sqlStartTable(pParse, &Y, E);
 }
 createkw(A) ::= CREATE(A).  {disableLookaside(pParse);}
 
@@ -176,17 +181,24 @@ createkw(A) ::= CREATE(A).  {disableLookaside(pParse);}
 ifnotexists(A) ::= .              {A = 0;}
 ifnotexists(A) ::= IF NOT EXISTS. {A = 1;}
 
-create_table_args ::= LP columnlist RP(E). {
-  sqlEndTable(pParse,&E,0);
+create_table_args ::= LP columnlist RP. {
+  sqlEndTable(pParse);
 }
-create_table_args ::= AS select(S). {
-  sqlEndTable(pParse,0,S);
-  sql_select_delete(pParse->db, S);
-}
-columnlist ::= columnlist COMMA tconsdef.
+
+/*
+ * CREATE TABLE AS SELECT is broken. To be re-implemented
+ * in gh-3223.
+ *
+ * create_table_args ::= AS select(S). {
+ *   sqlEndTable(pParse);
+ *   sql_select_delete(pParse->db, S);
+ * }
+ */
+
+columnlist ::= columnlist COMMA tcons.
 columnlist ::= columnlist COMMA columnname carglist.
 columnlist ::= columnname carglist.
-columnlist ::= tconsdef.
+columnlist ::= tcons.
 columnname(A) ::= nm(A) typedef(Y). {sqlAddColumn(pParse,&A,&Y);}
 
 // An IDENTIFIER can be a generic identifier, or one of several
@@ -227,18 +239,19 @@ columnname(A) ::= nm(A) typedef(Y). {sqlAddColumn(pParse,&A,&Y);}
 %type nm {Token}
 nm(A) ::= id(A). {
   if(A.isReserved) {
-    sqlErrorMsg(pParse, "keyword \"%T\" is reserved", &A);
+    diag_set(ClientError, ER_SQL_KEYWORD_IS_RESERVED, A.n, A.z, A.n, A.z);
+    pParse->is_aborted = true;
   }
 }
 
 // "carglist" is a list of additional constraints that come after the
 // column name and column type in a CREATE TABLE statement.
 //
-carglist ::= carglist cconsdef.
+carglist ::= carglist ccons.
 carglist ::= .
-cconsdef ::= cconsname ccons.
-cconsname ::= CONSTRAINT nm(X).           {pParse->constraintName = X;}
-cconsname ::= .                           {pParse->constraintName.n = 0;}
+%type cconsname { struct Token }
+cconsname(N) ::= CONSTRAINT nm(X). { N = X; }
+cconsname(N) ::= . { N = Token_nil; }
 ccons ::= DEFAULT term(X).            {sqlAddDefaultValue(pParse,&X);}
 ccons ::= DEFAULT LP expr(X) RP.      {sqlAddDefaultValue(pParse,&X);}
 ccons ::= DEFAULT PLUS term(X).       {sqlAddDefaultValue(pParse,&X);}
@@ -260,15 +273,32 @@ ccons ::= NULL onconf(R).        {
         sql_column_add_nullable_action(pParse, R);
 }
 ccons ::= NOT NULL onconf(R).    {sql_column_add_nullable_action(pParse, R);}
-ccons ::= PRIMARY KEY sortorder(Z) autoinc(I).
-                                 {sqlAddPrimaryKey(pParse,0,I,Z);}
-ccons ::= UNIQUE.                {sql_create_index(pParse,0,0,0,0,
-                                                   SORT_ORDER_ASC, false,
-                                                   SQL_INDEX_TYPE_CONSTRAINT_UNIQUE);}
-ccons ::= CHECK LP expr(X) RP.   {sql_add_check_constraint(pParse,&X);}
-ccons ::= REFERENCES nm(T) eidlist_opt(TA) refargs(R).
-                                 {sql_create_foreign_key(pParse, NULL, NULL, NULL, &T, TA, false, R);}
-ccons ::= defer_subclause(D).    {fkey_change_defer_mode(pParse, D);}
+ccons ::= cconsname(N) PRIMARY KEY sortorder(Z) autoinc(I). {
+  pParse->create_table_def.has_autoinc = I;
+  create_index_def_init(&pParse->create_index_def, NULL, &N, NULL,
+                        SQL_INDEX_TYPE_CONSTRAINT_PK, Z, false);
+  sqlAddPrimaryKey(pParse);
+}
+ccons ::= cconsname(N) UNIQUE. {
+  create_index_def_init(&pParse->create_index_def, NULL, &N, NULL,
+                        SQL_INDEX_TYPE_CONSTRAINT_UNIQUE, SORT_ORDER_ASC,
+                        false);
+  sql_create_index(pParse);
+}
+
+ccons ::= check_constraint_def .
+
+check_constraint_def ::= cconsname(N) CHECK LP expr(X) RP. {
+  create_ck_def_init(&pParse->create_ck_def, &N, &X);
+  sql_add_check_constraint(pParse);
+}
+
+ccons ::= cconsname(N) REFERENCES nm(T) eidlist_opt(TA) matcharg(M) refargs(R). {
+  create_fk_def_init(&pParse->create_fk_def, NULL, &N, NULL, &T, TA, M, R,
+                     false);
+  sql_create_foreign_key(pParse);
+}
+ccons ::= defer_subclause(D).    {fk_constraint_change_defer_mode(pParse, D);}
 ccons ::= COLLATE id(C).        {sqlAddCollateType(pParse, &C);}
 
 // The optional AUTOINCREMENT keyword
@@ -282,17 +312,23 @@ autoinc(X) ::= AUTOINCR.  {X = 1;}
 // check fails.
 //
 %type refargs {int}
-refargs(A) ::= .                  { A = FKEY_NO_ACTION; }
-refargs(A) ::= refargs(A) refarg(Y). { A = (A & ~Y.mask) | Y.value; }
-%type refarg {struct {int value; int mask;}}
-refarg(A) ::= MATCH matcharg(X).     { A.value = X<<16; A.mask = 0xff0000; }
-refarg(A) ::= ON INSERT refact.      { A.value = 0;     A.mask = 0x000000; }
-refarg(A) ::= ON DELETE refact(X).   { A.value = X;     A.mask = 0x0000ff; }
-refarg(A) ::= ON UPDATE refact(X).   { A.value = X<<8;  A.mask = 0x00ff00; }
+refargs(A) ::= refact_update(X) . { A = (X << 8); }
+refargs(A) ::= refact_delete(X) . { A = X; }
+refargs(A) ::= refact_delete(X) refact_update(Y) . { A = (Y << 8) | (X) ; }
+refargs(A) ::= refact_update(X) refact_delete(Y) . { A = (X << 8) | (Y) ; }
+refargs(A) ::= . { A = 0; }
+
+%type refact_update {int}
+refact_update(A) ::= ON UPDATE refact(X). { A = X; }
+%type refact_delete {int}
+refact_delete(A) ::= ON DELETE refact(X). { A = X; }
+
 %type matcharg {int}
-matcharg(A) ::= SIMPLE.  { A = FKEY_MATCH_SIMPLE; }
-matcharg(A) ::= PARTIAL. { A = FKEY_MATCH_PARTIAL; }
-matcharg(A) ::= FULL.    { A = FKEY_MATCH_FULL; }
+matcharg(A) ::= MATCH SIMPLE.  { A = FKEY_MATCH_SIMPLE; }
+matcharg(A) ::= MATCH PARTIAL. { A = FKEY_MATCH_PARTIAL; }
+matcharg(A) ::= MATCH FULL.    { A = FKEY_MATCH_FULL; }
+matcharg(A) ::= .              { A = FKEY_MATCH_SIMPLE; }
+
 %type refact {int}
 refact(A) ::= SET NULL.              { A = FKEY_ACTION_SET_NULL; }
 refact(A) ::= SET DEFAULT.           { A = FKEY_ACTION_SET_DEFAULT; }
@@ -307,20 +343,23 @@ init_deferred_pred_opt(A) ::= .                       {A = 0;}
 init_deferred_pred_opt(A) ::= INITIALLY DEFERRED.     {A = 1;}
 init_deferred_pred_opt(A) ::= INITIALLY IMMEDIATE.    {A = 0;}
 
-tconsdef ::= tconsname tcons.
-tconsname ::= CONSTRAINT nm(X).      {pParse->constraintName = X;}
-tconsname ::= .                      {pParse->constraintName.n = 0;}
-tcons ::= PRIMARY KEY LP sortlist(X) autoinc(I) RP.
-                                 {sqlAddPrimaryKey(pParse,X,I,0);}
-tcons ::= UNIQUE LP sortlist(X) RP.
-                                 {sql_create_index(pParse,0,0,X,0,
-                                                   SORT_ORDER_ASC,false,
-                                                   SQL_INDEX_TYPE_CONSTRAINT_UNIQUE);}
-tcons ::= CHECK LP expr(E) RP .
-                                 {sql_add_check_constraint(pParse,&E);}
-tcons ::= FOREIGN KEY LP eidlist(FA) RP
-          REFERENCES nm(T) eidlist_opt(TA) refargs(R) defer_subclause_opt(D). {
-    sql_create_foreign_key(pParse, NULL, NULL, FA, &T, TA, D, R);
+tcons ::= cconsname(N) PRIMARY KEY LP sortlist(X) autoinc(I) RP. {
+  pParse->create_table_def.has_autoinc = I;
+  create_index_def_init(&pParse->create_index_def, NULL, &N, X,
+                        SQL_INDEX_TYPE_CONSTRAINT_PK, SORT_ORDER_ASC, false);
+  sqlAddPrimaryKey(pParse);
+}
+tcons ::= cconsname(N) UNIQUE LP sortlist(X) RP. {
+  create_index_def_init(&pParse->create_index_def, NULL, &N, X,
+                        SQL_INDEX_TYPE_CONSTRAINT_UNIQUE, SORT_ORDER_ASC,
+                        false);
+  sql_create_index(pParse);
+}
+tcons ::= check_constraint_def .
+tcons ::= cconsname(N) FOREIGN KEY LP eidlist(FA) RP
+          REFERENCES nm(T) eidlist_opt(TA) matcharg(M) refargs(R) defer_subclause_opt(D). {
+  create_fk_def_init(&pParse->create_fk_def, NULL, &N, FA, &T, TA, M, R, D);
+  sql_create_foreign_key(pParse);
 }
 %type defer_subclause_opt {int}
 defer_subclause_opt(A) ::= .                    {A = 0;}
@@ -343,9 +382,19 @@ resolvetype(A) ::= REPLACE.                  {A = ON_CONFLICT_ACTION_REPLACE;}
 
 ////////////////////////// The DROP TABLE /////////////////////////////////////
 //
-cmd ::= DROP TABLE ifexists(E) fullname(X). {
-  sql_drop_table(pParse, X, 0, E);
+
+cmd ::= DROP TABLE ifexists(E) fullname(X) . {
+  struct Token t = Token_nil;
+  drop_table_def_init(&pParse->drop_table_def, X, &t, E);
+  sql_drop_table(pParse);
 }
+
+cmd ::= DROP VIEW ifexists(E) fullname(X) . {
+  struct Token t = Token_nil;
+  drop_view_def_init(&pParse->drop_view_def, X, &t, E);
+  sql_drop_table(pParse);
+}
+
 %type ifexists {int}
 ifexists(A) ::= IF EXISTS.   {A = 1;}
 ifexists(A) ::= .            {A = 0;}
@@ -354,13 +403,12 @@ ifexists(A) ::= .            {A = 0;}
 //
 cmd ::= createkw(X) VIEW ifnotexists(E) nm(Y) eidlist_opt(C)
           AS select(S). {
-  if (!pParse->parse_only)
-    sql_create_view(pParse, &X, &Y, C, S, E);
-  else
+  if (!pParse->parse_only) {
+    create_view_def_init(&pParse->create_view_def, &Y, &X, C, S, E);
+    sql_create_view(pParse);
+  } else {
     sql_store_select(pParse, S);
-}
-cmd ::= DROP VIEW ifexists(E) fullname(X). {
-  sql_drop_table(pParse, X, 1, E);
+  }
 }
 
 //////////////////////// The SELECT statement /////////////////////////////////
@@ -399,9 +447,10 @@ cmd ::= select(X).  {
         (mxSelect = pParse->db->aLimit[SQL_LIMIT_COMPOUND_SELECT])>0 &&
         cnt>mxSelect
       ){
-        sqlErrorMsg(pParse, "Too many UNION or EXCEPT or INTERSECT "
-                        "operations (limit %d is set)",
-                        pParse->db->aLimit[SQL_LIMIT_COMPOUND_SELECT]);
+         diag_set(ClientError, ER_SQL_PARSER_LIMIT, "The number of UNION or "\
+                  "EXCEPT or INTERSECT operations", cnt,
+                  pParse->db->aLimit[SQL_LIMIT_COMPOUND_SELECT]);
+         pParse->is_aborted = true;
       }
     }
   }
@@ -449,11 +498,13 @@ multiselect_op(A) ::= EXCEPT|INTERSECT(OP).  {A = @OP; /*A-overwrites-OP*/}
 %endif SQL_OMIT_COMPOUND_SELECT
 oneselect(A) ::= SELECT(S) distinct(D) selcollist(W) from(X) where_opt(Y)
                  groupby_opt(P) having_opt(Q) orderby_opt(Z) limit_opt(L). {
-#ifdef SELECTTRACE_ENABLED
+#ifdef SQL_DEBUG
   Token s = S; /*A-overwrites-S*/
 #endif
+  if (L.pLimit != NULL)
+    sql_expr_check_sort_orders(pParse, Z);
   A = sqlSelectNew(pParse,W,X,Y,P,Q,Z,D,L.pLimit,L.pOffset);
-#ifdef SELECTTRACE_ENABLED
+#ifdef SQL_DEBUG
   /* Populate the Select.zSelName[] string that is used to help with
   ** query planner debugging, to differentiate between multiple Select
   ** objects in a complex query.
@@ -476,7 +527,7 @@ oneselect(A) ::= SELECT(S) distinct(D) selcollist(W) from(X) where_opt(Y)
       sql_snprintf(sizeof(A->zSelName), A->zSelName, "%.*s", i, z);
     }
   }
-#endif /* SELECTRACE_ENABLED */
+#endif /* SQL_DEBUG */
 }
 oneselect(A) ::= values(A).
 
@@ -523,12 +574,20 @@ selcollist(A) ::= sclp(A) expr(X) as(Y).     {
    sqlExprListSetSpan(pParse,A,&X);
 }
 selcollist(A) ::= sclp(A) STAR. {
-  Expr *p = sqlExpr(pParse->db, TK_ASTERISK, 0);
+  struct Expr *p = sql_expr_new_anon(pParse->db, TK_ASTERISK);
+  if (p == NULL) {
+    pParse->is_aborted = true;
+    return;
+  }
   A = sql_expr_list_append(pParse->db, A, p);
 }
 selcollist(A) ::= sclp(A) nm(X) DOT STAR. {
+  struct Expr *pLeft = sql_expr_new_dequoted(pParse->db, TK_ID, &X);
+  if (pLeft == NULL) {
+    pParse->is_aborted = true;
+    return;
+  }
   Expr *pRight = sqlPExpr(pParse, TK_ASTERISK, 0, 0);
-  Expr *pLeft = sqlExprAlloc(pParse->db, TK_ID, &X, 1);
   Expr *pDot = sqlPExpr(pParse, TK_DOT, pLeft, pRight);
   A = sql_expr_list_append(pParse->db,A, pDot);
 }
@@ -603,8 +662,14 @@ seltablist(A) ::= stl_prefix(A) LP seltablist(F) RP
 
 %type fullname {SrcList*}
 %destructor fullname {sqlSrcListDelete(pParse->db, $$);}
-fullname(A) ::= nm(X).  
-   {A = sqlSrcListAppend(pParse->db,0,&X); /*A-overwrites-X*/}
+fullname(A) ::= nm(X). {
+  /* A-overwrites-X. */
+  A = sql_src_list_append(pParse->db,0,&X);
+  if (A == NULL) {
+    pParse->is_aborted = true;
+    return;
+  }
+}
 
 %type joinop {int}
 join_nm(A) ::= id(A).
@@ -731,7 +796,11 @@ cmd ::= with(C) UPDATE orconf(R) fullname(X) indexed_opt(I) SET setlist(Y)
         where_opt(W).  {
   sqlWithPush(pParse, C, 1);
   sqlSrcListIndexedBy(pParse, X, &I);
-  sqlExprListCheckLength(pParse,Y,"set list");
+  if (Y != NULL && Y->nExpr > pParse->db->aLimit[SQL_LIMIT_COLUMN]) {
+    diag_set(ClientError, ER_SQL_PARSER_LIMIT, "The number of columns in set "\
+             "list", Y->nExpr, pParse->db->aLimit[SQL_LIMIT_COLUMN]);
+    pParse->is_aborted = true;
+  }
   sqlSubProgramsRemaining = SQL_MAX_COMPILING_TRIGGERS;
   /* Instruct SQL to initate Tarantool's transaction.  */
   pParse->initiateTTrans = true;
@@ -785,10 +854,21 @@ insert_cmd(A) ::= REPLACE.            {A = ON_CONFLICT_ACTION_REPLACE;}
 
 idlist_opt(A) ::= .                       {A = 0;}
 idlist_opt(A) ::= LP idlist(X) RP.    {A = X;}
-idlist(A) ::= idlist(A) COMMA nm(Y).
-    {A = sqlIdListAppend(pParse->db,A,&Y);}
-idlist(A) ::= nm(Y).
-    {A = sqlIdListAppend(pParse->db,0,&Y); /*A-overwrites-Y*/}
+idlist(A) ::= idlist(A) COMMA nm(Y). {
+  A = sql_id_list_append(pParse->db,A,&Y);
+  if (A == NULL) {
+    pParse->is_aborted = true;
+    return;
+  }
+}
+idlist(A) ::= nm(Y). {
+  /* A-overwrites-Y. */
+  A = sql_id_list_append(pParse->db,0,&Y);
+  if (A == NULL) {
+    pParse->is_aborted = true;
+    return;
+  }
+}
 
 /////////////////////////// Expression Processing /////////////////////////////
 //
@@ -813,7 +893,9 @@ idlist(A) ::= nm(Y).
   ** that created the expression.
   */
   static void spanExpr(ExprSpan *pOut, Parse *pParse, int op, Token t){
-    Expr *p = sqlDbMallocRawNN(pParse->db, sizeof(Expr)+t.n+1);
+    struct Expr *p = NULL;
+    int name_sz = t.n + 1;
+    p = sqlDbMallocRawNN(pParse->db, sizeof(Expr) + name_sz);
     if( p ){
       memset(p, 0, sizeof(Expr));
       switch (op) {
@@ -846,10 +928,20 @@ idlist(A) ::= nm(Y).
       p->flags = EP_Leaf;
       p->iAgg = -1;
       p->u.zToken = (char*)&p[1];
-      memcpy(p->u.zToken, t.z, t.n);
-      p->u.zToken[t.n] = 0;
-      if (op != TK_VARIABLE){
-        sqlNormalizeName(p->u.zToken);
+      if (op != TK_VARIABLE) {
+        int rc = sql_normalize_name(p->u.zToken, name_sz, t.z, t.n);
+        if (rc > name_sz) {
+          name_sz = rc;
+          p = sqlDbReallocOrFree(pParse->db, p, sizeof(*p) + name_sz);
+          if (p == NULL)
+            goto tarantool_error;
+          p->u.zToken = (char *) &p[1];
+          if (sql_normalize_name(p->u.zToken, name_sz, t.z, t.n) > name_sz)
+              unreachable();
+        }
+      } else {
+        memcpy(p->u.zToken, t.z, t.n);
+        p->u.zToken[t.n] = 0;
       }
 #if SQL_MAX_EXPR_DEPTH>0
       p->nHeight = 1;
@@ -858,6 +950,10 @@ idlist(A) ::= nm(Y).
     pOut->pExpr = p;
     pOut->zStart = t.z;
     pOut->zEnd = &t.z[t.n];
+    return;
+tarantool_error:
+    sqlDbFree(pParse->db, p);
+    pParse->is_aborted = true;
   }
 }
 
@@ -868,15 +964,28 @@ term(A) ::= NULL(X).        {spanExpr(&A,pParse,@X,X);/*A-overwrites-X*/}
 expr(A) ::= id(X).          {spanExpr(&A,pParse,TK_ID,X); /*A-overwrites-X*/}
 expr(A) ::= JOIN_KW(X).     {spanExpr(&A,pParse,TK_ID,X); /*A-overwrites-X*/}
 expr(A) ::= nm(X) DOT nm(Y). {
-  Expr *temp1 = sqlExprAlloc(pParse->db, TK_ID, &X, 1);
-  Expr *temp2 = sqlExprAlloc(pParse->db, TK_ID, &Y, 1);
+  struct Expr *temp1 = sql_expr_new_dequoted(pParse->db, TK_ID, &X);
+  if (temp1 == NULL) {
+    pParse->is_aborted = true;
+    return;
+  }
+  struct Expr *temp2 = sql_expr_new_dequoted(pParse->db, TK_ID, &Y);
+  if (temp2 == NULL) {
+    sql_expr_delete(pParse->db, temp1, false);
+    pParse->is_aborted = true;
+    return;
+  }
   spanSet(&A,&X,&Y); /*A-overwrites-X*/
   A.pExpr = sqlPExpr(pParse, TK_DOT, temp1, temp2);
 }
 term(A) ::= FLOAT|BLOB(X). {spanExpr(&A,pParse,@X,X);/*A-overwrites-X*/}
 term(A) ::= STRING(X).     {spanExpr(&A,pParse,@X,X);/*A-overwrites-X*/}
 term(A) ::= INTEGER(X). {
-  A.pExpr = sqlExprAlloc(pParse->db, TK_INTEGER, &X, 1);
+  A.pExpr = sql_expr_new_dequoted(pParse->db, TK_INTEGER, &X);
+  if (A.pExpr == NULL) {
+    pParse->is_aborted = true;
+    return;
+  }
   A.pExpr->type = FIELD_TYPE_INTEGER;
   A.zStart = X.z;
   A.zEnd = X.z + X.n;
@@ -886,19 +995,24 @@ expr(A) ::= VARIABLE(X).     {
   Token t = X;
   if (pParse->parse_only) {
     spanSet(&A, &t, &t);
-    sqlErrorMsg(pParse, "bindings are not allowed in DDL");
+    diag_set(ClientError, ER_SQL_PARSER_GENERIC,
+             "bindings are not allowed in DDL");
+    pParse->is_aborted = true;
     A.pExpr = NULL;
   } else if (!(X.z[0]=='#' && sqlIsdigit(X.z[1]))) {
     u32 n = X.n;
     spanExpr(&A, pParse, TK_VARIABLE, X);
-    if (A.pExpr->u.zToken[0] == '?' && n > 1)
-        sqlErrorMsg(pParse, "near \"%T\": syntax error", &t);
-    else
-        sqlExprAssignVarNumber(pParse, A.pExpr, n);
+    if (A.pExpr->u.zToken[0] == '?' && n > 1) {
+      diag_set(ClientError, ER_SQL_UNRECOGNIZED_SYNTAX, t.n, t.z);
+      pParse->is_aborted = true;
+    } else {
+      sqlExprAssignVarNumber(pParse, A.pExpr, n);
+    }
   }else{
     assert( t.n>=2 );
     spanSet(&A, &t, &t);
-    sqlErrorMsg(pParse, "near \"%T\": syntax error", &t);
+    diag_set(ClientError, ER_SQL_UNRECOGNIZED_SYNTAX, t.n, t.z);
+    pParse->is_aborted = true;
     A.pExpr = NULL;
   }
 }
@@ -909,14 +1023,22 @@ expr(A) ::= expr(A) COLLATE id(C). {
 %ifndef SQL_OMIT_CAST
 expr(A) ::= CAST(X) LP expr(E) AS typedef(T) RP(Y). {
   spanSet(&A,&X,&Y); /*A-overwrites-X*/
-  A.pExpr = sqlExprAlloc(pParse->db, TK_CAST, 0, 1);
+  A.pExpr = sql_expr_new_dequoted(pParse->db, TK_CAST, NULL);
+  if (A.pExpr == NULL) {
+    pParse->is_aborted = true;
+    return;
+  }
   A.pExpr->type = T.type;
   sqlExprAttachSubtrees(pParse->db, A.pExpr, E.pExpr, 0);
 }
 %endif  SQL_OMIT_CAST
 expr(A) ::= id(X) LP distinct(D) exprlist(Y) RP(E). {
   if( Y && Y->nExpr>pParse->db->aLimit[SQL_LIMIT_FUNCTION_ARG] ){
-    sqlErrorMsg(pParse, "too many arguments on function %T", &X);
+    const char *err =
+      tt_sprintf("Number of arguments to function %.*s", X.n, X.z);
+    diag_set(ClientError, ER_SQL_PARSER_LIMIT, err, Y->nExpr,
+             pParse->db->aLimit[SQL_LIMIT_FUNCTION_ARG]);
+    pParse->is_aborted = true;
   }
   A.pExpr = sqlExprFunction(pParse, Y, &X);
   spanSet(&A,&X,&E);
@@ -925,12 +1047,18 @@ expr(A) ::= id(X) LP distinct(D) exprlist(Y) RP(E). {
   }
 }
 
-type_func(A) ::= DATE(A) .
-type_func(A) ::= DATETIME(A) .
+/*
+ * type_func(A) ::= DATE(A) .
+ * type_func(A) ::= DATETIME(A) .
+ */
 type_func(A) ::= CHAR(A) .
 expr(A) ::= type_func(X) LP distinct(D) exprlist(Y) RP(E). {
   if( Y && Y->nExpr>pParse->db->aLimit[SQL_LIMIT_FUNCTION_ARG] ){
-    sqlErrorMsg(pParse, "too many arguments on function %T", &X);
+    const char *err =
+      tt_sprintf("Number of arguments to function %.*s", X.n, X.z);
+    diag_set(ClientError, ER_SQL_PARSER_LIMIT, err, Y->nExpr,
+             pParse->db->aLimit[SQL_LIMIT_FUNCTION_ARG]);
+    pParse->is_aborted = true;
   }
   A.pExpr = sqlExprFunction(pParse, Y, &X);
   spanSet(&A,&X,&E);
@@ -943,10 +1071,12 @@ expr(A) ::= id(X) LP STAR RP(E). {
   A.pExpr = sqlExprFunction(pParse, 0, &X);
   spanSet(&A,&X,&E);
 }
-term(A) ::= CTIME_KW(OP). {
-  A.pExpr = sqlExprFunction(pParse, 0, &OP);
-  spanSet(&A, &OP, &OP);
-}
+/*
+ * term(A) ::= CTIME_KW(OP). {
+ *   A.pExpr = sqlExprFunction(pParse, 0, &OP);
+ *   spanSet(&A, &OP, &OP);
+ * }
+ */
 
 %include {
   /* This routine constructs a binary expression node out of two ExprSpan
@@ -1099,7 +1229,11 @@ expr(A) ::= expr(A) in_op(N) LP exprlist(Y) RP(E). [IN] {
     ** regardless of the value of expr1.
     */
     sql_expr_delete(pParse->db, A.pExpr, false);
-    A.pExpr = sqlExprAlloc(pParse->db, TK_INTEGER,&sqlIntTokens[N],1);
+    A.pExpr = sql_expr_new_dequoted(pParse->db, TK_INTEGER, &sqlIntTokens[N]);
+    if (A.pExpr == NULL) {
+      pParse->is_aborted = true;
+      return;
+    }
   }else if( Y->nExpr==1 ){
     /* Expressions of the form:
     **
@@ -1140,7 +1274,11 @@ expr(A) ::= expr(A) in_op(N) LP select(Y) RP(E).  [IN] {
   A.zEnd = &E.z[E.n];
 }
 expr(A) ::= expr(A) in_op(N) nm(Y) paren_exprlist(E). [IN] {
-  SrcList *pSrc = sqlSrcListAppend(pParse->db, 0,&Y);
+  struct SrcList *pSrc = sql_src_list_append(pParse->db, 0,&Y);
+  if (pSrc == NULL) {
+    pParse->is_aborted = true;
+    return;
+  }
   Select *pSelect = sqlSelectNew(pParse, 0,pSrc,0,0,0,0,0,0,0);
   if( E )  sqlSrcListFuncArgs(pParse, pSelect ? pSrc : 0, E);
   A.pExpr = sqlPExpr(pParse, TK_IN, A.pExpr, 0);
@@ -1208,10 +1346,16 @@ paren_exprlist(A) ::= LP exprlist(X) RP.  {A = X;}
 
 ///////////////////////////// The CREATE INDEX command ///////////////////////
 //
-cmd ::= createkw(S) uniqueflag(U) INDEX ifnotexists(NE) nm(X)
+cmd ::= createkw uniqueflag(U) INDEX ifnotexists(NE) nm(X)
         ON nm(Y) LP sortlist(Z) RP. {
-  sql_create_index(pParse, &X, sqlSrcListAppend(pParse->db,0,&Y), Z, &S,
-                   SORT_ORDER_ASC, NE, U);
+  struct SrcList *src_list = sql_src_list_append(pParse->db,0,&Y);
+  if (src_list == NULL) {
+    pParse->is_aborted = true;
+    return;
+  }
+  create_index_def_init(&pParse->create_index_def, src_list, &X, Z, U,
+                        SORT_ORDER_ASC, NE);
+  sql_create_index(pParse);
 }
 
 %type uniqueflag {int}
@@ -1241,17 +1385,9 @@ uniqueflag(A) ::= .        {A = SQL_INDEX_TYPE_NON_UNIQUE;}
   static ExprList *parserAddExprIdListTerm(
     Parse *pParse,
     ExprList *pPrior,
-    Token *pIdToken,
-    int hasCollate,
-    int sortOrder
+    Token *pIdToken
   ){
     ExprList *p = sql_expr_list_append(pParse->db, pPrior, NULL);
-    if( (hasCollate || sortOrder != SORT_ORDER_UNDEF)
-        && pParse->db->init.busy==0
-    ){
-      sqlErrorMsg(pParse, "syntax error after column name \"%.*s\"",
-                         pIdToken->n, pIdToken->z);
-    }
     sqlExprListSetName(pParse, p, pIdToken, 1);
     return p;
   }
@@ -1259,22 +1395,19 @@ uniqueflag(A) ::= .        {A = SQL_INDEX_TYPE_NON_UNIQUE;}
 
 eidlist_opt(A) ::= .                         {A = 0;}
 eidlist_opt(A) ::= LP eidlist(X) RP.         {A = X;}
-eidlist(A) ::= eidlist(A) COMMA nm(Y) collate(C) sortorder(Z).  {
-  A = parserAddExprIdListTerm(pParse, A, &Y, C, Z);
+eidlist(A) ::= eidlist(A) COMMA nm(Y).  {
+  A = parserAddExprIdListTerm(pParse, A, &Y);
 }
-eidlist(A) ::= nm(Y) collate(C) sortorder(Z). {
-  A = parserAddExprIdListTerm(pParse, 0, &Y, C, Z); /*A-overwrites-Y*/
+eidlist(A) ::= nm(Y). {
+  A = parserAddExprIdListTerm(pParse, 0, &Y); /*A-overwrites-Y*/
 }
-
-%type collate {int}
-collate(C) ::= .              {C = 0;}
-collate(C) ::= COLLATE id.   {C = 1;}
 
 
 ///////////////////////////// The DROP INDEX command /////////////////////////
 //
-cmd ::= DROP INDEX ifexists(E) fullname(X) ON nm(Y).   {
-    sql_drop_index(pParse, X, &Y, E);
+cmd ::= DROP INDEX ifexists(E) nm(X) ON fullname(Y).   {
+  drop_index_def_init(&pParse->drop_index_def, Y, &X, E);
+  sql_drop_index(pParse);
 }
 
 ///////////////////////////// The PRAGMA command /////////////////////////////
@@ -1325,7 +1458,9 @@ cmd ::= createkw trigger_decl(A) BEGIN trigger_cmd_list(S) END(Z). {
 trigger_decl(A) ::= TRIGGER ifnotexists(NOERR) nm(B)
                     trigger_time(C) trigger_event(D)
                     ON fullname(E) foreach_clause when_clause(G). {
-  sql_trigger_begin(pParse, &B, C, D.a, D.b, E, G, NOERR);
+  create_trigger_def_init(&pParse->create_trigger_def, E, &B, C, D.a, D.b, G,
+                          NOERR);
+  sql_trigger_begin(pParse);
   A = B; /*A-overwrites-T*/
 }
 
@@ -1341,7 +1476,11 @@ trigger_event(A) ::= DELETE|INSERT(X).   {A.a = @X; /*A-overwrites-X*/ A.b = 0;}
 trigger_event(A) ::= UPDATE(X).          {A.a = @X; /*A-overwrites-X*/ A.b = 0;}
 trigger_event(A) ::= UPDATE OF idlist(X).{A.a = TK_UPDATE; A.b = X;}
 
-foreach_clause ::= .
+foreach_clause ::= . {
+  diag_set(ClientError, ER_SQL_PARSER_GENERIC, "FOR EACH STATEMENT "
+	       "triggers are not implemented, please supply FOR EACH ROW clause");
+  pParse->is_aborted = true;
+}
 foreach_clause ::= FOR EACH ROW.
 
 %type when_clause {Expr*}
@@ -1369,9 +1508,9 @@ trigger_cmd_list(A) ::= trigger_cmd(A) SEMI. {
 trnm(A) ::= nm(A).
 trnm(A) ::= nm DOT nm(X). {
   A = X;
-  sqlErrorMsg(pParse,
-        "qualified table names are not allowed on INSERT, UPDATE, and DELETE "
-        "statements within triggers");
+  diag_set(ClientError, ER_SQL_PARSER_GENERIC, "qualified table names are not "\
+           "allowed on INSERT, UPDATE, and DELETE statements within triggers");
+  pParse->is_aborted = true;
 }
 
 // Disallow the INDEX BY and NOT INDEXED clauses on UPDATE and DELETE
@@ -1380,14 +1519,15 @@ trnm(A) ::= nm DOT nm(X). {
 //
 tridxby ::= .
 tridxby ::= INDEXED BY nm. {
-  sqlErrorMsg(pParse,
-        "the INDEXED BY clause is not allowed on UPDATE or DELETE statements "
-        "within triggers");
+  diag_set(ClientError, ER_SQL_SYNTAX, "trigger body", "the INDEXED BY clause "\
+           "is not allowed on UPDATE or DELETE statements within triggers");
+  pParse->is_aborted = true;
 }
 tridxby ::= NOT INDEXED. {
-  sqlErrorMsg(pParse,
-        "the NOT INDEXED clause is not allowed on UPDATE or DELETE statements "
-        "within triggers");
+  diag_set(ClientError, ER_SQL_SYNTAX, "trigger body", "the NOT INDEXED "\
+           "clause is not allowed on UPDATE or DELETE statements within "\
+           "triggers");
+  pParse->is_aborted = true;
 }
 
 
@@ -1396,20 +1536,42 @@ tridxby ::= NOT INDEXED. {
 %destructor trigger_cmd {sqlDeleteTriggerStep(pParse->db, $$);}
 // UPDATE 
 trigger_cmd(A) ::=
-   UPDATE orconf(R) trnm(X) tridxby SET setlist(Y) where_opt(Z).  
-   {A = sqlTriggerUpdateStep(pParse->db, &X, Y, Z, R);}
+   UPDATE orconf(R) trnm(X) tridxby SET setlist(Y) where_opt(Z). {
+     A = sql_trigger_update_step(pParse->db, &X, Y, Z, R);
+     if (A == NULL) {
+        pParse->is_aborted = true;
+        return;
+     }
+   }
 
 // INSERT
-trigger_cmd(A) ::= insert_cmd(R) INTO trnm(X) idlist_opt(F) select(S).
-   {A = sqlTriggerInsertStep(pParse->db, &X, F, S, R);/*A-overwrites-R*/}
+trigger_cmd(A) ::= insert_cmd(R) INTO trnm(X) idlist_opt(F) select(S). {
+  /*A-overwrites-R. */
+  A = sql_trigger_insert_step(pParse->db, &X, F, S, R);
+  if (A == NULL) {
+    pParse->is_aborted = true;
+    return;
+  }
+}
 
 // DELETE
-trigger_cmd(A) ::= DELETE FROM trnm(X) tridxby where_opt(Y).
-   {A = sqlTriggerDeleteStep(pParse->db, &X, Y);}
+trigger_cmd(A) ::= DELETE FROM trnm(X) tridxby where_opt(Y). {
+  A = sql_trigger_delete_step(pParse->db, &X, Y);
+  if (A == NULL) {
+    pParse->is_aborted = true;
+    return;
+  }
+}
 
 // SELECT
-trigger_cmd(A) ::= select(X).
-   {A = sqlTriggerSelectStep(pParse->db, X); /*A-overwrites-X*/}
+trigger_cmd(A) ::= select(X). {
+  /* A-overwrites-X. */
+  A = sql_trigger_select_step(pParse->db, X);
+  if (A == NULL) {
+    pParse->is_aborted = true;
+    return;
+  }
+}
 
 // The special RAISE expression that may occur in trigger programs
 expr(A) ::= RAISE(X) LP IGNORE RP(Y).  {
@@ -1421,10 +1583,12 @@ expr(A) ::= RAISE(X) LP IGNORE RP(Y).  {
 }
 expr(A) ::= RAISE(X) LP raisetype(T) COMMA STRING(Z) RP(Y).  {
   spanSet(&A,&X,&Y);  /*A-overwrites-X*/
-  A.pExpr = sqlExprAlloc(pParse->db, TK_RAISE, &Z, 1);
-  if( A.pExpr ) {
-    A.pExpr->on_conflict_action = (enum on_conflict_action) T;
+  A.pExpr = sql_expr_new_dequoted(pParse->db, TK_RAISE, &Z);
+  if(A.pExpr == NULL) {
+    pParse->is_aborted = true;
+    return;
   }
+  A.pExpr->on_conflict_action = (enum on_conflict_action) T;
 }
 
 %type raisetype {int}
@@ -1435,26 +1599,54 @@ raisetype(A) ::= FAIL.      {A = ON_CONFLICT_ACTION_FAIL;}
 
 ////////////////////////  DROP TRIGGER statement //////////////////////////////
 cmd ::= DROP TRIGGER ifexists(NOERR) fullname(X). {
-  sql_drop_trigger(pParse,X,NOERR);
+  struct Token t = Token_nil;
+  drop_trigger_def_init(&pParse->drop_trigger_def, X, &t, NOERR);
+  sql_drop_trigger(pParse);
 }
-
-/////////////////////////////////// ANALYZE ///////////////////////////////////
-cmd ::= ANALYZE.                {sqlAnalyze(pParse, 0);}
-cmd ::= ANALYZE nm(X).          {sqlAnalyze(pParse, &X);}
 
 //////////////////////// ALTER TABLE table ... ////////////////////////////////
-cmd ::= ALTER TABLE fullname(X) RENAME TO nm(Z). {
-  sql_alter_table_rename(pParse,X,&Z);
+%include {
+  struct alter_args {
+    struct SrcList *table_name;
+    /** Name of constraint OR new name of table in case of RENAME. */
+    struct Token name;
+  };
 }
 
-cmd ::= ALTER TABLE fullname(X) ADD CONSTRAINT nm(Z) FOREIGN KEY
-        LP eidlist(FA) RP REFERENCES nm(T) eidlist_opt(TA) refargs(R)
-        defer_subclause_opt(D). {
-    sql_create_foreign_key(pParse, X, &Z, FA, &T, TA, D, R);
+%type alter_table_start {struct SrcList *}
+alter_table_start(A) ::= ALTER TABLE fullname(T) . { A = T; }
+
+%type alter_add_constraint {struct alter_args}
+alter_add_constraint(A) ::= alter_table_start(T) ADD CONSTRAINT nm(N). {
+  A.table_name = T;
+  A.name = N;
+}
+
+cmd ::= alter_add_constraint(N) FOREIGN KEY LP eidlist(FA) RP REFERENCES
+        nm(T) eidlist_opt(TA) matcharg(M) refargs(R) defer_subclause_opt(D). {
+  create_fk_def_init(&pParse->create_fk_def, N.table_name, &N.name, FA, &T, TA,
+                     M, R, D);
+  sql_create_foreign_key(pParse);
+}
+
+cmd ::= alter_add_constraint(N) unique_spec(U) LP sortlist(X) RP. {
+  create_index_def_init(&pParse->create_index_def, N.table_name, &N.name, X, U,
+                        SORT_ORDER_ASC, false);
+  sql_create_index(pParse);
+}
+
+%type unique_spec {int}
+unique_spec(U) ::= UNIQUE.      { U = SQL_INDEX_TYPE_CONSTRAINT_UNIQUE; }
+unique_spec(U) ::= PRIMARY KEY. { U = SQL_INDEX_TYPE_CONSTRAINT_PK; }
+
+cmd ::= alter_table_start(A) RENAME TO nm(N). {
+    rename_entity_def_init(&pParse->rename_entity_def, A, &N);
+    sql_alter_table_rename(pParse);
 }
 
 cmd ::= ALTER TABLE fullname(X) DROP CONSTRAINT nm(Z). {
-    sql_drop_foreign_key(pParse, X, &Z);
+  drop_fk_def_init(&pParse->drop_fk_def, X, &Z, false);
+  sql_drop_foreign_key(pParse);
 }
 
 //////////////////////// COMMON TABLE EXPRESSIONS ////////////////////////////
@@ -1479,26 +1671,23 @@ wqlist(A) ::= wqlist(A) COMMA nm(X) eidlist_opt(Y) AS LP select(Z) RP. {
 ////////////////////////////// TYPE DECLARATION ///////////////////////////////
 %type typedef {struct type_def}
 typedef(A) ::= TEXT . { A.type = FIELD_TYPE_STRING; }
-typedef(A) ::= BLOB_KW . { A.type = FIELD_TYPE_SCALAR; }
-typedef(A) ::= DATE . { A.type = FIELD_TYPE_NUMBER; }
-typedef(A) ::= TIME . { A.type = FIELD_TYPE_NUMBER; }
-typedef(A) ::= DATETIME . { A.type = FIELD_TYPE_NUMBER; }
+typedef(A) ::= SCALAR . { A.type = FIELD_TYPE_SCALAR; }
+/**
+ * Time-like types are temporary disabled, until they are
+ * implemented as a native Tarantool types (gh-3694).
+ *
+ typedef(A) ::= DATE . { A.type = FIELD_TYPE_NUMBER; }
+ typedef(A) ::= TIME . { A.type = FIELD_TYPE_NUMBER; }
+ typedef(A) ::= DATETIME . { A.type = FIELD_TYPE_NUMBER; }
+*/
 
-%type char_len {int}
-typedef(A) ::= CHAR . {
-  A.type = FIELD_TYPE_STRING;
-}
 
 char_len(A) ::= LP INTEGER(B) RP . {
   (void) A;
   (void) B;
 }
 
-typedef(A) ::= CHAR char_len(B) . {
-  A.type = FIELD_TYPE_STRING;
-  (void) B;
-}
-
+%type char_len {int}
 typedef(A) ::= VARCHAR char_len(B) . {
   A.type = FIELD_TYPE_STRING;
   (void) B;
@@ -1509,20 +1698,26 @@ typedef(A) ::= number_typedef(A) .
 number_typedef(A) ::= FLOAT_KW|REAL|DOUBLE . { A.type = FIELD_TYPE_NUMBER; }
 number_typedef(A) ::= INT|INTEGER_KW . { A.type = FIELD_TYPE_INTEGER; }
 
-%type number_len_typedef {struct type_def}
-number_typedef(A) ::= DECIMAL|NUMERIC|NUM number_len_typedef(B) . {
-  A.type = FIELD_TYPE_NUMBER;
-  (void) B;
-}
-
-number_len_typedef(A) ::= . { (void) A; }
-number_len_typedef(A) ::= LP INTEGER(B) RP . {
-  (void) A;
-  (void) B;
-}
-
-number_len_typedef(A) ::= LP INTEGER(B) COMMA INTEGER(C) RP . {
-  (void) A;
-  (void) B;
-  (void) C;
-}
+/**
+ * NUMERIC type is temporary disabled. To be enabled when
+ * it will be implemented as native Tarantool type.
+ *
+ * %type number_len_typedef {struct type_def}
+ * number_typedef(A) ::= DECIMAL|NUMERIC|NUM number_len_typedef(B) . {
+ *   A.type = FIELD_TYPE_NUMBER;
+ *   (void) B;
+ * }
+ *
+ *
+ * number_len_typedef(A) ::= . { (void) A; }
+ * number_len_typedef(A) ::= LP INTEGER(B) RP . {
+ *   (void) A;
+ *   (void) B;
+ * }
+ *
+ * number_len_typedef(A) ::= LP INTEGER(B) COMMA INTEGER(C) RP . {
+ *   (void) A;
+ *   (void) B;
+ *   (void) C;
+ *}
+ */

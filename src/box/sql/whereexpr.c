@@ -37,7 +37,8 @@
  * readability and editabiliity.  This file contains utility routines for
  * analyzing Expr objects in the WHERE clause.
  */
-#include "coll.h"
+#include "box/coll_id_cache.h"
+#include "coll/coll.h"
 #include "sqlInt.h"
 #include "whereInt.h"
 
@@ -167,7 +168,10 @@ exprCommute(Parse * pParse, Expr * pExpr)
 		} else {
 			bool is_found;
 			uint32_t id;
-			sql_expr_coll(pParse, pExpr->pLeft, &is_found, &id);
+			struct coll *unused;
+			if (sql_expr_coll(pParse, pExpr->pLeft, &is_found, &id,
+					  &unused) != 0)
+				return;
 			if (id != COLL_NONE) {
 				/*
 				 * Neither X nor Y have COLLATE
@@ -303,8 +307,10 @@ like_optimization_is_valid(Parse *pParse, Expr *pExpr, Expr **ppPrefix,
 			Expr *pPrefix;
 			*pisComplete = c == MATCH_ALL_WILDCARD &&
 				       z[cnt + 1] == 0;
-			pPrefix = sqlExpr(db, TK_STRING, z);
-			if (pPrefix)
+			pPrefix = sql_expr_new_named(db, TK_STRING, z);
+			if (pPrefix == NULL)
+				pParse->is_aborted = true;
+			else
 				pPrefix->u.zToken[cnt] = 0;
 			*ppPrefix = pPrefix;
 			if (op == TK_VARIABLE) {
@@ -847,17 +853,23 @@ termIsEquivalence(Parse * pParse, Expr * pExpr)
 	if (lhs_type != rhs_type && (!sql_type_is_numeric(lhs_type) ||
 				     !sql_type_is_numeric(rhs_type)))
 		return 0;
-	uint32_t unused;
-	struct coll *coll1 =
-	    sql_binary_compare_coll_seq(pParse, pExpr->pLeft, pExpr->pRight,
-					&unused);
-	if (coll1 == NULL)
+	uint32_t id;
+	if (sql_binary_compare_coll_seq(pParse, pExpr->pLeft, pExpr->pRight,
+					&id) != 0)
+		return 0;
+	if (id == COLL_NONE)
 		return 1;
 	bool unused1;
-	coll1 = sql_expr_coll(pParse, pExpr->pLeft, &unused1, &unused);
-	struct coll *coll2 = sql_expr_coll(pParse, pExpr->pRight, &unused1,
-					   &unused);
-	return coll1 != NULL && coll1 == coll2;
+	uint32_t lhs_id;
+	uint32_t rhs_id;
+	struct coll *unused;
+	if (sql_expr_coll(pParse, pExpr->pLeft, &unused1, &lhs_id,
+			  &unused) != 0)
+		return 0;
+	if (sql_expr_coll(pParse, pExpr->pRight, &unused1, &rhs_id,
+			  &unused) != 0)
+		return 0;
+	return lhs_id != COLL_NONE && lhs_id == rhs_id;
 }
 
 /*
@@ -1296,10 +1308,11 @@ exprAnalyze(SrcList * pSrc,	/* the FROM clause */
 		Expr *pLeft = pExpr->pLeft;
 		int idxNew;
 		WhereTerm *pNewTerm;
-
-		pNewExpr = sqlPExpr(pParse, TK_GT,
-					sqlExprDup(db, pLeft, 0),
-					sqlExprAlloc(db, TK_NULL, 0, 0));
+		struct Expr *expr = sql_expr_new_anon(db, TK_NULL);
+		if (expr == NULL)
+			pParse->is_aborted = true;
+		pNewExpr = sqlPExpr(pParse, TK_GT, sqlExprDup(db, pLeft, 0),
+				    expr);
 
 		idxNew = whereClauseInsert(pWC, pNewExpr,
 					   TERM_VIRTUAL | TERM_DYNAMIC |
@@ -1473,34 +1486,33 @@ sqlWhereTabFuncArgs(Parse * pParse,	/* Parsing context */
 			WhereClause * pWC	/* Xfer function arguments to here */
     )
 {
-	Table *pTab;
 	int j, k;
 	ExprList *pArgs;
 	Expr *pColRef;
 	Expr *pTerm;
 	if (pItem->fg.isTabFunc == 0)
 		return;
-	pTab = pItem->pTab;
-	assert(pTab != 0);
+	struct space_def *space_def = pItem->space->def;
 	pArgs = pItem->u1.pFuncArg;
 	if (pArgs == 0)
 		return;
 	for (j = k = 0; j < pArgs->nExpr; j++) {
-		while (k < (int)pTab->def->field_count) {
+		while (k < (int)space_def->field_count)
 			k++;
-		}
-		if (k >= (int)pTab->def->field_count) {
-			sqlErrorMsg(pParse,
-					"too many arguments on %s() - max %d",
-					pTab->def->name, j);
+		/*
+		 * This assert replaces error. At the moment, this
+		 * error cannot appear due to this function being
+		 * unused.
+		 */
+		assert(k < (int)space_def->field_count);
+		pColRef = sql_expr_new_anon(pParse->db, TK_COLUMN);
+		if (pColRef == NULL) {
+			pParse->is_aborted = true;
 			return;
 		}
-		pColRef = sqlExprAlloc(pParse->db, TK_COLUMN, 0, 0);
-		if (pColRef == 0)
-			return;
 		pColRef->iTable = pItem->iCursor;
 		pColRef->iColumn = k++;
-		pColRef->space_def = pTab->def;
+		pColRef->space_def = space_def;
 		pTerm = sqlPExpr(pParse, TK_EQ, pColRef,
 				     sqlExprDup(pParse->db,
 						    pArgs->a[j].pExpr, 0));

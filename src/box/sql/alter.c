@@ -38,14 +38,17 @@
 #include "box/schema.h"
 
 void
-sql_alter_table_rename(struct Parse *parse, struct SrcList *src_tab,
-		       struct Token *new_name_tk)
+sql_alter_table_rename(struct Parse *parse)
 {
+	struct rename_entity_def *rename_def = &parse->rename_entity_def;
+	struct SrcList *src_tab = rename_def->base.entity_name;
+	assert(rename_def->base.entity_type == ENTITY_TYPE_TABLE);
+	assert(rename_def->base.alter_action == ALTER_ACTION_RENAME);
 	assert(src_tab->nSrc == 1);
 	struct sql *db = parse->db;
-	char *new_name = sqlNameFromToken(db, new_name_tk);
+	char *new_name = sql_name_from_token(db, &rename_def->new_name);
 	if (new_name == NULL)
-		goto exit_rename_table;
+		goto tnt_error;
 	/* Check that new name isn't occupied by another table. */
 	if (space_by_name(new_name) != NULL) {
 		diag_set(ClientError, ER_SPACE_EXISTS, new_name);
@@ -72,8 +75,7 @@ exit_rename_table:
 	return;
 tnt_error:
 	sqlDbFree(db, new_name);
-	parse->rc = SQL_TARANTOOL_ERROR;
-	parse->nErr++;
+	parse->is_aborted = true;
 	goto exit_rename_table;
 }
 

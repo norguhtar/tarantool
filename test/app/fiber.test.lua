@@ -504,7 +504,7 @@ test_run:cmd("setopt delimiter ''");
 fiber = nil
 
 --
--- gh-2622 fiber.name() truncates new name
+-- gh-2622, gh-4011: fiber.name() truncates new name.
 --
 fiber = require('fiber')
 long_name = string.rep('a', 300)
@@ -622,6 +622,12 @@ f:cancel()
 ch1:put(1)
 
 while f:status() ~= 'dead' do fiber.sleep(0.01) end
+
+--
+-- Test if fiber join() does not crash
+-- if unjoinable
+--
+fiber.join(fiber.self())
 
 -- cleanup
 test_run:cmd("clear filter")

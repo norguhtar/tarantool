@@ -124,7 +124,7 @@ sql_finalize(sql_stmt * pStmt)
 		Vdbe *v = (Vdbe *) pStmt;
 		sql *db = v->db;
 		if (vdbeSafety(v))
-			return SQL_MISUSE_BKPT;
+			return SQL_MISUSE;
 		checkProfileCallback(db, v);
 		rc = sqlVdbeFinalize(v);
 		rc = sqlApiExit(db, rc);
@@ -280,7 +280,7 @@ sql_value_type(sql_value * pVal)
 		SQL_INTEGER,	/* 0x1e */
 		SQL_NULL,	/* 0x1f */
 	};
-	return aType[pVal->flags & MEM_TypeMask];
+	return aType[pVal->flags & MEM_PURE_TYPE_MASK];
 }
 
 /* Make a copy of an sql_value object
@@ -487,7 +487,7 @@ void
 sql_result_error_nomem(sql_context * pCtx)
 {
 	sqlVdbeMemSetNull(pCtx->pOut);
-	pCtx->isError = SQL_NOMEM_BKPT;
+	pCtx->isError = SQL_NOMEM;
 	pCtx->fErrorOrAux = 1;
 	sqlOomFault(pCtx->pOut->db);
 }
@@ -529,7 +529,7 @@ sqlStep(Vdbe * p)
 		if ((rc = p->rc & 0xff) == SQL_BUSY || rc == SQL_LOCKED) {
 			sql_reset((sql_stmt *) p);
 		} else {
-			return SQL_MISUSE_BKPT;
+			return SQL_MISUSE;
 		}
 #else
 		sql_reset((sql_stmt *) p);
@@ -540,7 +540,7 @@ sqlStep(Vdbe * p)
 	db = p->db;
 	if (db->mallocFailed) {
 		p->rc = SQL_NOMEM;
-		return SQL_NOMEM_BKPT;
+		return SQL_NOMEM;
 	}
 
 	if (p->pc <= 0 && p->expired) {
@@ -585,7 +585,7 @@ sqlStep(Vdbe * p)
 
 	db->errCode = rc;
 	if (SQL_NOMEM == sqlApiExit(p->db, p->rc)) {
-		p->rc = SQL_NOMEM_BKPT;
+		p->rc = SQL_NOMEM;
 	}
  end_of_step:
 	/* At this point local variable rc holds the value that should be
@@ -622,7 +622,7 @@ sql_step(sql_stmt * pStmt)
 	sql *db;		/* The database connection */
 
 	if (vdbeSafetyNotNull(v)) {
-		return SQL_MISUSE_BKPT;
+		return SQL_MISUSE;
 	}
 	db = v->db;
 	v->doingRerun = 0;
@@ -653,7 +653,7 @@ sql_step(sql_stmt * pStmt)
 			v->rc = rc2;
 		} else {
 			v->zErrMsg = 0;
-			v->rc = rc = SQL_NOMEM_BKPT;
+			v->rc = rc = SQL_NOMEM;
 		}
 	}
 	rc = sqlApiExit(db, rc);
@@ -1076,7 +1076,6 @@ columnName(sql_stmt * pStmt,
 	sql *db;
 #ifdef SQL_ENABLE_API_ARMOR
 	if (pStmt == 0) {
-		(void)SQL_MISUSE_BKPT;
 		return 0;
 	}
 #endif
@@ -1195,13 +1194,13 @@ vdbeUnbind(Vdbe * p, int i)
 {
 	Mem *pVar;
 	if (vdbeSafetyNotNull(p)) {
-		return SQL_MISUSE_BKPT;
+		return SQL_MISUSE;
 	}
 	if (p->magic != VDBE_MAGIC_RUN || p->pc >= 0) {
 		sqlError(p->db, SQL_MISUSE);
 		sql_log(SQL_MISUSE,
 			    "bind on a busy prepared statement: [%s]", p->zSql);
-		return SQL_MISUSE_BKPT;
+		return SQL_MISUSE;
 	}
 	if (i < 1 || i > p->nVar) {
 		sqlError(p->db, SQL_RANGE);
@@ -1314,11 +1313,20 @@ sql_bind_blob(sql_stmt * pStmt,
 		  int i, const void *zData, int nData, void (*xDel) (void *)
     )
 {
-#ifdef SQL_ENABLE_API_ARMOR
-	if (nData < 0)
-		return SQL_MISUSE_BKPT;
-#endif
-	return bindText(pStmt, i, zData, nData, xDel);
+	struct Vdbe *p = (Vdbe *) pStmt;
+	int rc = vdbeUnbind(p, i);
+	if (rc == SQL_OK) {
+		if (zData != 0) {
+			struct Mem *var = &p->aVar[i - 1];
+			rc = sqlVdbeMemSetStr(var, zData, nData, 0, xDel);
+			if (rc == SQL_OK)
+				rc = sql_bind_type(p, i, "BLOB");
+			rc = sqlApiExit(p->db, rc);
+		}
+	} else if (xDel != SQL_STATIC && xDel != SQL_TRANSIENT) {
+		xDel((void *)zData);
+	}
+	return rc;
 }
 
 int
@@ -1332,7 +1340,7 @@ sql_bind_blob64(sql_stmt * pStmt,
 	if (nData > 0x7fffffff) {
 		return invokeValueDestructor(zData, xDel, 0);
 	} else {
-		return bindText(pStmt, i, zData, (int)nData, xDel);
+		return sql_bind_blob(pStmt, i, zData, (int)nData, xDel);
 	}
 }
 
@@ -1570,7 +1578,6 @@ sql_next_stmt(sql * pDb, sql_stmt * pStmt)
 	sql_stmt *pNext;
 #ifdef SQL_ENABLE_API_ARMOR
 	if (!sqlSafetyCheckOk(pDb)) {
-		(void)SQL_MISUSE_BKPT;
 		return 0;
 	}
 #endif
@@ -1592,7 +1599,6 @@ sql_stmt_status(sql_stmt * pStmt, int op, int resetFlag)
 	u32 v;
 #ifdef SQL_ENABLE_API_ARMOR
 	if (!pStmt) {
-		(void)SQL_MISUSE_BKPT;
 		return 0;
 	}
 #endif

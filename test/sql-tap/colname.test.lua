@@ -576,7 +576,7 @@ for i, val in ipairs(data) do
 end
 
 local data2 = {
-    {[['a']],{1, "/syntax error/"}}, -- because ' is delimiter for strings
+    {[['a']],{1, "/Syntax error/"}}, -- because ' is delimiter for strings
     {[[`a`]],{1, "/unrecognized token/"}}, -- because ` is undefined symbol
     {"[a]",{1, "/unrecognized token/"}} -- because [ is undefined symbol
 }
@@ -637,7 +637,7 @@ test:do_test(
 test:do_catchsql_test(
     "colname-11.1",
     [[ create table t1(a INT, b INT, c INT, primary key('A'))]],
-    {1, "expressions prohibited in PRIMARY KEY"})
+    {1, "Expressions are prohibited in an index definition"})
 
 test:do_catchsql_test(
     "colname-11.2",

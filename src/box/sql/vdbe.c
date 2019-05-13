@@ -41,7 +41,7 @@
  */
 #include "box/box.h"
 #include "box/error.h"
-#include "box/fkey.h"
+#include "box/fk_constraint.h"
 #include "box/txn.h"
 #include "box/session.h"
 #include "sqlInt.h"
@@ -364,8 +364,6 @@ mem_apply_type(struct Mem *record, enum field_type type)
 		record->flags &= ~(MEM_Real | MEM_Int);
 		return 0;
 	case FIELD_TYPE_SCALAR:
-		if (record->flags & (MEM_Str | MEM_Blob))
-			record->flags |= MEM_Blob;
 		return 0;
 	default:
 		return -1;
@@ -619,6 +617,28 @@ vdbe_add_new_autoinc_id(struct Vdbe *vdbe, int64_t id)
 	return 0;
 }
 
+char *
+mem_type_to_str(const struct Mem *p)
+{
+	assert(p != NULL);
+	switch (p->flags & MEM_PURE_TYPE_MASK) {
+	case MEM_Null:
+		return "NULL";
+	case MEM_Str:
+		return "TEXT";
+	case MEM_Int:
+		return "INTEGER";
+	case MEM_Real:
+		return "REAL";
+	case MEM_Blob:
+		return "BLOB";
+	case MEM_Bool:
+		return "BOOLEAN";
+	default:
+		unreachable();
+	}
+}
+
 /*
  * Execute as much of a VDBE program as we can.
  * This is the core of sql_step().
@@ -664,7 +684,6 @@ int sqlVdbeExec(Vdbe *p)
 	p->iCurrentTime = 0;
 	assert(p->explain==0);
 	p->pResultSet = 0;
-	db->busyHandler.nBusy = 0;
 	if (db->u1.isInterrupted) goto abort_due_to_interrupt;
 	sqlVdbeIOTraceSql(p);
 #ifndef SQL_OMIT_PROGRESS_CALLBACK
@@ -1178,14 +1197,6 @@ case OP_String: {          /* out2 */
 	pOut->z = pOp->p4.z;
 	pOut->n = pOp->p1;
 	UPDATE_MAX_BLOBSIZE(pOut);
-#ifndef SQL_LIKE_DOESNT_MATCH_BLOBS
-	if (pOp->p3>0) {
-		assert(pOp->p3<=(p->nMem+1 - p->nCursor));
-		pIn3 = &aMem[pOp->p3];
-		assert(pIn3->flags & MEM_Int);
-		if (pIn3->u.i==pOp->p5) pOut->flags = MEM_Blob|MEM_Static|MEM_Term;
-	}
-#endif
 	break;
 }
 
@@ -1516,6 +1527,9 @@ case OP_ResultRow: {
  * It is illegal for P1 and P3 to be the same register. Sometimes,
  * if P3 is the same register as P2, the implementation is able
  * to avoid a memcpy().
+ *
+ * Concatenation operator accepts only arguments of string-like
+ * types (i.e. TEXT and BLOB).
  */
 case OP_Concat: {           /* same as TK_CONCAT, in1, in2, out3 */
 	i64 nByte;
@@ -1528,9 +1542,30 @@ case OP_Concat: {           /* same as TK_CONCAT, in1, in2, out3 */
 		sqlVdbeMemSetNull(pOut);
 		break;
 	}
+	/*
+	 * Concatenation operation can be applied only to
+	 * strings and blobs.
+	 */
+	uint32_t str_type_p1 = pIn1->flags & (MEM_Blob | MEM_Str);
+	uint32_t str_type_p2 = pIn2->flags & (MEM_Blob | MEM_Str);
+	if (str_type_p1 == 0 || str_type_p2 == 0) {
+		char *inconsistent_type = str_type_p1 == 0 ?
+					  mem_type_to_str(pIn1) :
+					  mem_type_to_str(pIn2);
+		diag_set(ClientError, ER_INCONSISTENT_TYPES, "TEXT or BLOB",
+			 inconsistent_type);
+		rc = SQL_TARANTOOL_ERROR;
+		goto abort_due_to_error;
+	}
+
+	/* Moreover, both operands must be of the same type. */
+	if (str_type_p1 != str_type_p2) {
+		diag_set(ClientError, ER_INCONSISTENT_TYPES,
+			 mem_type_to_str(pIn2), mem_type_to_str(pIn1));
+		rc = SQL_TARANTOOL_ERROR;
+		goto abort_due_to_error;
+	}
 	if (ExpandBlob(pIn1) || ExpandBlob(pIn2)) goto no_mem;
-	Stringify(pIn1);
-	Stringify(pIn2);
 	nByte = pIn1->n + pIn2->n;
 	if (nByte>db->aLimit[SQL_LIMIT_LENGTH]) {
 		goto too_big;
@@ -1538,7 +1573,10 @@ case OP_Concat: {           /* same as TK_CONCAT, in1, in2, out3 */
 	if (sqlVdbeMemGrow(pOut, (int)nByte+2, pOut==pIn2)) {
 		goto no_mem;
 	}
-	MemSetTypeFlag(pOut, MEM_Str);
+	if (pIn1->flags & MEM_Str)
+		MemSetTypeFlag(pOut, MEM_Str);
+	else
+		MemSetTypeFlag(pOut, MEM_Blob);
 	if (pOut!=pIn2) {
 		memcpy(pOut->z, pIn2->z, pIn2->n);
 	}
@@ -1615,13 +1653,13 @@ case OP_Remainder: {           /* same as TK_REM, in1, in2, out3 */
 		iB = pIn2->u.i;
 		bIntint = 1;
 		switch( pOp->opcode) {
-		case OP_Add:       if (sqlAddInt64(&iB,iA)) goto fp_math;  break;
-		case OP_Subtract:  if (sqlSubInt64(&iB,iA)) goto fp_math;  break;
-		case OP_Multiply:  if (sqlMulInt64(&iB,iA)) goto fp_math;  break;
+		case OP_Add:       if (sqlAddInt64(&iB,iA)) goto integer_overflow; break;
+		case OP_Subtract:  if (sqlSubInt64(&iB,iA)) goto integer_overflow; break;
+		case OP_Multiply:  if (sqlMulInt64(&iB,iA)) goto integer_overflow; break;
 		case OP_Divide: {
 			if (iA == 0)
 				goto division_by_zero;
-			if (iA==-1 && iB==SMALLEST_INT64) goto fp_math;
+			if (iA==-1 && iB==SMALLEST_INT64) goto integer_overflow;
 			iB /= iA;
 			break;
 		}
@@ -1637,7 +1675,6 @@ case OP_Remainder: {           /* same as TK_REM, in1, in2, out3 */
 		MemSetTypeFlag(pOut, MEM_Int);
 	} else {
 		bIntint = 0;
-	fp_math:
 		if (sqlVdbeRealValue(pIn1, &rA) != 0) {
 			diag_set(ClientError, ER_SQL_TYPE_MISMATCH,
 				 sql_value_text(pIn1), "numeric");
@@ -1693,6 +1730,10 @@ arithmetic_result_is_null:
 
 division_by_zero:
 	diag_set(ClientError, ER_SQL_EXECUTE, "division by zero");
+	rc = SQL_TARANTOOL_ERROR;
+	goto abort_due_to_error;
+integer_overflow:
+	diag_set(ClientError, ER_SQL_EXECUTE, "integer is overflowed");
 	rc = SQL_TARANTOOL_ERROR;
 	goto abort_due_to_error;
 }
@@ -2735,8 +2776,12 @@ case OP_Column: {
 	if (VdbeMemDynamic(pDest)) {
 		sqlVdbeMemSetNull(pDest);
 	}
-
-	sqlVdbeMsgpackGet(zData+aOffset[p2], pDest);
+	uint32_t unused;
+	if (vdbe_decode_msgpack_into_mem((const char *)(zData + aOffset[p2]),
+					 pDest, &unused) != 0) {
+		rc = SQL_TARANTOOL_ERROR;
+		goto abort_due_to_error;
+	}
 	/* MsgPack map, array or extension (unsupported in sql).
 	 * Wrap it in a blob verbatim.
 	 */
@@ -5461,7 +5506,7 @@ default: {          /* This is really OP_Noop and OP_Explain */
 	 * an error of some kind.
 	 */
 abort_due_to_error:
-	if (db->mallocFailed) rc = SQL_NOMEM_BKPT;
+	if (db->mallocFailed) rc = SQL_NOMEM;
 	assert(rc);
 	if (p->zErrMsg==0 && rc!=SQL_IOERR_NOMEM) {
 		const char *msg;
@@ -5506,7 +5551,7 @@ too_big:
 no_mem:
 	sqlOomFault(db);
 	sqlVdbeError(p, "out of memory");
-	rc = SQL_NOMEM_BKPT;
+	rc = SQL_NOMEM;
 	goto abort_due_to_error;
 
 	/* Jump to here if the sql_interrupt() API sets the interrupt
@@ -5514,7 +5559,7 @@ no_mem:
 	 */
 abort_due_to_interrupt:
 	assert(db->u1.isInterrupted);
-	rc = db->mallocFailed ? SQL_NOMEM_BKPT : SQL_INTERRUPT;
+	rc = db->mallocFailed ? SQL_NOMEM : SQL_INTERRUPT;
 	p->rc = rc;
 	sqlVdbeError(p, "%s", sqlErrStr(rc));
 	goto abort_due_to_error;

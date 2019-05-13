@@ -26,7 +26,7 @@ test:do_catchsql_test("insert-1.1", [[
   INSERT INTO test1 VALUES(1,2,3)
 ]], {
   -- <insert-1.1>
-  1, "no such table: TEST1"
+  1, "Space 'TEST1' does not exist"
   -- </insert-1.1>
 })
 
@@ -77,7 +77,7 @@ test:do_catchsql_test("insert-1.4", [[
   INSERT INTO test1(one,four) VALUES(1,2)
 ]], {
   -- <insert-1.4>
-  1, "table TEST1 has no column named FOUR"
+  1, "Field 'FOUR' was not found in the space 'TEST1' format"
   -- </insert-1.4>
 })
 
@@ -240,7 +240,7 @@ end, {
     SELECT * FROM t3 ORDER BY a;
   ]], {
     -- <insert-4.3>
-    1, "no such column: T3.A"
+    1, "Field 'A' was not found in the space 'T3' format"
     -- </insert-4.3>
   })
 
@@ -268,7 +268,7 @@ test:do_catchsql_test("insert-4.6", [[
   INSERT INTO t3 VALUES(notafunc(2,3),2,3);
 ]], {
   -- <insert-4.6>
-  1, "no such function: NOTAFUNC"
+  1, "Function 'NOTAFUNC' does not exist"
   -- </insert-4.6>
 })
 

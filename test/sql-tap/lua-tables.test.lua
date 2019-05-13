@@ -1,6 +1,6 @@
 #!/usr/bin/env tarantool
 test = require("sqltester")
-test:plan(12)
+test:plan(14)
 
 test:do_test(
     "lua-tables-prepare-1",
@@ -40,7 +40,7 @@ test:do_execsql_test(
 test:do_catchsql_test(
     "lua-tables-4",
     [[SELECT * from t1]],
-    {1, "no such table: T1"}
+    {1, "Space 'T1' does not exist"}
 )
 
 test:do_catchsql_test(
@@ -159,5 +159,20 @@ test:do_eqp_test(
     ]], {
         {0, 0, 0, 'SEARCH TABLE TEST USING COVERING INDEX secondary (A=?)'}
     })
+
+-- Make sure that without format it is impossible to create
+-- an index: format is required to resolve column names.
+test:do_test(
+    "no-format-create-index-prep",
+    function()
+        s = box.schema.create_space('T')
+    end, {})
+
+test:do_catchsql_test(
+    "no-format-create-index",
+    [[
+        CREATE INDEX i1 ON t(id);
+    ]],
+        {1, "SQL does not support space without format"})
 
 test:finish_test()

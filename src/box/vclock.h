@@ -165,7 +165,7 @@ vclock_get(const struct vclock *vclock, uint32_t replica_id)
 	 */
 	replica_id &= VCLOCK_MAX - 1;
 	/* Evaluate a bitmask to avoid branching. */
-	int64_t mask = 0 - ((vclock->map >> replica_id) & 0x1);
+	int64_t mask = 0ULL - ((vclock->map >> replica_id) & 0x1);
 	return mask & vclock->lsn[replica_id];
 }
 
@@ -245,10 +245,9 @@ vclock_merge(struct vclock *dst, struct vclock *diff)
  * \brief Format vclock to YAML-compatible string representation:
  * { replica_id: lsn, replica_id:lsn })
  * \param vclock vclock
- * \return fomatted string. This pointer should be passed to free(3) to
- * release the allocated storage when it is no longer needed.
+ * \return fomatted string, stored in a static buffer.
  */
-char *
+const char *
 vclock_to_string(const struct vclock *vclock);
 
 /**

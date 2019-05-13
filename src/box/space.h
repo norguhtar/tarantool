@@ -133,6 +133,14 @@ struct space_vtab {
 	 */
 	int (*prepare_alter)(struct space *old_space,
 			     struct space *new_space);
+	/**
+	 * Called right after removing a space from the cache.
+	 * The engine should abort all transactions involving
+	 * the space, because the space will be destroyed soon.
+	 *
+	 * This function isn't allowed to yield or fail.
+	 */
+	void (*invalidate)(struct space *space);
 };
 
 struct space {
@@ -192,14 +200,14 @@ struct space {
 	 * other words the table that is named in the REFERENCES
 	 * clause.
 	 */
-	struct rlist parent_fkey;
-	struct rlist child_fkey;
+	struct rlist parent_fk_constraint;
+	struct rlist child_fk_constraint;
 	/**
 	 * Mask indicates which fields are involved in foreign
 	 * key constraint checking routine. Includes fields
 	 * of parent constraints as well as child ones.
 	 */
-	uint64_t fkey_mask;
+	uint64_t fk_constraint_mask;
 };
 
 /** Initialize a base space instance. */
@@ -263,7 +271,7 @@ index_find(struct space *space, uint32_t index_id)
 {
 	struct index *index = space_index(space, index_id);
 	if (index == NULL) {
-		diag_set(ClientError, ER_NO_SUCH_INDEX, index_id,
+		diag_set(ClientError, ER_NO_SUCH_INDEX_ID, index_id,
 			 space_name(space));
 		diag_log();
 	}
@@ -407,6 +415,12 @@ space_prepare_alter(struct space *old_space, struct space *new_space)
 	return new_space->vtab->prepare_alter(old_space, new_space);
 }
 
+static inline void
+space_invalidate(struct space *space)
+{
+	return space->vtab->invalidate(space);
+}
+
 static inline bool
 space_is_memtx(struct space *space) { return space->engine->id == 0; }
 
@@ -469,6 +483,7 @@ int generic_space_check_format(struct space *, struct tuple_format *);
 int generic_space_build_index(struct space *, struct index *,
 			      struct tuple_format *);
 int generic_space_prepare_alter(struct space *, struct space *);
+void generic_space_invalidate(struct space *);
 
 #if defined(__cplusplus)
 } /* extern "C" */

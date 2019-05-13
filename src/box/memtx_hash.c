@@ -31,14 +31,52 @@
 #include "memtx_hash.h"
 #include "say.h"
 #include "fiber.h"
+#include "index.h"
 #include "tuple.h"
-#include "tuple_hash.h"
 #include "memtx_engine.h"
 #include "space.h"
 #include "schema.h" /* space_cache_find() */
 #include "errinj.h"
 
 #include <small/mempool.h>
+
+static inline bool
+memtx_hash_equal(struct tuple *tuple_a, struct tuple *tuple_b,
+		 struct key_def *key_def)
+{
+	return tuple_compare(tuple_a, tuple_b, key_def) == 0;
+}
+
+static inline bool
+memtx_hash_equal_key(struct tuple *tuple, const char *key,
+		     struct key_def *key_def)
+{
+	return tuple_compare_with_key(tuple, key, key_def->part_count,
+				      key_def) == 0;
+}
+
+#define LIGHT_NAME _index
+#define LIGHT_DATA_TYPE struct tuple *
+#define LIGHT_KEY_TYPE const char *
+#define LIGHT_CMP_ARG_TYPE struct key_def *
+#define LIGHT_EQUAL(a, b, c) memtx_hash_equal(a, b, c)
+#define LIGHT_EQUAL_KEY(a, b, c) memtx_hash_equal_key(a, b, c)
+
+#include "salad/light.h"
+
+#undef LIGHT_NAME
+#undef LIGHT_DATA_TYPE
+#undef LIGHT_KEY_TYPE
+#undef LIGHT_CMP_ARG_TYPE
+#undef LIGHT_EQUAL
+#undef LIGHT_EQUAL_KEY
+
+struct memtx_hash_index {
+	struct index base;
+	struct light_index_core hash_table;
+	struct memtx_gc_task gc_task;
+	struct light_index_iterator gc_iterator;
+};
 
 /* {{{ MemtxHash Iterators ****************************************/
 
@@ -49,6 +87,10 @@ struct hash_iterator {
 	/** Memory pool the iterator was allocated from. */
 	struct mempool *pool;
 };
+
+static_assert(sizeof(struct hash_iterator) <= MEMTX_ITERATOR_SIZE,
+	      "sizeof(struct hash_iterator) must be less than or equal "
+	      "to MEMTX_ITERATOR_SIZE");
 
 static void
 hash_iterator_free(struct iterator *iterator)
@@ -312,14 +354,14 @@ memtx_hash_index_create_iterator(struct index *base, enum iterator_type type,
 
 	assert(part_count == 0 || key != NULL);
 
-	struct hash_iterator *it = mempool_alloc(&memtx->hash_iterator_pool);
+	struct hash_iterator *it = mempool_alloc(&memtx->iterator_pool);
 	if (it == NULL) {
 		diag_set(OutOfMemory, sizeof(struct hash_iterator),
 			 "memtx_hash_index", "iterator");
 		return NULL;
 	}
 	iterator_create(&it->base, base);
-	it->pool = &memtx->hash_iterator_pool;
+	it->pool = &memtx->iterator_pool;
 	it->base.free = hash_iterator_free;
 	it->hash_table = &index->hash_table;
 	light_index_iterator_begin(it->hash_table, &it->iterator);
@@ -348,7 +390,7 @@ memtx_hash_index_create_iterator(struct index *base, enum iterator_type type,
 	default:
 		diag_set(UnsupportedIndexFeature, base->def,
 			 "requested iterator type");
-		mempool_free(&memtx->hash_iterator_pool, it);
+		mempool_free(&memtx->iterator_pool, it);
 		return NULL;
 	}
 	return (struct iterator *)it;
@@ -448,14 +490,9 @@ static const struct index_vtab memtx_hash_index_vtab = {
 	/* .end_build = */ generic_index_end_build,
 };
 
-struct memtx_hash_index *
+struct index *
 memtx_hash_index_new(struct memtx_engine *memtx, struct index_def *def)
 {
-	if (!mempool_is_initialized(&memtx->hash_iterator_pool)) {
-		mempool_create(&memtx->hash_iterator_pool, cord_slab_cache(),
-			       sizeof(struct hash_iterator));
-	}
-
 	struct memtx_hash_index *index =
 		(struct memtx_hash_index *)calloc(1, sizeof(*index));
 	if (index == NULL) {
@@ -472,7 +509,7 @@ memtx_hash_index_new(struct memtx_engine *memtx, struct index_def *def)
 	light_index_create(&index->hash_table, MEMTX_EXTENT_SIZE,
 			   memtx_index_extent_alloc, memtx_index_extent_free,
 			   memtx, index->base.def->key_def);
-	return index;
+	return &index->base;
 }
 
 /* }}} */

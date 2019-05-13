@@ -785,44 +785,6 @@ codeAllEqualityTerms(Parse * pParse,	/* Parsing context */
 	return regBase;
 }
 
-#ifndef SQL_LIKE_DOESNT_MATCH_BLOBS
-/*
- * If the most recently coded instruction is a constant range constraint
- * (a string literal) that originated from the LIKE optimization, then
- * set P3 and P5 on the OP_String opcode so that the string will be cast
- * to a BLOB at appropriate times.
- *
- * The LIKE optimization trys to evaluate "x LIKE 'abc%'" as a range
- * expression: "x>='ABC' AND x<'abd'".  But this requires that the range
- * scan loop run twice, once for strings and a second time for BLOBs.
- * The OP_String opcodes on the second pass convert the upper and lower
- * bound string constants to blobs.  This routine makes the necessary changes
- * to the OP_String opcodes for that to happen.
- *
- * Except, of course, if SQL_LIKE_DOESNT_MATCH_BLOBS is defined, then
- * only the one pass through the string space is required, so this routine
- * becomes a no-op.
- */
-static void
-whereLikeOptimizationStringFixup(Vdbe * v,		/* prepared statement under construction */
-				 WhereLevel * pLevel,	/* The loop that contains the LIKE operator */
-				 WhereTerm * pTerm)	/* The upper or lower bound just coded */
-{
-	if (pTerm->wtFlags & TERM_LIKEOPT) {
-		VdbeOp *pOp;
-		assert(pLevel->iLikeRepCntr > 0);
-		pOp = sqlVdbeGetOp(v, -1);
-		assert(pOp != 0);
-		assert(pOp->opcode == OP_String8
-		       || pTerm->pWC->pWInfo->pParse->db->mallocFailed);
-		pOp->p3 = (int)(pLevel->iLikeRepCntr >> 1);	/* Register holding counter */
-		pOp->p5 = (u8) (pLevel->iLikeRepCntr & 1);	/* ASC or DESC */
-	}
-}
-#else
-#define whereLikeOptimizationStringFixup(A,B,C)
-#endif
-
 /*
  * If the expression passed as the second argument is a vector, generate
  * code to write the first nReg elements of the vector into an array
@@ -927,7 +889,7 @@ sqlWhereCodeOneLoopStart(WhereInfo * pWInfo,	/* Complete information about the W
 				  pTabItem->addrFillSub);
 		pLevel->p2 = sqlVdbeAddOp2(v, OP_Yield, regYield, addrBrk);
 		VdbeCoverage(v);
-		VdbeComment((v, "next row of \"%s\"", pTabItem->pTab->def->name));
+		VdbeComment((v, "next row of \"%s\"", pTabItem->space->def->name));
 		pLevel->op = OP_Goto;
 	} else if (pLoop->wsFlags & WHERE_INDEXED) {
 		/* Case 4: A scan using an index.
@@ -1056,29 +1018,6 @@ sqlWhereCodeOneLoopStart(WhereInfo * pWInfo,	/* Complete information about the W
 		if (pLoop->wsFlags & WHERE_TOP_LIMIT) {
 			pRangeEnd = pLoop->aLTerm[j++];
 			nExtraReg = MAX(nExtraReg, pLoop->nTop);
-#ifndef SQL_LIKE_DOESNT_MATCH_BLOBS
-			if ((pRangeEnd->wtFlags & TERM_LIKEOPT) != 0) {
-				assert(pRangeStart != 0);	/* LIKE opt constraints */
-				assert(pRangeStart->wtFlags & TERM_LIKEOPT);	/* occur in pairs */
-				pLevel->iLikeRepCntr = (u32)++ pParse->nMem;
-				sqlVdbeAddOp2(v, OP_Integer, 1,
-						  (int)pLevel->iLikeRepCntr);
-				VdbeComment((v, "LIKE loop counter"));
-				pLevel->addrLikeRep = sqlVdbeCurrentAddr(v);
-				/* iLikeRepCntr actually stores 2x the counter register number.  The
-				 * bottom bit indicates whether the search order is ASC or DESC.
-				 */
-				testcase(bRev);
-				testcase(pIdx->aSortOrder[nEq] ==
-					 SORT_ORDER_DESC);
-				assert((bRev & ~1) == 0);
-				struct key_def *def = idx_def->key_def;
-				pLevel->iLikeRepCntr <<= 1;
-				pLevel->iLikeRepCntr |=
-					bRev ^ (def->parts[nEq].sort_order ==
-						SORT_ORDER_DESC);
-			}
-#endif
 			if (pRangeStart == 0) {
 				j = idx_def->key_def->parts[nEq].fieldno;
 				if (is_format_set &&
@@ -1133,8 +1072,6 @@ sqlWhereCodeOneLoopStart(WhereInfo * pWInfo,	/* Complete information about the W
 			Expr *pRight = pRangeStart->pExpr->pRight;
 			codeExprOrVector(pParse, pRight, regBase + nEq, nBtm);
 
-			whereLikeOptimizationStringFixup(v, pLevel,
-							 pRangeStart);
 			if ((pRangeStart->wtFlags & TERM_VNULL) == 0
 			    && sqlExprCanBeNull(pRight)) {
 				sqlVdbeAddOp2(v, OP_IsNull, regBase + nEq,
@@ -1232,7 +1169,6 @@ sqlWhereCodeOneLoopStart(WhereInfo * pWInfo,	/* Complete information about the W
 			Expr *pRight = pRangeEnd->pExpr->pRight;
 			sqlExprCacheRemove(pParse, regBase + nEq, 1);
 			codeExprOrVector(pParse, pRight, regBase + nEq, nTop);
-			whereLikeOptimizationStringFixup(v, pLevel, pRangeEnd);
 			if ((pRangeEnd->wtFlags & TERM_VNULL) == 0
 			    && sqlExprCanBeNull(pRight)) {
 				sqlVdbeAddOp2(v, OP_IsNull, regBase + nEq,
@@ -1344,9 +1280,9 @@ sqlWhereCodeOneLoopStart(WhereInfo * pWInfo,	/* Complete information about the W
 		int ii;		/* Loop counter */
 		u16 wctrlFlags;	/* Flags for sub-WHERE clause */
 		Expr *pAndExpr = 0;	/* An ".. AND (...)" expression */
-		Table *pTab = pTabItem->pTab;
+		struct space *space = pTabItem->space;
 		struct key_def *pk_key_def =
-			space_index(pTab->space, 0)->def->key_def;
+			space_index(space, 0)->def->key_def;
 		uint32_t pk_part_count = pk_key_def->part_count;
 
 		pTerm = pLoop->aLTerm[0];
@@ -1417,7 +1353,6 @@ sqlWhereCodeOneLoopStart(WhereInfo * pWInfo,	/* Complete information about the W
 		 *
 		 * This optimization also only applies if the (x1 OR x2 OR ...) term
 		 * is not contained in the ON clause of a LEFT JOIN.
-		 * See ticket http://www.sql.org/src/info/f2369304e4
 		 */
 		if (pWC->nTerm > 1) {
 			int iTerm;
@@ -1437,7 +1372,10 @@ sqlWhereCodeOneLoopStart(WhereInfo * pWInfo,	/* Complete information about the W
 					continue;
 				testcase(pWC->a[iTerm].wtFlags & TERM_ORINFO);
 				pExpr = sqlExprDup(db, pExpr, 0);
-				pAndExpr = sqlExprAnd(db, pAndExpr, pExpr);
+				pAndExpr = sql_and_expr_new(db, pAndExpr,
+							    pExpr);
+				if (pAndExpr == NULL)
+					pParse->is_aborted = true;
 			}
 			if (pAndExpr) {
 				pAndExpr =
@@ -1473,7 +1411,7 @@ sqlWhereCodeOneLoopStart(WhereInfo * pWInfo,	/* Complete information about the W
 				    sqlWhereBegin(pParse, pOrTab, pOrExpr,
 						      0, 0, wctrlFlags,
 						      iCovCur);
-				assert(pSubWInfo || pParse->nErr
+				assert(pSubWInfo || pParse->is_aborted
 				       || db->mallocFailed);
 				if (pSubWInfo) {
 					WhereLoop *pSubLoop;
@@ -1511,7 +1449,7 @@ sqlWhereCodeOneLoopStart(WhereInfo * pWInfo,	/* Complete information about the W
 								fieldno;
 							sqlExprCodeGetColumnToReg
 								(pParse,
-								 pTab->def,
+								 space->def,
 								 fieldno,
 								 iCur,
 								 r + iPk);
@@ -1673,16 +1611,7 @@ sqlWhereCodeOneLoopStart(WhereInfo * pWInfo,	/* Complete information about the W
 			 * for strings.  So do not skip the call to the function on the pass
 			 * that compares BLOBs.
 			 */
-#ifdef SQL_LIKE_DOESNT_MATCH_BLOBS
 			continue;
-#else
-			u32 x = pLevel->iLikeRepCntr;
-			assert(x > 0);
-			skipLikeAddr =
-			    sqlVdbeAddOp1(v, (x & 1) ? OP_IfNot : OP_If,
-					      (int)(x >> 1));
-			VdbeCoverage(v);
-#endif
 		}
 		sqlExprIfFalse(pParse, pE, addrCont, SQL_JUMPIFNULL);
 		if (skipLikeAddr)

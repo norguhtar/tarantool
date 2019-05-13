@@ -129,6 +129,7 @@ static const struct space_vtab blackhole_space_vtab = {
 	/* .build_index = */ generic_space_build_index,
 	/* .swap_index = */ generic_space_swap_index,
 	/* .prepare_alter = */ generic_space_prepare_alter,
+	/* .invalidate = */ generic_space_invalidate,
 };
 
 static void
@@ -184,6 +185,7 @@ static const struct engine_vtab blackhole_engine_vtab = {
 	/* .commit = */ generic_engine_commit,
 	/* .rollback_statement = */ generic_engine_rollback_statement,
 	/* .rollback = */ generic_engine_rollback,
+	/* .switch_to_ro = */ generic_engine_switch_to_ro,
 	/* .bootstrap = */ generic_engine_bootstrap,
 	/* .begin_initial_recovery = */ generic_engine_begin_initial_recovery,
 	/* .begin_final_recovery = */ generic_engine_begin_final_recovery,

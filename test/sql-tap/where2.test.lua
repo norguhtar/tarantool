@@ -62,10 +62,10 @@ test:do_test(
 -- Do an SQL statement.  Append the search count to the end of the result.
 --
 local function count(sql)
-    local sql_sort_count = box.sql.debug().sql_sort_count
+    local sql_sort_count = box.stat.sql().sql_sort_count
     local r = test:execsql(sql)
-    print("lol "..(box.sql.debug().sql_sort_count - sql_sort_count))
-    table.insert(r, box.sql.debug().sql_sort_count - sql_sort_count)
+    print("lol "..(box.stat.sql().sql_sort_count - sql_sort_count))
+    table.insert(r, box.stat.sql().sql_sort_count - sql_sort_count)
     return r
 end
 
@@ -78,9 +78,9 @@ end
 --
 local function cksort(sql)
     local sort = "nosort"
-    local sql_sort_count = box.sql.debug().sql_sort_count
+    local sql_sort_count = box.stat.sql().sql_sort_count
     local data = test:execsql(sql)
-    if sql_sort_count < box.sql.debug().sql_sort_count then
+    if sql_sort_count < box.stat.sql().sql_sort_count then
             sort = 'sort'
     end
     table.insert(data, sort)
@@ -97,9 +97,9 @@ end
 --
 local function queryplan(sql)
     local sort = "nosort"
-    local sql_sort_count = box.sql.debug().sql_sort_count
+    local sql_sort_count = box.stat.sql().sql_sort_count
     local data = test:execsql(sql)
-    if sql_sort_count < box.sql.debug().sql_sort_count then
+    if sql_sort_count < box.stat.sql().sql_sort_count then
         sort = 'sort'
     end
     table.insert(data, sort)
@@ -631,7 +631,7 @@ test:do_test(
         "where2-6.7",
         function()
             test:execsql [[
-                CREATE TABLE t2249a(a TEXT PRIMARY KEY, x CHAR(100));
+                CREATE TABLE t2249a(a TEXT PRIMARY KEY, x VARCHAR(100));
                 CREATE TABLE t2249b(b INTEGER PRIMARY KEY);
                 INSERT INTO t2249a(a) VALUES('0123');
                 INSERT INTO t2249b VALUES(123);
@@ -1273,7 +1273,7 @@ test:do_execsql_test(
         "where2-12.1",
         function ()
             local data = test:execsql([[
-                CREATE TABLE t12(x INTEGER PRIMARY KEY, y INT, z CHAR(100));
+                CREATE TABLE t12(x INTEGER PRIMARY KEY, y INT, z VARCHAR(100));
                 CREATE INDEX t12y ON t12(y);
                 EXPLAIN QUERY PLAN
                   SELECT a.x, b.x

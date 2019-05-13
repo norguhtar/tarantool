@@ -1186,7 +1186,7 @@ fiber = nil
 ---
 ...
 --
--- gh-2622 fiber.name() truncates new name
+-- gh-2622, gh-4011: fiber.name() truncates new name.
 --
 fiber = require('fiber')
 ---
@@ -1214,14 +1214,14 @@ fiber.name(long_name, {truncate = true})
 ...
 fiber.name()
 ---
-- aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+- aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 ...
 f = fiber.self()
 ---
 ...
 fiber.name(f)
 ---
-- aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+- aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 ...
 fiber.name(f, 'new_name')
 ---
@@ -1239,7 +1239,7 @@ fiber.name(f, long_name, {truncate = true})
 ...
 fiber.name(f)
 ---
-- aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+- aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 ...
 --
 -- gh-3493 fiber.create() does not roll back memtx transaction
@@ -1453,6 +1453,14 @@ ch1:put(1)
 ...
 while f:status() ~= 'dead' do fiber.sleep(0.01) end
 ---
+...
+--
+-- Test if fiber join() does not crash
+-- if unjoinable
+--
+fiber.join(fiber.self())
+---
+- error: the fiber is not joinable
 ...
 -- cleanup
 test_run:cmd("clear filter")

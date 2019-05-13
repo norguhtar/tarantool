@@ -35,7 +35,7 @@
 #include "box/index.h"
 #include "box/box.h"
 #include "box/tuple.h"
-#include "box/fkey.h"
+#include "box/fk_constraint.h"
 #include "box/schema.h"
 #include "box/coll_id_cache.h"
 #include "sqlInt.h"
@@ -112,25 +112,18 @@ sqlGetBoolean(const char *z, u8 dflt)
  * the rest of the file if PRAGMAs are omitted from the build.
  */
 
-/*
- * Set result column names for a pragma.
- */
+/** Set result column names and types for a pragma. */
 static void
-setPragmaResultColumnNames(Vdbe * v,	/* The query under construction */
-			   const PragmaName * pPragma	/* The pragma */
-    )
+vdbe_set_pragma_result_columns(struct Vdbe *v, const struct PragmaName *pragma)
 {
-	u8 n = pPragma->nPragCName;
-	sqlVdbeSetNumCols(v, n == 0 ? 1 : n);
-	if (n == 0) {
-		sqlVdbeSetColName(v, 0, COLNAME_NAME, pPragma->zName,
-				      SQL_STATIC);
-	} else {
-		int i, j;
-		for (i = 0, j = pPragma->iPragCName; i < n; i++, j++) {
-			sqlVdbeSetColName(v, i, COLNAME_NAME, pragCName[j],
-					      SQL_STATIC);
-		}
+	int n = pragma->nPragCName;
+	assert(n > 0);
+	sqlVdbeSetNumCols(v, n);
+	for (int i = 0, j = pragma->iPragCName; i < n; ++i) {
+		sqlVdbeSetColName(v, i, COLNAME_NAME, pragCName[j++],
+				  SQL_STATIC);
+		sqlVdbeSetColName(v, i, COLNAME_DECLTYPE, pragCName[j++],
+				  SQL_STATIC);
 	}
 }
 
@@ -168,48 +161,26 @@ pragmaLocate(const char *zName)
 	return lwr > upr ? 0 : &aPragmaName[mid];
 }
 
-#ifdef PRINT_PRAGMA
-#undef PRINT_PRAGMA
-#endif
-#define PRINT_PRAGMA(pragma_name, pragma_flag) do {			       \
-	int nCoolSpaces = 30 - strlen(pragma_name);			       \
-	if (user_session->sql_flags & (pragma_flag)) {			       \
-		printf("%s %*c --  [true] \n", pragma_name, nCoolSpaces, ' '); \
-	} else {							       \
-		printf("%s %*c --  [false] \n", pragma_name, nCoolSpaces, ' ');\
-	}								       \
-} while (0)
-
-#define PRINT_STR_PRAGMA(pragma_name, str_value) do {			       \
-	int nCoolSpaces = 30 - strlen(pragma_name);			       \
-	printf("%s %*c --  '%s' \n", pragma_name, nCoolSpaces, ' ', str_value);\
-} while (0)
-
 static void
-printActivePragmas(struct session *user_session)
+vdbe_emit_pragma_status(struct Parse *parse)
 {
-	int i;
-	for (i = 0; i < ArraySize(aPragmaName); ++i) {
-		switch (aPragmaName[i].ePragTyp) {
-			case PragTyp_FLAG:
-				PRINT_PRAGMA(aPragmaName[i].zName, aPragmaName[i].iArg);
-				break;
-			case PragTyp_DEFAULT_ENGINE: {
-				const char *engine_name =
-					sql_storage_engine_strs[
-						current_session()->
-							sql_default_engine];
-				PRINT_STR_PRAGMA(aPragmaName[i].zName,
-						 engine_name);
-				break;
-			}
-		}
-	}
+	struct Vdbe *v = sqlGetVdbe(parse);
+	struct session *user_session = current_session();
 
-	printf("Other available pragmas: \n");
-	for (i = 0; i < ArraySize(aPragmaName); ++i) {
+	sqlVdbeSetNumCols(v, 2);
+	sqlVdbeSetColName(v, 0, COLNAME_NAME, "pragma_name", SQL_STATIC);
+	sqlVdbeSetColName(v, 0, COLNAME_DECLTYPE, "TEXT", SQL_STATIC);
+	sqlVdbeSetColName(v, 1, COLNAME_NAME, "pragma_value", SQL_STATIC);
+	sqlVdbeSetColName(v, 1, COLNAME_DECLTYPE, "INTEGER", SQL_STATIC);
+
+	parse->nMem = 2;
+	for (int i = 0; i < ArraySize(aPragmaName); ++i) {
 		if (aPragmaName[i].ePragTyp != PragTyp_FLAG)
-			printf("-- %s \n", aPragmaName[i].zName);
+			continue;
+		sqlVdbeAddOp4(v, OP_String8, 0, 1, 0, aPragmaName[i].zName, 0);
+		int val = (user_session->sql_flags & aPragmaName[i].iArg) != 0;
+		sqlVdbeAddOp2(v, OP_Integer, val, 2);
+		sqlVdbeAddOp2(v, OP_ResultRow, 1, 2);
 	}
 }
 
@@ -391,14 +362,30 @@ sql_pragma_index_list(struct Parse *parse, const char *tbl_name)
 	struct space *space = space_by_name(tbl_name);
 	if (space == NULL)
 		return;
-	parse->nMem = 5;
+	parse->nMem = 3;
 	struct Vdbe *v = sqlGetVdbe(parse);
 	for (uint32_t i = 0; i < space->index_count; ++i) {
 		struct index *idx = space->index[i];
-		sqlVdbeMultiLoad(v, 1, "isisi", i, idx->def->name,
+		sqlVdbeMultiLoad(v, 1, "isi", i, idx->def->name,
 				     idx->def->opts.is_unique);
-		sqlVdbeAddOp2(v, OP_ResultRow, 1, 5);
+		sqlVdbeAddOp2(v, OP_ResultRow, 1, 3);
 	}
+}
+
+/*
+ * @brief Check whether the specified token is a string or ID.
+ * @param token - token to be examined
+ * @return true - if the token value is enclosed into quotes (')
+ * @return false in other cases
+ * The empty value is considered to be a string.
+ */
+static bool
+token_is_string(const struct Token* token)
+{
+	if (!token || token->n == 0)
+		return true;
+	return token->n >= 2 && token->z[0] == '\'' &&
+	       token->z[token->n - 1] == '\'';
 }
 
 /*
@@ -436,67 +423,78 @@ sqlPragma(Parse * pParse, Token * pId,	/* First part of [schema.]id field */
 	sqlVdbeRunOnlyOnce(v);
 	pParse->nMem = 2;
 
-	zLeft = sqlNameFromToken(db, pId);
-	if (!zLeft) {
-		printActivePragmas(user_session);
+	if (pId == NULL) {
+		vdbe_emit_pragma_status(pParse);
 		return;
 	}
-
+	zLeft = sql_name_from_token(db, pId);
+	if (zLeft == NULL) {
+		pParse->is_aborted = true;
+		goto pragma_out;
+	}
 	if (minusFlag) {
 		zRight = sqlMPrintf(db, "-%T", pValue);
-	} else {
-		zRight = sqlNameFromToken(db, pValue);
+	} else if (pValue != NULL) {
+		zRight = sql_name_from_token(db, pValue);
+		if (zRight == NULL) {
+			pParse->is_aborted = true;
+			goto pragma_out;
+		}
 	}
-	zTable = sqlNameFromToken(db, pValue2);
-	db->busyHandler.nBusy = 0;
-
+	if (pValue2 != NULL) {
+		zTable = sql_name_from_token(db, pValue2);
+		if (zTable == NULL) {
+			pParse->is_aborted = true;
+			goto pragma_out;
+		}
+	}
 	/* Locate the pragma in the lookup table */
 	pPragma = pragmaLocate(zLeft);
 	if (pPragma == 0) {
-		sqlErrorMsg(pParse, "no such pragma: %s", zLeft);
+		diag_set(ClientError, ER_SQL_NO_SUCH_PRAGMA, zLeft);
+		pParse->is_aborted = true;
 		goto pragma_out;
 	}
 	/* Register the result column names for pragmas that return results */
-	if ((pPragma->mPragFlg & PragFlg_NoColumns) == 0
-	    && ((pPragma->mPragFlg & PragFlg_NoColumns1) == 0 || zRight == 0)
-	    ) {
-		setPragmaResultColumnNames(v, pPragma);
-	}
+	if ((pPragma->mPragFlg & PragFlg_NoColumns) == 0 &&
+	    ((pPragma->mPragFlg & PragFlg_NoColumns1) == 0 || zRight == NULL))
+		vdbe_set_pragma_result_columns(v, pPragma);
 	/* Jump to the appropriate pragma handler */
 	switch (pPragma->ePragTyp) {
 
-#ifndef SQL_OMIT_FLAG_PRAGMAS
 	case PragTyp_FLAG:{
-			if (zRight == 0) {
-				setPragmaResultColumnNames(v, pPragma);
-				returnSingleInt(v,
-						(user_session->
-						 sql_flags & pPragma->iArg) !=
-						0);
-			} else {
-				int mask = pPragma->iArg;	/* Mask of bits to set
-								 * or clear.
-								 */
+		if (zRight == NULL) {
+			vdbe_set_pragma_result_columns(v, pPragma);
+			returnSingleInt(v, (user_session->sql_flags &
+					    pPragma->iArg) != 0);
+		} else {
+			/* Mask of bits to set or clear. */
+			int mask = pPragma->iArg;
+			bool is_pragma_set = sqlGetBoolean(zRight, 0);
 
-				if (sqlGetBoolean(zRight, 0)) {
-					user_session->sql_flags |= mask;
-				} else {
-					user_session->sql_flags &= ~mask;
-				}
-
-				/* Many of the flag-pragmas modify the code
-				 * generated by the SQL * compiler (eg.
-				 * count_changes). So add an opcode to expire
-				 * all * compiled SQL statements after
-				 * modifying a pragma value.
-				 */
-				sqlVdbeAddOp0(v, OP_Expire);
+			if (is_pragma_set)
+				user_session->sql_flags |= mask;
+			else
+				user_session->sql_flags &= ~mask;
+#if defined(SQL_DEBUG)
+			if (mask == PARSER_TRACE_FLAG) {
+				if (is_pragma_set)
+					sqlParserTrace(stdout, "parser: ");
+				else
+					sqlParserTrace(0, 0);
 			}
-			break;
+#endif
+			/*
+			 * Reinstall the LIKE and functions. The
+			 * variant of LIKE * used will be case
+			 * sensitive or not depending on the RHS.
+			 */
+			if (mask == LIKE_CASE_SENS_FLAG)
+				sqlRegisterLikeFunctions(db, !is_pragma_set);
 		}
-#endif				/* SQL_OMIT_FLAG_PRAGMAS */
+		break;
+	}
 
-#ifndef SQL_OMIT_SCHEMA_PRAGMAS
 	case PragTyp_TABLE_INFO:
 		sql_pragma_table_info(pParse, zRight);
 		break;
@@ -520,8 +518,7 @@ sqlPragma(Parse * pParse, Token * pId,	/* First part of [schema.]id field */
 		box_iterator_t* iter;
 		iter = box_index_iterator(space->def->id, 0,ITER_ALL, key_buf, key_end);
 		if (iter == NULL) {
-			pParse->rc = SQL_TARANTOOL_ERROR;
-			pParse->nErr++;
+			pParse->is_aborted = true;
 			goto pragma_out;
 		}
 		int rc = box_iterator_next(iter, &tuple);
@@ -538,7 +535,6 @@ sqlPragma(Parse * pParse, Token * pId,	/* First part of [schema.]id field */
 		box_iterator_free(iter);
 		break;
 	}
-#endif				/* SQL_OMIT_SCHEMA_PRAGMAS */
 
 	case PragTyp_FOREIGN_KEY_LIST:{
 		if (zRight == NULL)
@@ -548,24 +544,26 @@ sqlPragma(Parse * pParse, Token * pId,	/* First part of [schema.]id field */
 			break;
 		int i = 0;
 		pParse->nMem = 8;
-		struct fkey *fkey;
-		rlist_foreach_entry(fkey, &space->child_fkey, child_link) {
-			struct fkey_def *fdef = fkey->def;
-			for (uint32_t j = 0; j < fdef->field_count; j++) {
+		struct fk_constraint *fk_c;
+		rlist_foreach_entry(fk_c, &space->child_fk_constraint,
+				    in_child_space) {
+
+			struct fk_constraint_def *fk_def = fk_c->def;
+			for (uint32_t j = 0; j < fk_def->field_count; j++) {
 				struct space *parent =
-					space_by_id(fdef->parent_id);
+					space_by_id(fk_def->parent_id);
 				assert(parent != NULL);
-				uint32_t ch_fl = fdef->links[j].child_field;
+				uint32_t ch_fl = fk_def->links[j].child_field;
 				const char *child_col =
 					space->def->fields[ch_fl].name;
-				uint32_t pr_fl = fdef->links[j].parent_field;
+				uint32_t pr_fl = fk_def->links[j].parent_field;
 				const char *parent_col =
 					parent->def->fields[pr_fl].name;
 				sqlVdbeMultiLoad(v, 1, "iissssss", i, j,
 						     parent->def->name,
 						     child_col, parent_col,
-						     fkey_action_strs[fdef->on_delete],
-						     fkey_action_strs[fdef->on_update],
+						     fk_constraint_action_strs[fk_def->on_delete],
+						     fk_constraint_action_strs[fk_def->on_update],
 						     "NONE");
 				sqlVdbeAddOp2(v, OP_ResultRow, 1, 8);
 			}
@@ -573,40 +571,27 @@ sqlPragma(Parse * pParse, Token * pId,	/* First part of [schema.]id field */
 		}
 		break;
 	}
-#ifndef NDEBUG
-	case PragTyp_PARSER_TRACE:{
-			if (zRight) {
-				if (sqlGetBoolean(zRight, 0)) {
-					sqlParserTrace(stdout, "parser: ");
-				} else {
-					sqlParserTrace(0, 0);
-				}
-			}
-			break;
-		}
-#endif
-
-		/*
-		 * Reinstall the LIKE and functions. The variant
-		 * of LIKE * used will be case sensitive or not
-		 * depending on the RHS.
-		 */
-	case PragTyp_CASE_SENSITIVE_LIKE:{
-			if (zRight) {
-				int is_like_ci =
-					!(sqlGetBoolean(zRight, 0));
-				sqlRegisterLikeFunctions(db, is_like_ci);
-			}
-			break;
-		}
 
 	case PragTyp_DEFAULT_ENGINE: {
-		if (sql_default_engine_set(zRight) != 0) {
-			pParse->rc = SQL_TARANTOOL_ERROR;
-			pParse->nErr++;
+		if (!token_is_string(pValue)) {
+			diag_set(ClientError, ER_ILLEGAL_PARAMS,
+				 "string value is expected");
+			pParse->is_aborted = true;
 			goto pragma_out;
 		}
-		sqlVdbeAddOp0(v, OP_Expire);
+		if (zRight == NULL) {
+			const char *engine_name =
+				sql_storage_engine_strs[current_session()->
+							sql_default_engine];
+			sqlVdbeLoadString(v, 1, engine_name);
+			sqlVdbeAddOp2(v, OP_ResultRow, 1, 1);
+		} else {
+			if (sql_default_engine_set(zRight) != 0) {
+				pParse->is_aborted = true;
+				goto pragma_out;
+			}
+			sqlVdbeAddOp0(v, OP_Expire);
+		}
 		break;
 	}
 
@@ -621,23 +606,8 @@ sqlPragma(Parse * pParse, Token * pId,	/* First part of [schema.]id field */
 		break;
 	}
 
-	/* *   PRAGMA busy_timeout *   PRAGMA busy_timeout = N *
-	 *
-	 * Call sql_busy_timeout(db, N).  Return the current
-	 * timeout value * if one is set.  If no busy handler
-	 * or a different busy handler is set * then 0 is
-	 * returned.  Setting the busy_timeout to 0 or negative *
-	 * disables the timeout.
-	 */
-	/* case PragTyp_BUSY_TIMEOUT */
-	default:{
-			assert(pPragma->ePragTyp == PragTyp_BUSY_TIMEOUT);
-			if (zRight) {
-				sql_busy_timeout(db, sqlAtoi(zRight));
-			}
-			returnSingleInt(v, db->busyTimeout);
-			break;
-		}
+	default:
+		unreachable();
 	}			/* End of the PRAGMA switch */
 
 	/* The following block is a no-op unless SQL_DEBUG is

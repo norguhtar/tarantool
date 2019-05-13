@@ -130,7 +130,7 @@ sqlVdbeMemGrow(Mem * pMem, int n, int bPreserve)
 			sqlVdbeMemSetNull(pMem);
 			pMem->z = 0;
 			pMem->szMalloc = 0;
-			return SQL_NOMEM_BKPT;
+			return SQL_NOMEM;
 		} else {
 			pMem->szMalloc =
 			    sqlDbMallocSize(pMem->db, pMem->zMalloc);
@@ -191,7 +191,7 @@ sqlVdbeMemMakeWriteable(Mem * pMem)
 			return SQL_NOMEM;
 		if (pMem->szMalloc == 0 || pMem->z != pMem->zMalloc) {
 			if (sqlVdbeMemGrow(pMem, pMem->n + 2, 1)) {
-				return SQL_NOMEM_BKPT;
+				return SQL_NOMEM;
 			}
 			pMem->z[pMem->n] = 0;
 			pMem->z[pMem->n + 1] = 0;
@@ -224,7 +224,7 @@ sqlVdbeMemExpandBlob(Mem * pMem)
 		nByte = 1;
 	}
 	if (sqlVdbeMemGrow(pMem, nByte, 1)) {
-		return SQL_NOMEM_BKPT;
+		return SQL_NOMEM;
 	}
 
 	memset(&pMem->z[pMem->n], 0, pMem->u.nZero);
@@ -242,7 +242,7 @@ static SQL_NOINLINE int
 vdbeMemAddTerminator(Mem * pMem)
 {
 	if (sqlVdbeMemGrow(pMem, pMem->n + 2, 1)) {
-		return SQL_NOMEM_BKPT;
+		return SQL_NOMEM;
 	}
 	pMem->z[pMem->n] = 0;
 	pMem->z[pMem->n + 1] = 0;
@@ -293,7 +293,7 @@ sqlVdbeMemStringify(Mem * pMem, u8 bForce)
 	assert(EIGHT_BYTE_ALIGNMENT(pMem));
 
 	if (sqlVdbeMemClearAndResize(pMem, nByte)) {
-		return SQL_NOMEM_BKPT;
+		return SQL_NOMEM;
 	}
 	if (fg & MEM_Int) {
 		sql_snprintf(nByte, pMem->z, "%lld", pMem->u.i);
@@ -532,7 +532,9 @@ sqlVdbeMemIntegerify(Mem * pMem, bool is_forced)
 		MemSetTypeFlag(pMem, MEM_Int);
 		return 0;
 	} else if ((pMem->flags & MEM_Real) != 0 && is_forced) {
-		pMem->u.i = (int) pMem->u.r;
+		if (pMem->u.r >= INT64_MAX || pMem->u.r < INT64_MIN)
+			return -1;
+		pMem->u.i = (int64_t) pMem->u.r;
 		MemSetTypeFlag(pMem, MEM_Int);
 		return 0;
 	}
@@ -615,19 +617,7 @@ sqlVdbeMemCast(Mem * pMem, enum field_type type)
 	}
 	switch (type) {
 	case FIELD_TYPE_SCALAR:
-		if (pMem->flags & MEM_Blob)
-			return SQL_OK;
-		if (pMem->flags & MEM_Str) {
-			MemSetTypeFlag(pMem, MEM_Blob);
-			return SQL_OK;
-		}
-		if (pMem->flags & MEM_Int || pMem->flags & MEM_Real) {
-			if (sqlVdbeMemStringify(pMem, 1) != 0)
-				return -1;
-			MemSetTypeFlag(pMem, MEM_Blob);
-			return 0;
-		}
-		return SQL_ERROR;
+		return 0;
 	case FIELD_TYPE_INTEGER:
 		if ((pMem->flags & MEM_Blob) != 0) {
 			if (sql_atoi64(pMem->z, (int64_t *) &pMem->u.i,
@@ -927,7 +917,7 @@ sqlVdbeMemSetStr(Mem * pMem,	/* Memory cell to set to string value */
 		testcase(nAlloc == 31);
 		testcase(nAlloc == 32);
 		if (sqlVdbeMemClearAndResize(pMem, MAX(nAlloc, 32))) {
-			return SQL_NOMEM_BKPT;
+			return SQL_NOMEM;
 		}
 		memcpy(pMem->z, z, nAlloc);
 	} else if (xDel == SQL_DYNAMIC) {
@@ -1196,7 +1186,7 @@ valueFromFunction(sql * db,	/* The database connection */
 							   sizeof(apVal[0]) *
 							   nVal);
 		if (apVal == 0) {
-			rc = SQL_NOMEM_BKPT;
+			rc = SQL_NOMEM;
 			goto value_from_function_out;
 		}
 		for (i = 0; i < nVal; i++) {
@@ -1209,23 +1199,18 @@ valueFromFunction(sql * db,	/* The database connection */
 
 	pVal = valueNew(db, pCtx);
 	if (pVal == 0) {
-		rc = SQL_NOMEM_BKPT;
+		rc = SQL_NOMEM;
 		goto value_from_function_out;
 	}
 
-	assert(pCtx->pParse->rc == SQL_OK);
+	assert(!pCtx->pParse->is_aborted);
 	memset(&ctx, 0, sizeof(ctx));
 	ctx.pOut = pVal;
 	ctx.pFunc = pFunc;
 	pFunc->xSFunc(&ctx, nVal, apVal);
-	if (ctx.isError) {
-		rc = ctx.isError;
-		sqlErrorMsg(pCtx->pParse, "%s", sql_value_text(pVal));
-	} else {
-		sql_value_apply_type(pVal, type);
-		assert(rc == SQL_OK);
-	}
-	pCtx->pParse->rc = rc;
+	assert(!ctx.isError);
+	sql_value_apply_type(pVal, type);
+	assert(rc == SQL_OK);
 
  value_from_function_out:
 	if (rc != SQL_OK) {
@@ -1378,7 +1363,7 @@ valueFromExpr(sql * db,	/* The database connection */
 	if (pCtx == 0)
 		sqlValueFree(pVal);
 
-	return SQL_NOMEM_BKPT;
+	return SQL_NOMEM;
 }
 
 /*
@@ -1632,8 +1617,8 @@ sql_stat4_column(struct sql *db, const char *record, uint32_t col_num,
 			return -1;
 		}
 	}
-	sqlVdbeMsgpackGet((const unsigned char *) a, mem);
-	return 0;
+	uint32_t unused;
+	return vdbe_decode_msgpack_into_mem(a, mem, &unused);
 }
 
 /*

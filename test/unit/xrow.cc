@@ -34,7 +34,7 @@ extern "C" {
 #include "trivia/util.h"
 #include "box/xrow.h"
 #include "box/iproto_constants.h"
-#include "tt_uuid.h"
+#include "uuid/tt_uuid.h"
 #include "version.h"
 #include "random.h"
 #include "memory.h"
@@ -208,13 +208,15 @@ test_xrow_header_encode_decode()
 	char buffer[2048];
 	char *pos = mp_encode_uint(buffer, 300);
 	is(xrow_header_decode(&header, (const char **) &pos,
-			      buffer + 100), -1, "bad msgpack end");
+			      buffer + 100, true), -1, "bad msgpack end");
 
 	header.type = 100;
 	header.replica_id = 200;
 	header.lsn = 400;
 	header.tm = 123.456;
 	header.bodycnt = 0;
+	header.tsn = header.lsn;
+	header.is_commit = true;
 	uint64_t sync = 100500;
 	struct iovec vec[1];
 	is(1, xrow_header_encode(&header, sync, vec, 200), "encode");
@@ -227,7 +229,7 @@ test_xrow_header_encode_decode()
 	begin += fixheader_len;
 	const char *end = (const char *)vec[0].iov_base;
 	end += vec[0].iov_len;
-	is(xrow_header_decode(&decoded_header, &begin, end), 0,
+	is(xrow_header_decode(&decoded_header, &begin, end, true), 0,
 	   "header decode");
 	is(header.type, decoded_header.type, "decoded type");
 	is(header.replica_id, decoded_header.replica_id, "decoded replica_id");

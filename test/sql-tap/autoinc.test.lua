@@ -531,7 +531,7 @@ test:do_catchsql_test(
         INSERT INTO t6 VALUES(NULL,1);
     ]], {
         -- <autoinc-6.2>
-        1, "Sequence 'T6' has overflowed"
+        1, "Failed to execute SQL statement: Sequence 'T6' has overflowed"
         -- </autoinc-6.2>
     })
 
@@ -561,7 +561,7 @@ test:do_catchsql_test(
         CREATE TABLE t8(x TEXT PRIMARY KEY AUTOINCREMENT);
     ]], {
         -- <autoinc-7.2>
-        1, "AUTOINCREMENT is only allowed on an INTEGER PRIMARY KEY or INT PRIMARY KEY"
+        1, "Failed to create space 'T8': AUTOINCREMENT is only allowed on an INTEGER PRIMARY KEY or INT PRIMARY KEY"
         -- </autoinc-7.2>
     })
 
@@ -649,11 +649,11 @@ test:do_test(
     function()
         return test:execsql([[
             CREATE TABLE t3928(a INTEGER PRIMARY KEY AUTOINCREMENT, b TEXT);
-            CREATE TRIGGER t3928r1 BEFORE INSERT ON t3928 BEGIN
+            CREATE TRIGGER t3928r1 BEFORE INSERT ON t3928 FOR EACH ROW BEGIN
               INSERT INTO t3928(b) VALUES('before1');
               INSERT INTO t3928(b) VALUES('before2');
             END;
-            CREATE TRIGGER t3928r2 AFTER INSERT ON t3928 BEGIN
+            CREATE TRIGGER t3928r2 AFTER INSERT ON t3928 FOR EACH ROW BEGIN
               INSERT INTO t3928(b) VALUES('after1');
               INSERT INTO t3928(b) VALUES('after2');
             END;
@@ -684,13 +684,13 @@ test:do_test(
         return test:execsql([[
             DROP TRIGGER t3928r1;
             DROP TRIGGER t3928r2;
-            CREATE TRIGGER t3928r3 BEFORE UPDATE ON t3928
+            CREATE TRIGGER t3928r3 BEFORE UPDATE ON t3928 FOR EACH ROW
               WHEN new.b=='456' BEGIN
-                 INSERT INTO t3928(b) VALUES('before-int-' || new.b);
+                 INSERT INTO t3928(b) VALUES('before-int-' || CAST(new.b AS TEXT));
             END;
-            CREATE TRIGGER t3928r4 AFTER UPDATE ON t3928
+            CREATE TRIGGER t3928r4 AFTER UPDATE ON t3928 FOR EACH ROW
               WHEN new.b=='456' BEGIN
-                 INSERT INTO t3928(b) VALUES('after-int-' || new.b);
+                 INSERT INTO t3928(b) VALUES('after-int-' || CAST(new.b AS TEXT));
             END;
             DELETE FROM t3928 WHERE a!=1;
             UPDATE t3928 SET b=456 WHERE a=1;
@@ -724,13 +724,13 @@ test:do_test(
             INSERT INTO t3928b VALUES(300);
             DELETE FROM t3928;
             CREATE TABLE t3928c(y INTEGER PRIMARY KEY AUTOINCREMENT, z TEXT);
-            CREATE TRIGGER t3928br1 BEFORE DELETE ON t3928b BEGIN
-              INSERT INTO t3928(b) VALUES('before-del-'||old.x);
-              INSERT INTO t3928c(z) VALUES('before-del-'||old.x);
+            CREATE TRIGGER t3928br1 BEFORE DELETE ON t3928b FOR EACH ROW BEGIN
+              INSERT INTO t3928(b) VALUES('before-del-'|| CAST(old.x AS TEXT));
+              INSERT INTO t3928c(z) VALUES('before-del-'|| CAST(old.x AS TEXT));
             END;
-            CREATE TRIGGER t3928br2 AFTER DELETE ON t3928b BEGIN
-              INSERT INTO t3928(b) VALUES('after-del-'||old.x);
-              INSERT INTO t3928c(z) VALUES('after-del-'||old.x);
+            CREATE TRIGGER t3928br2 AFTER DELETE ON t3928b FOR EACH ROW BEGIN
+              INSERT INTO t3928(b) VALUES('after-del-'|| CAST(old.x AS TEXT));
+              INSERT INTO t3928c(z) VALUES('after-del-'|| CAST(old.x AS TEXT));
             END;
             DELETE FROM t3928b;
             SELECT * FROM t3928 ORDER BY a;
@@ -772,7 +772,7 @@ test:do_test(
         return test:execsql([[
             CREATE TABLE ta69637_1(x INTEGER PRIMARY KEY AUTOINCREMENT, y INT );
             CREATE TABLE ta69637_2(z INTEGER PRIMARY KEY);
-            CREATE TRIGGER ra69637_1 AFTER INSERT ON ta69637_2 BEGIN
+            CREATE TRIGGER ra69637_1 AFTER INSERT ON ta69637_2 FOR EACH ROW BEGIN
               INSERT INTO ta69637_1(y) VALUES(new.z+1);
             END;
             INSERT INTO ta69637_2 VALUES(123);
@@ -789,7 +789,7 @@ test:do_test(
     function()
         return test:execsql([[
             CREATE VIEW va69637_2 AS SELECT * FROM ta69637_2;
-            CREATE TRIGGER ra69637_2 INSTEAD OF INSERT ON va69637_2 BEGIN
+            CREATE TRIGGER ra69637_2 INSTEAD OF INSERT ON va69637_2 FOR EACH ROW BEGIN
               INSERT INTO ta69637_1(y) VALUES(new.z+10000);
             END;
             INSERT INTO va69637_2 VALUES(123);
@@ -805,12 +805,12 @@ test:do_test(
 test:do_catchsql_test(
     "autoinc-gh-3670",
     [[
-        CREATE TABLE t1 (s1 INT PRIMARY KEY AUTOINCREMENT, s2 CHAR(10));
+        CREATE TABLE t1 (s1 INT PRIMARY KEY AUTOINCREMENT, s2 VARCHAR(10));
         INSERT INTO t1 VALUES (1, 'a');
         INSERT INTO t1 SELECT s2, s2 FROM t1;
     ]], {
         -- <autoinc-gh-3670>
-        1, "datatype mismatch"
+        1, "Failed to execute SQL statement: datatype mismatch"
         -- </autoinc-gh-3670>
     })
 

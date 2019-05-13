@@ -55,7 +55,7 @@ test:do_catchsql_test(
         INSERT INTO t1 VALUES(6,7, 2);
     ]], {
         -- <check-1.3>
-        1, "CHECK constraint failed: T1"
+        1, "Failed to execute SQL statement: CHECK constraint failed: T1"
         -- </check-1.3>
     })
 
@@ -75,7 +75,7 @@ test:do_catchsql_test(
         INSERT INTO t1 VALUES(4,3, 2);
     ]], {
         -- <check-1.5>
-        1, "CHECK constraint failed: T1"
+        1, "Failed to execute SQL statement: CHECK constraint failed: T1"
         -- </check-1.5>
     })
 
@@ -147,7 +147,7 @@ test:do_catchsql_test(
         UPDATE t1 SET x=7 WHERE x==2
     ]], {
         -- <check-1.12>
-        1, "CHECK constraint failed: T1"
+        1, "Failed to execute SQL statement: CHECK constraint failed: T1"
         -- </check-1.12>
     })
 
@@ -167,7 +167,7 @@ test:do_catchsql_test(
         UPDATE t1 SET x=5 WHERE x==2
     ]], {
         -- <check-1.14>
-        1, "CHECK constraint failed: T1"
+        1, "Failed to execute SQL statement: CHECK constraint failed: T1"
         -- </check-1.14>
     })
 
@@ -207,8 +207,8 @@ test:do_execsql_test(
         CREATE TABLE t2(
           id  INT primary key,
           x INTEGER CONSTRAINT one CHECK( typeof(coalesce(x,0))=='integer'),
-          y REAL CONSTRAINT two CHECK( typeof(coalesce(y,0.1))=='real' ),
-          z TEXT CONSTRAINT three CHECK( typeof(coalesce(z,''))=='text' )
+          y REAL CONSTRAINT two CHECK( typeof(coalesce(y,0.1))=='number' ),
+          z TEXT CONSTRAINT three CHECK( typeof(coalesce(z,''))=='string' )
         );
     ]], {
         -- <check-2.1>
@@ -246,7 +246,7 @@ test:do_catchsql_test(
         INSERT INTO t2 VALUES(3, 1.1, NULL, NULL);
     ]], {
         -- <check-2.4>
-        1, "CHECK constraint failed: ONE"
+        1, "Failed to execute SQL statement: CHECK constraint failed: ONE"
         -- </check-2.4>
     })
 
@@ -256,7 +256,7 @@ test:do_catchsql_test(
         INSERT INTO t2 VALUES(4, NULL, 5, NULL);
     ]], {
         -- <check-2.5>
-        1, "CHECK constraint failed: TWO"
+        1, "Failed to execute SQL statement: CHECK constraint failed: TWO"
         -- </check-2.5>
     })
 
@@ -266,7 +266,7 @@ test:do_catchsql_test(
         INSERT INTO t2 VALUES(5, NULL, NULL, 3.14159);
     ]], {
         -- <check-2.6>
-        1, "CHECK constraint failed: THREE"
+        1, "Failed to execute SQL statement: CHECK constraint failed: THREE"
         -- </check-2.6>
     })
 
@@ -281,7 +281,7 @@ test:do_catchsql_test(
         );
     ]], {
         -- <check-2.10>
-        1,"near \",\": syntax error"
+        1,"Syntax error near ','"
         -- </check-2.10>
     })
 
@@ -295,7 +295,7 @@ test:do_catchsql_test(
         );
     ]], {
         -- <check-2.10>
-        1,"near \",\": syntax error"
+        1,"Syntax error near ','"
         -- </check-2.10>
     })
 
@@ -319,7 +319,7 @@ test:do_catchsql_test(
         );
     ]], {
         -- <check-3.1>
-        1, "Failed to create space 'T3': SQL error: subqueries prohibited in CHECK constraints"
+        1, "Failed to create space 'T3': Subqueries are prohibited in a CHECK constraint definition"
         -- </check-3.1>
     })
 
@@ -344,7 +344,7 @@ test:do_catchsql_test(
         );
     ]], {
         -- <check-3.3>
-        1, "Failed to create space 'T3': SQL error: no such column: Q"
+        1, "Failed to create space 'T3': Can’t resolve field 'Q'"
         -- </check-3.3>
     })
 
@@ -368,7 +368,7 @@ test:do_catchsql_test(
         );
     ]], {
         -- <check-3.5>
-        1, "Failed to create space 'T3': SQL error: no such column: T2.X"
+        1, "Failed to create space 'T3': Field 'X' was not found in the space 'T2' format"
         -- </check-3.5>
     })
 
@@ -413,7 +413,7 @@ test:do_catchsql_test(
         INSERT INTO t3 VALUES(111,222,333);
     ]], {
         -- <check-3.9>
-        1, "CHECK constraint failed: T3"
+        1, "Failed to execute SQL statement: CHECK constraint failed: T3"
         -- </check-3.9>
     })
 
@@ -484,7 +484,7 @@ test:do_catchsql_test(
         UPDATE t4 SET x=0, y=1;
     ]], {
         -- <check-4.6>
-        1, "CHECK constraint failed: T4"
+        1, "Failed to execute SQL statement: CHECK constraint failed: T4"
         -- </check-4.6>
     })
 
@@ -504,7 +504,7 @@ test:do_catchsql_test(
         UPDATE t4 SET x=0, y=2;
     ]], {
         -- <check-4.9>
-        1, "CHECK constraint failed: T4"
+        1, "Failed to execute SQL statement: CHECK constraint failed: T4"
         -- </check-4.9>
     })
 
@@ -516,7 +516,7 @@ test:do_catchsql_test(
         );
     ]], {
         -- <check-5.1>
-        1, "Wrong space options (field 5): invalid expression specified (SQL error: bindings are not allowed in DDL)"
+        1, "Wrong space options (field 5): invalid expression specified (bindings are not allowed in DDL)"
         -- </check-5.1>
     })
 
@@ -528,7 +528,7 @@ test:do_catchsql_test(
         );
     ]], {
         -- <check-5.2>
-        1, "Wrong space options (field 5): invalid expression specified (SQL error: bindings are not allowed in DDL)"
+        1, "Wrong space options (field 5): invalid expression specified (bindings are not allowed in DDL)"
         -- </check-5.2>
     })
 
@@ -581,7 +581,7 @@ test:do_catchsql_test(
         UPDATE OR FAIL t1 SET x=7-x, y=y+1;
     ]], {
         -- <check-6.5>
-        1, "CHECK constraint failed: T1"
+        1, "Failed to execute SQL statement: CHECK constraint failed: T1"
         -- </check-6.5>
     })
 
@@ -603,7 +603,7 @@ test:do_catchsql_test(
         INSERT OR ROLLBACK INTO t1 VALUES(8,40.0, 10);
     ]], {
         -- <check-6.7>
-        1, "CHECK constraint failed: T1"
+        1, "Failed to execute SQL statement: CHECK constraint failed: T1"
         -- </check-6.7>
     })
 
@@ -613,7 +613,7 @@ test:do_catchsql_test(
         COMMIT;
     ]], {
         -- <check-6.8>
-        1, "cannot commit - no transaction is active"
+        1, "Failed to execute SQL statement: cannot commit - no transaction is active"
         -- </check-6.8>
     })
 
@@ -636,7 +636,7 @@ test:do_catchsql_test(
         REPLACE INTO t1 VALUES(6,7, 11);
     ]], {
         -- <check-6.12>
-        1, "CHECK constraint failed: T1"
+        1, "Failed to execute SQL statement: CHECK constraint failed: T1"
         -- </check-6.12>
     })
 
@@ -700,7 +700,7 @@ test:do_catchsql_test(
     7.3,
     " INSERT INTO t6 VALUES(11) ", {
         -- <7.3>
-        1, "CHECK constraint failed: T6"
+        1, "Failed to execute SQL statement: CHECK constraint failed: T6"
         -- </7.3>
     })
 
@@ -781,7 +781,7 @@ test:do_catchsql_test(
         ON CONFLICT REPLACE)
     ]], {
         -- <9.1>
-        1, "keyword \"ON\" is reserved"
+        1, "Keyword 'ON' is reserved. Please use double quotes if 'ON' is an identifier."
         -- </9.1>
     })
 
@@ -792,7 +792,7 @@ test:do_catchsql_test(
         ON CONFLICT ABORT)
     ]], {
         -- <9.2>
-        1, "keyword \"ON\" is reserved"
+        1, "Keyword 'ON' is reserved. Please use double quotes if 'ON' is an identifier."
         -- </9.2>
     })
 
@@ -803,7 +803,7 @@ test:do_catchsql_test(
         ON CONFLICT ROLLBACK)
     ]], {
         -- <9.3>
-        1, "keyword \"ON\" is reserved"
+        1, "Keyword 'ON' is reserved. Please use double quotes if 'ON' is an identifier."
         -- </9.3>
     })
 

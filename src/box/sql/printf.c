@@ -1085,7 +1085,6 @@ sql_vmprintf(const char *zFormat, va_list ap)
 
 #ifdef SQL_ENABLE_API_ARMOR
 	if (zFormat == 0) {
-		(void)SQL_MISUSE_BKPT;
 		return 0;
 	}
 #endif
@@ -1139,7 +1138,6 @@ sql_vsnprintf(int n, char *zBuf, const char *zFormat, va_list ap)
 		return zBuf;
 #ifdef SQL_ENABLE_API_ARMOR
 	if (zBuf == 0 || zFormat == 0) {
-		(void)SQL_MISUSE_BKPT;
 		if (zBuf)
 			zBuf[0] = 0;
 		return zBuf;
@@ -1196,7 +1194,7 @@ sql_log(int iErrCode, const char *zFormat, ...)
 	}
 }
 
-#if (defined(SQL_DEBUG) || defined(SQL_ENABLE_SELECTTRACE))
+#if defined(SQL_DEBUG)
 /*
  * A version of printf() that understands %lld.  Used for debugging.
  */

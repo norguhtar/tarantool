@@ -37,13 +37,6 @@
 #define HEAP_FORWARD_DECLARATION
 #include "salad/heap.h"
 
-static bool
-heap_less(heap_t *heap, struct heap_node *n1, struct heap_node *n2);
-
-#define HEAP_NAME vy_source_heap
-#define HEAP_LESS heap_less
-#include "salad/heap.h"
-
 /**
  * Merge source of a write iterator. Represents a mem or a run.
  */
@@ -72,6 +65,15 @@ struct vy_write_src {
 		struct vy_stmt_stream stream;
 	};
 };
+
+static bool
+heap_less(heap_t *heap, struct vy_write_src *src1, struct vy_write_src *src2);
+
+#define HEAP_NAME vy_source_heap
+#define HEAP_LESS heap_less
+#define heap_value_t struct vy_write_src
+#define heap_value_attr heap_node
+#include "salad/heap.h"
 
 /**
  * A sequence of versions of a key, sorted by LSN in ascending order.
@@ -166,8 +168,6 @@ struct vy_write_iterator {
 	heap_t src_heap;
 	/** Index key definition used to store statements on disk. */
 	struct key_def *cmp_def;
-	/** Format to allocate new REPLACE and DELETE tuples from vy_run */
-	struct tuple_format *format;
 	/* There is no LSM tree level older than the one we're writing to. */
 	bool is_last_level;
 	/**
@@ -218,16 +218,12 @@ struct vy_write_iterator {
  * it's a virtual source (is_end_of_key).
  */
 static bool
-heap_less(heap_t *heap, struct heap_node *node1, struct heap_node *node2)
+heap_less(heap_t *heap, struct vy_write_src *src1, struct vy_write_src *src2)
 {
 	struct vy_write_iterator *stream =
 		container_of(heap, struct vy_write_iterator, src_heap);
-	struct vy_write_src *src1 =
-		container_of(node1, struct vy_write_src, heap_node);
-	struct vy_write_src *src2 =
-		container_of(node2, struct vy_write_src, heap_node);
 
-	int cmp = vy_tuple_compare(src1->tuple, src2->tuple, stream->cmp_def);
+	int cmp = vy_stmt_compare(src1->tuple, src2->tuple, stream->cmp_def);
 	if (cmp != 0)
 		return cmp < 0;
 
@@ -267,6 +263,7 @@ vy_write_iterator_new_src(struct vy_write_iterator *stream)
 			 "malloc", "vinyl write stream");
 		return NULL;
 	}
+	heap_node_create(&res->heap_node);
 	res->is_end_of_key = false;
 	rlist_add(&stream->src_list, &res->in_src_list);
 	return res;
@@ -280,8 +277,6 @@ vy_write_iterator_delete_src(struct vy_write_iterator *stream,
 {
 	(void)stream;
 	assert(!src->is_end_of_key);
-	if (src->stream.iface->stop != NULL)
-		src->stream.iface->stop(&src->stream);
 	if (src->stream.iface->close != NULL)
 		src->stream.iface->close(&src->stream);
 	rlist_del(&src->in_src_list);
@@ -289,8 +284,8 @@ vy_write_iterator_delete_src(struct vy_write_iterator *stream,
 }
 
 /**
- * Add a source to the write iterator heap. The added source
- * must be open.
+ * Start iteration in the given source, retrieve the first tuple,
+ * and add the source to the write iterator heap.
  *
  * @return 0 - success, not 0 - error.
  */
@@ -300,35 +295,38 @@ vy_write_iterator_add_src(struct vy_write_iterator *stream,
 {
 	if (src->stream.iface->start != NULL) {
 		int rc = src->stream.iface->start(&src->stream);
-		if (rc != 0) {
-			vy_write_iterator_delete_src(stream, src);
+		if (rc != 0)
 			return rc;
-		}
 	}
 	int rc = src->stream.iface->next(&src->stream, &src->tuple);
-	if (rc != 0 || src->tuple == NULL) {
-		vy_write_iterator_delete_src(stream, src);
-		return rc;
-	}
-	rc = vy_source_heap_insert(&stream->src_heap, &src->heap_node);
+	if (rc != 0 || src->tuple == NULL)
+		goto stop;
+
+	rc = vy_source_heap_insert(&stream->src_heap, src);
 	if (rc != 0) {
 		diag_set(OutOfMemory, sizeof(void *),
 			 "malloc", "vinyl write stream heap");
-		vy_write_iterator_delete_src(stream, src);
-		return rc;
+		goto stop;
 	}
 	return 0;
+stop:
+	if (src->stream.iface->stop != NULL)
+		src->stream.iface->stop(&src->stream);
+	return rc;
 }
 
 /**
- * Remove a source from the heap, destroy and free it.
+ * Remove a source from the heap and stop iteration.
  */
 static void
 vy_write_iterator_remove_src(struct vy_write_iterator *stream,
 			   struct vy_write_src *src)
 {
-	vy_source_heap_delete(&stream->src_heap, &src->heap_node);
-	vy_write_iterator_delete_src(stream, src);
+	if (heap_node_is_stray(&src->heap_node))
+		return; /* already removed */
+	vy_source_heap_delete(&stream->src_heap, src);
+	if (src->stream.iface->stop != NULL)
+		src->stream.iface->stop(&src->stream);
 }
 
 static const struct vy_stmt_stream_iface vy_slice_stream_iface;
@@ -339,9 +337,8 @@ static const struct vy_stmt_stream_iface vy_slice_stream_iface;
  * @return the iterator or NULL on error (diag is set).
  */
 struct vy_stmt_stream *
-vy_write_iterator_new(struct key_def *cmp_def, struct tuple_format *format,
-		      bool is_primary, bool is_last_level,
-		      struct rlist *read_views,
+vy_write_iterator_new(struct key_def *cmp_def, bool is_primary,
+		      bool is_last_level, struct rlist *read_views,
 		      struct vy_deferred_delete_handler *handler)
 {
 	/*
@@ -378,8 +375,6 @@ vy_write_iterator_new(struct key_def *cmp_def, struct tuple_format *format,
 	vy_source_heap_create(&stream->src_heap);
 	rlist_create(&stream->src_list);
 	stream->cmp_def = cmp_def;
-	stream->format = format;
-	tuple_format_ref(stream->format);
 	stream->is_primary = is_primary;
 	stream->is_last_level = is_last_level;
 	stream->deferred_delete_handler = handler;
@@ -396,16 +391,20 @@ vy_write_iterator_start(struct vy_stmt_stream *vstream)
 {
 	assert(vstream->iface->start == vy_write_iterator_start);
 	struct vy_write_iterator *stream = (struct vy_write_iterator *)vstream;
-	struct vy_write_src *src, *tmp;
-	rlist_foreach_entry_safe(src, &stream->src_list, in_src_list, tmp) {
+	struct vy_write_src *src;
+	rlist_foreach_entry(src, &stream->src_list, in_src_list) {
 		if (vy_write_iterator_add_src(stream, src) != 0)
-			return -1;
+			goto fail;
 	}
 	return 0;
+fail:
+	rlist_foreach_entry(src, &stream->src_list, in_src_list)
+		vy_write_iterator_remove_src(stream, src);
+	return -1;
 }
 
 /**
- * Free all resources.
+ * Stop iteration in all sources.
  */
 static void
 vy_write_iterator_stop(struct vy_stmt_stream *vstream)
@@ -414,9 +413,9 @@ vy_write_iterator_stop(struct vy_stmt_stream *vstream)
 	struct vy_write_iterator *stream = (struct vy_write_iterator *)vstream;
 	for (int i = 0; i < stream->rv_count; ++i)
 		vy_read_view_stmt_destroy(&stream->read_views[i]);
-	struct vy_write_src *src, *tmp;
-	rlist_foreach_entry_safe(src, &stream->src_list, in_src_list, tmp)
-		vy_write_iterator_delete_src(stream, src);
+	struct vy_write_src *src;
+	rlist_foreach_entry(src, &stream->src_list, in_src_list)
+		vy_write_iterator_remove_src(stream, src);
 	if (stream->last_stmt != NULL) {
 		vy_stmt_unref_if_possible(stream->last_stmt);
 		stream->last_stmt = NULL;
@@ -441,9 +440,10 @@ vy_write_iterator_close(struct vy_stmt_stream *vstream)
 {
 	assert(vstream->iface->close == vy_write_iterator_close);
 	struct vy_write_iterator *stream = (struct vy_write_iterator *)vstream;
-	vy_write_iterator_stop(vstream);
+	struct vy_write_src *src, *tmp;
+	rlist_foreach_entry_safe(src, &stream->src_list, in_src_list, tmp)
+		vy_write_iterator_delete_src(stream, src);
 	vy_source_heap_destroy(&stream->src_heap);
-	tuple_format_unref(stream->format);
 	free(stream);
 }
 
@@ -468,14 +468,15 @@ vy_write_iterator_new_mem(struct vy_stmt_stream *vstream, struct vy_mem *mem)
  */
 NODISCARD int
 vy_write_iterator_new_slice(struct vy_stmt_stream *vstream,
-			    struct vy_slice *slice)
+			    struct vy_slice *slice,
+			    struct tuple_format *disk_format)
 {
 	struct vy_write_iterator *stream = (struct vy_write_iterator *)vstream;
 	struct vy_write_src *src = vy_write_iterator_new_src(stream);
 	if (src == NULL)
 		return -1;
 	vy_slice_stream_open(&src->slice_stream, slice, stream->cmp_def,
-			     stream->format, stream->is_primary);
+			     disk_format);
 	return 0;
 }
 
@@ -486,15 +487,13 @@ vy_write_iterator_new_slice(struct vy_stmt_stream *vstream,
 static NODISCARD int
 vy_write_iterator_merge_step(struct vy_write_iterator *stream)
 {
-	struct heap_node *node = vy_source_heap_top(&stream->src_heap);
-	assert(node != NULL);
-	struct vy_write_src *src = container_of(node, struct vy_write_src,
-						heap_node);
+	struct vy_write_src *src = vy_source_heap_top(&stream->src_heap);
+	assert(src != NULL);
 	int rc = src->stream.iface->next(&src->stream, &src->tuple);
 	if (rc != 0)
 		return rc;
 	if (src->tuple != NULL)
-		vy_source_heap_update(&stream->src_heap, node);
+		vy_source_heap_update(&stream->src_heap, src);
 	else
 		vy_write_iterator_remove_src(stream, src);
 	return 0;
@@ -656,11 +655,9 @@ vy_write_iterator_build_history(struct vy_write_iterator *stream,
 	*is_first_insert = false;
 	assert(stream->stmt_i == -1);
 	assert(stream->deferred_delete_stmt == NULL);
-	struct heap_node *node = vy_source_heap_top(&stream->src_heap);
-	if (node == NULL)
+	struct vy_write_src *src = vy_source_heap_top(&stream->src_heap);
+	if (src == NULL)
 		return 0; /* no more data */
-	struct vy_write_src *src =
-		container_of(node, struct vy_write_src, heap_node);
 	/* Search must have been started already. */
 	assert(src->tuple != NULL);
 	/*
@@ -675,7 +672,7 @@ vy_write_iterator_build_history(struct vy_write_iterator *stream,
 	struct vy_write_src end_of_key_src;
 	end_of_key_src.is_end_of_key = true;
 	end_of_key_src.tuple = src->tuple;
-	int rc = vy_source_heap_insert(&stream->src_heap, &end_of_key_src.heap_node);
+	int rc = vy_source_heap_insert(&stream->src_heap, &end_of_key_src);
 	if (rc) {
 		diag_set(OutOfMemory, sizeof(void *),
 			 "malloc", "vinyl write stream heap");
@@ -777,9 +774,8 @@ next_lsn:
 		rc = vy_write_iterator_merge_step(stream);
 		if (rc != 0)
 			break;
-		node = vy_source_heap_top(&stream->src_heap);
-		assert(node != NULL);
-		src = container_of(node, struct vy_write_src, heap_node);
+		src = vy_source_heap_top(&stream->src_heap);
+		assert(src != NULL);
 		assert(src->tuple != NULL);
 		if (src->is_end_of_key)
 			break;
@@ -796,7 +792,7 @@ next_lsn:
 		stream->deferred_delete_stmt = NULL;
 	}
 
-	vy_source_heap_delete(&stream->src_heap, &end_of_key_src.heap_node);
+	vy_source_heap_delete(&stream->src_heap, &end_of_key_src);
 	vy_stmt_unref_if_possible(end_of_key_src.tuple);
 	return rc;
 }
@@ -849,7 +845,7 @@ vy_read_view_merge(struct vy_write_iterator *stream, struct tuple *hint,
 		assert(!stream->is_last_level || hint == NULL ||
 		       vy_stmt_type(hint) != IPROTO_UPSERT);
 		struct tuple *applied = vy_apply_upsert(h->tuple, hint,
-				stream->cmp_def, stream->format, false);
+							stream->cmp_def, false);
 		if (applied == NULL)
 			return -1;
 		vy_stmt_unref_if_possible(h->tuple);
@@ -863,7 +859,7 @@ vy_read_view_merge(struct vy_write_iterator *stream, struct tuple *hint,
 		       vy_stmt_type(h->tuple) == IPROTO_UPSERT);
 		assert(result->tuple != NULL);
 		struct tuple *applied = vy_apply_upsert(h->tuple, result->tuple,
-					stream->cmp_def, stream->format, false);
+							stream->cmp_def, false);
 		if (applied == NULL)
 			return -1;
 		vy_stmt_unref_if_possible(result->tuple);
@@ -926,11 +922,11 @@ vy_read_view_merge(struct vy_write_iterator *stream, struct tuple *hint,
 		 * so as not to trigger optimization #5 on the next
 		 * compaction.
 		 */
-		uint32_t size;
-		const char *data = tuple_data_range(rv->tuple, &size);
-		struct tuple *copy = is_first_insert ?
-			vy_stmt_new_insert(stream->format, data, data + size) :
-			vy_stmt_new_replace(stream->format, data, data + size);
+		struct tuple *copy = vy_stmt_dup(rv->tuple);
+		if (is_first_insert)
+			vy_stmt_set_type(copy, IPROTO_INSERT);
+		else
+			vy_stmt_set_type(copy, IPROTO_REPLACE);
 		if (copy == NULL)
 			return -1;
 		vy_stmt_set_lsn(copy, vy_stmt_lsn(rv->tuple));

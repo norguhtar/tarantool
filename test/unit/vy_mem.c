@@ -76,10 +76,8 @@ test_iterator_restore_after_insertion()
 	assert(key_def != NULL);
 
 	/* Create format */
-	struct tuple_format *format = tuple_format_new(&vy_tuple_format_vtab,
-						       NULL, &key_def, 1, NULL,
-						       0, 0, NULL, false,
-						       false);
+	struct tuple_format *format = vy_stmt_format_new(&stmt_env, &key_def, 1,
+							 NULL, 0, 0, NULL);
 	assert(format != NULL);
 	tuple_format_ref(format);
 
@@ -88,7 +86,7 @@ test_iterator_restore_after_insertion()
 	struct slab_cache *slab_cache = cord_slab_cache();
 	lsregion_create(&lsregion, slab_cache->arena);
 
-	struct tuple *select_key = vy_stmt_new_select(format, "", 0);
+	struct tuple *select_key = vy_key_new(stmt_env.key_format, NULL, 0);
 
 	struct mempool history_node_pool;
 	mempool_create(&history_node_pool, cord_slab_cache(),

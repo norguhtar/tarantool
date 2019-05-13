@@ -240,7 +240,7 @@ insert_filler_rows_n = function(iStart, nCopy, nVal)
     for i = 0, nVal-1 do
         local iVal = iStart+i
         for j = 0, nCopy-1 do
-            box.sql.execute(string.format("INSERT INTO t1 VALUES (null, %s, %s, '%s')", iVal, iVal, iVal))
+            box.execute(string.format("INSERT INTO t1 VALUES (null, %s, %s, '%s')", iVal, iVal, iVal))
         end
     end
 end
@@ -391,7 +391,7 @@ test:do_execsql_test(
         INSERT INTO t1 VALUES(null, 4, 4);
         INSERT INTO t1 VALUES(null, 5, 5);
         ANALYZE;
-        CREATE TABLE x1(tbl TEXT, idx TEXT , neq TEXT, nlt TEXT, ndlt TEXT, sample BLOB, PRIMARY KEY(tbl, idx, sample));
+        CREATE TABLE x1(tbl TEXT, idx TEXT , neq TEXT, nlt TEXT, ndlt TEXT, sample SCALAR, PRIMARY KEY(tbl, idx, sample));
         INSERT INTO x1 SELECT * FROM "_sql_stat4";
         DELETE FROM "_sql_stat4";
         INSERT INTO "_sql_stat4" SELECT * FROM x1;

@@ -62,12 +62,19 @@ local function stop_server(test, server)
 end
 
 local function test_http_client(test, url, opts)
-    test:plan(9)
+    test:plan(11)
+
+    -- gh-4136: confusing httpc usage error message
+    local ok, err = pcall(client.request, client)
+    local usage_err = "request(method, url[, body, [options]])"
+    test:is_deeply({ok, err:split(': ')[2]}, {false, usage_err},
+                   "test httpc usage error")
 
     test:isnil(rawget(_G, 'http'), "global namespace is not polluted");
     test:isnil(rawget(_G, 'http.client'), "global namespace is not polluted");
     local r = client.get(url, opts)
     test:is(r.status, 200, 'simple 200')
+    test:is(r.reason, 'Ok', '200 - Ok')
     test:is(r.proto[1], 1, 'proto major http 1.1')
     test:is(r.proto[2], 1, 'proto major http 1.1')
     test:ok(r.body:match("hello") ~= nil, "body")
@@ -77,6 +84,66 @@ local function test_http_client(test, url, opts)
 
     local r = client.request('GET', url, nil, opts)
     test:is(r.status, 200, 'request')
+
+    -- XXX: enable after resolving of gh-4180: httpc: redirects
+    -- are broken with libcurl-7.30 and older
+    --[[
+    -- gh-4119: specify whether to follow 'Location' header
+    test:test('gh-4119: follow location', function(test)
+        test:plan(7)
+        local endpoint = 'redirect'
+
+        -- Verify that the default behaviour is to follow location.
+        local r = client.request('GET', url .. endpoint, nil, opts)
+        test:is(r.status, 200, 'default: status')
+        test:is(r.body, 'hello world', 'default: body')
+
+        -- Verify {follow_location = true} behaviour.
+        local r = client.request('GET', url .. endpoint, nil, merge(opts, {
+                                 follow_location = true}))
+        test:is(r.status, 200, 'follow location: status')
+        test:is(r.body, 'hello world', 'follow location: body')
+
+        -- Verify {follow_location = false} behaviour.
+        local r = client.request('GET', url .. endpoint, nil, merge(opts, {
+                                 follow_location = false}))
+        test:is(r.status, 302, 'do not follow location: status')
+        test:is(r.body, 'redirecting', 'do not follow location: body')
+        test:is(r.headers['location'], '/', 'do not follow location: header')
+    end)
+    ]]--
+end
+
+--
+-- gh-3955: Check that httpc module doesn't redefine http headers
+--          set explicitly by the caller.
+--
+local function test_http_client_headers_redefine(test, url, opts)
+    test:plan(9)
+    local opts = table.deepcopy(opts)
+    -- Test defaults
+    opts.headers = {['Connection'] = nil, ['Accept'] = nil}
+    local r = client.post(url, nil, opts)
+    test:is(r.status, 200, 'simple 200')
+    test:is(r.headers['connection'], 'close', 'Default Connection header')
+    test:is(r.headers['accept'], '*/*', 'Default Accept header for POST request')
+    -- Test that in case of conflicting headers, user variant is
+    -- prefered
+    opts.headers={['Connection'] = 'close'}
+    opts.keepalive_idle = 2
+    opts.keepalive_interval = 1
+    local r = client.get(url, opts)
+    test:is(r.status, 200, 'simple 200')
+    test:is(r.headers['connection'], 'close', 'Redefined Connection header')
+    test:is(r.headers['keep_alive'], 'timeout=2',
+            'Automatically set Keep-Alive header')
+    -- Test that user-defined Connection and Acept headers
+    -- are used
+    opts.headers={['Connection'] = 'Keep-Alive', ['Accept'] = 'text/html'}
+    local r = client.get(url, opts)
+    test:is(r.status, 200, 'simple 200')
+    test:is(r.headers['accept'], 'text/html', 'Redefined Accept header')
+    test:is(r.headers['connection'], 'Keep-Alive', 'Redefined Connection header')
 end
 
 local function test_cancel_and_errinj(test, url, opts)
@@ -104,7 +171,7 @@ local function test_cancel_and_errinj(test, url, opts)
 end
 
 local function test_post_and_get(test, url, opts)
-    test:plan(19)
+    test:plan(21)
 
     local http = client.new()
     test:ok(http ~= nil, "client is created")
@@ -159,6 +226,7 @@ local function test_post_and_get(test, url, opts)
 
     r = responses.absent_get
     test:is(r.status, 500, "GET: absent method http code page exists")
+    test:is(r.reason, 'Unknown', '500 - Unknown')
     test:is(r.body, "No such method", "GET: absent method right body")
 
     r = responses.empty_post
@@ -180,6 +248,7 @@ local function test_post_and_get(test, url, opts)
 
     r = responses.bad_get
     test:is(r.status, 404, "GET: http page not exists")
+    test:is(r.reason, 'Unknown', '404 - Unknown')
     test:isnt(r.body:len(), 0, "GET: not empty body page not exists")
     test:ok(string.find(r.body, "Not Found"),
                 "GET: right body page not exists")
@@ -203,6 +272,80 @@ local function test_errors(test)
                         "POST: exception on bad protocol")
     local r = http:get("http://do_not_exist_8ffad33e0cb01e6a01a03d00089e71e5b2b7e9930dfcba.ru")
     test:is(r.status, 595, "GET: response on bad url")
+end
+
+-- gh-3679 allow only headers can be converted to string
+local function test_request_headers(test, url, opts)
+    local exp_err = 'headers must be string or table with "__tostring"'
+    local cases = {
+        {
+            'string header',
+            opts = {headers = {aaa = 'aaa'}},
+            exp_err = nil,
+        },
+        {
+            'header with __tostring() metamethod',
+            opts = {headers = {aaa = setmetatable({}, {
+                __tostring = function(self)
+                    return 'aaa'
+                end})}},
+            exp_err = nil,
+            postrequest_check = function(opts)
+                assert(type(opts.headers.aaa) == 'table',
+                    '"aaa" header was modified in http_client')
+            end,
+        },
+        {
+            'boolean header',
+            opts = {headers = {aaa = true}},
+            exp_err = exp_err,
+        },
+        {
+            'number header',
+            opts = {headers = {aaa = 10}},
+            exp_err = exp_err,
+        },
+        {
+            'cdata header (box.NULL)',
+            opts = {headers = {aaa = box.NULL}},
+            exp_err = exp_err,
+        },
+        {
+            'cdata<uint64_t> header',
+            opts = {headers = {aaa = 10ULL}},
+            exp_err = exp_err,
+        },
+        {
+            'table header w/o metatable',
+            opts = {headers = {aaa = {}}},
+            exp_err = exp_err,
+        },
+        {
+            'table header w/o __tostring() metamethod',
+            opts = {headers = {aaa = setmetatable({}, {})}},
+            exp_err = exp_err,
+        },
+    }
+    test:plan(#cases)
+
+    local http = client:new()
+
+    for _, case in ipairs(cases) do
+        local opts = merge(table.copy(opts), case.opts)
+        local ok, err = pcall(http.get, http, url, opts)
+        if case.postrequest_check ~= nil then
+            case.postrequest_check(opts)
+        end
+        if case.exp_err == nil then
+            -- expect success
+            test:ok(ok, case[1])
+        else
+            -- expect fail
+            assert(type(err) == 'string')
+            err = err:gsub('^builtin/[a-z._]+.lua:[0-9]+: ', '')
+            test:is_deeply({ok, err}, {false, case.exp_err}, case[1])
+        end
+    end
 end
 
 local function test_headers(test, url, opts)
@@ -416,12 +559,15 @@ local function test_concurrent(test, url, opts)
 end
 
 function run_tests(test, sock_family, sock_addr)
-    test:plan(9)
+    test:plan(11)
     local server, url, opts = start_server(test, sock_family, sock_addr)
     test:test("http.client", test_http_client, url, opts)
+    test:test("http.client headers redefine", test_http_client_headers_redefine,
+              url, opts)
     test:test("cancel and errinj", test_cancel_and_errinj, url .. 'long_query', opts)
     test:test("basic http post/get", test_post_and_get, url, opts)
     test:test("errors", test_errors)
+    test:test("request_headers", test_request_headers, url, opts)
     test:test("headers", test_headers, url, opts)
     test:test("special methods", test_special_methods, url, opts)
     if sock_family == 'AF_UNIX' and jit.os ~= "Linux" then

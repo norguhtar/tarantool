@@ -30,42 +30,18 @@
  * THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
  * SUCH DAMAGE.
  */
-#include <stddef.h>
-#include <stdint.h>
-#include <stdbool.h>
-
-#include "key_def.h"
-#include "tuple.h"
-
 #if defined(__cplusplus)
 extern "C" {
 #endif /* defined(__cplusplus) */
 
-/**
- * Return the length of the longest common prefix of two tuples.
- * @param tuple_a first tuple
- * @param tuple_b second tuple
- * @param key_def key defintion
- * @return number of key parts the two tuples have in common
- */
-uint32_t
-tuple_common_key_parts(const struct tuple *tuple_a, const struct tuple *tuple_b,
-		       struct key_def *key_def);
+struct key_def;
 
 /**
- * Create a comparison function for the key_def
- *
- * @param key_def key_definition
- * @returns a comparision function
+ * Initialize comparator functions for the key_def.
+ * @param key_def key definition
  */
-tuple_compare_t
-tuple_compare_create(const struct key_def *key_def);
-
-/**
- * @copydoc tuple_compare_create()
- */
-tuple_compare_with_key_t
-tuple_compare_with_key_create(const struct key_def *key_def);
+void
+key_def_set_compare_func(struct key_def *def);
 
 #if defined(__cplusplus)
 } /* extern "C" */

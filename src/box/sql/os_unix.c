@@ -472,7 +472,7 @@ findInodeInfo(unixFile * pFile,	/* Unix file with file desc used in the key */
 	if (pInode == 0) {
 		pInode = sql_malloc64(sizeof(*pInode));
 		if (pInode == 0) {
-			return SQL_NOMEM_BKPT;
+			return SQL_NOMEM;
 		}
 		memset(pInode, 0, sizeof(*pInode));
 		memcpy(&pInode->fileId, &fileId, sizeof(fileId));
@@ -1033,7 +1033,7 @@ openDirectory(const char *zFilename, int *pFd)
 	*pFd = fd;
 	if (fd >= 0)
 		return SQL_OK;
-	return unixLogError(SQL_CANTOPEN_BKPT, "openDirectory", zDirname);
+	return unixLogError(SQL_CANTOPEN, "openDirectory", zDirname);
 }
 
 /*
@@ -1816,7 +1816,7 @@ unixOpen(sql_vfs * pVfs,	/* The VFS for which this is the xOpen method */
 		} else {
 			pUnused = sql_malloc64(sizeof(*pUnused));
 			if (!pUnused) {
-				return SQL_NOMEM_BKPT;
+				return SQL_NOMEM;
 			}
 		}
 		p->pUnused = pUnused;
@@ -1882,7 +1882,7 @@ unixOpen(sql_vfs * pVfs,	/* The VFS for which this is the xOpen method */
 			fd = robust_open(zName, openFlags, openMode);
 		}
 		if (fd < 0) {
-			rc = unixLogError(SQL_CANTOPEN_BKPT, "open", zName);
+			rc = unixLogError(SQL_CANTOPEN, "open", zName);
 			goto open_finished;
 		}
 		
@@ -1988,23 +1988,6 @@ unixRandomness(sql_vfs * NotUsed, int nBuf, char *zBuf)
 	return nBuf;
 }
 
-/*
- * Sleep for a little while.  Return the amount of time slept.
- * The argument is the number of microseconds we want to sleep.
- * The return value is the number of microseconds of sleep actually
- * requested from the underlying operating system, a number which
- * might be greater than or equal to the argument, but not less
- * than the argument.
- */
-static int
-unixSleep(sql_vfs * NotUsed, int microseconds)
-{
-	int seconds = (microseconds + 999999) / 1000000;
-	sleep(seconds);
-	UNUSED_PARAMETER(NotUsed);
-	return seconds * 1000000;
-}
-
 /* Fake system time in seconds since 1970. */
 int sql_current_time = 0;
 
@@ -2078,7 +2061,6 @@ unixGetLastError(sql_vfs * NotUsed, int NotUsed2, char *NotUsed3)
     unixOpen,             /* xOpen */                       \
     unixDelete,           /* xDelete */                     \
     unixRandomness,       /* xRandomness */                 \
-    unixSleep,            /* xSleep */                      \
     NULL,                 /* xCurrentTime */                \
     unixGetLastError,     /* xGetLastError */               \
     unixCurrentTimeInt64, /* xCurrentTimeInt64 */           \

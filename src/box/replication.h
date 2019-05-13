@@ -30,7 +30,7 @@
  * THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
  * SUCH DAMAGE.
  */
-#include "tt_uuid.h"
+#include "uuid/tt_uuid.h"
 #include "trigger.h"
 #include <stdint.h>
 #define RB_COMPACT 1
@@ -192,6 +192,11 @@ struct replicaset {
 	 * of the cluster as maintained by appliers.
 	 */
 	struct vclock vclock;
+	/**
+	 * This flag is set while the instance is bootstrapping
+	 * from a remote master.
+	 */
+	bool is_joining;
 	/** Applier state. */
 	struct {
 		/**

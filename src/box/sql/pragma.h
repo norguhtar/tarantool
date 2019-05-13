@@ -5,8 +5,6 @@
  */
 
 /* The various pragma types */
-#define PragTyp_BUSY_TIMEOUT                   1
-#define PragTyp_CASE_SENSITIVE_LIKE            2
 #define PragTyp_COLLATION_LIST                 3
 #define PragTyp_FLAG                           5
 #define PragTyp_FOREIGN_KEY_LIST               9
@@ -14,7 +12,6 @@
 #define PragTyp_INDEX_LIST                    11
 #define PragTyp_STATS                         15
 #define PragTyp_TABLE_INFO                    17
-#define PragTyp_PARSER_TRACE                  24
 #define PragTyp_DEFAULT_ENGINE                25
 #define PragTyp_COMPOUND_SELECT_LIMIT         26
 
@@ -27,50 +24,129 @@
 #define PragFlg_SchemaOpt  0x40	/* Schema restricts name search if present */
 #define PragFlg_SchemaReq  0x80	/* Schema required - "main" is default */
 
-/* Names of columns for pragmas that return multi-column result
- * or that return single-column results where the name of the
- * result column is different from the name of the pragma
+/**
+ * Column names and types for pragmas. The type of the column is
+ * the following value after its name.
  */
 static const char *const pragCName[] = {
 	/* Used by: table_info */
 	/*   0 */ "cid",
-	/*   1 */ "name",
-	/*   2 */ "type",
-	/*   3 */ "notnull",
-	/*   4 */ "dflt_value",
-	/*   5 */ "pk",
+	/*   1 */ "INTEGER",
+	/*   2 */ "name",
+	/*   3 */ "TEXT",
+	/*   4 */ "type",
+	/*   3 */ "TEXT",
+	/*   6 */ "notnull",
+	/*   1 */ "INTEGER",
+	/*   8 */ "dflt_value",
+	/*   9 */ "TEXT",
+	/*  10 */ "pk",
+	/*  11 */ "INTEGER",
 	/* Used by: stats */
-	/*   6 */ "table",
-	/*   7 */ "index",
-	/*   8 */ "width",
-	/*   9 */ "height",
+	/*  12 */ "table",
+	/*  13 */ "TEXT",
+	/*  14 */ "index",
+	/*  15 */ "TEXT",
+	/*  16 */ "width",
+	/*  17 */ "INTEGER",
+	/*  18 */ "height",
+	/*  19 */ "INTEGER",
 	/* Used by: index_info */
-	/*  10 */ "seqno",
-	/*  11 */ "cid",
-	/*  12 */ "name",
-	/*  13 */ "desc",
-	/*  14 */ "coll",
-	/*  15 */ "type",
+	/*  20 */ "seqno",
+	/*  21 */ "INTEGER",
+	/*  22 */ "cid",
+	/*  23 */ "INTEGER",
+	/*  24 */ "name",
+	/*  25 */ "TEXT",
+	/*  26 */ "desc",
+	/*  27 */ "INTEGER",
+	/*  28 */ "coll",
+	/*  29 */ "TEXT",
+	/*  30 */ "type",
+	/*  31 */ "TEXT",
 	/* Used by: index_list */
-	/*  16 */ "seq",
-	/*  17 */ "name",
-	/*  18 */ "unique",
-	/*  19 */ "origin",
-	/*  20 */ "partial",
+	/*  32 */ "seq",
+	/*  33 */ "INTEGER",
+	/*  34 */ "name",
+	/*  35 */ "TEXT",
+	/*  36 */ "unique",
+	/*  37 */ "INTEGER",
 	/* Used by: collation_list */
-	/*  21 */ "seq",
-	/*  22 */ "name",
+	/*  38 */ "seq",
+	/*  39 */ "INTEGER",
+	/*  40 */ "name",
+	/*  41 */ "TEXT",
 	/* Used by: foreign_key_list */
-	/*  23 */ "id",
-	/*  24 */ "seq",
-	/*  25 */ "table",
-	/*  26 */ "from",
-	/*  27 */ "to",
-	/*  28 */ "on_update",
-	/*  29 */ "on_delete",
-	/*  30 */ "match",
-	/* Used by: busy_timeout */
-	/*  31 */ "timeout",
+	/*  42 */ "id",
+	/*  43 */ "INTEGER",
+	/*  44 */ "seq",
+	/*  45 */ "INTEGER",
+	/*  46 */ "table",
+	/*  47 */ "TEXT",
+	/*  48 */ "from",
+	/*  49 */ "TEXT",
+	/*  50 */ "to",
+	/*  51 */ "TEXT",
+	/*  52 */ "on_update",
+	/*  53 */ "TEXT",
+	/*  54 */ "on_delete",
+	/*  55 */ "TEXT",
+	/*  56 */ "match",
+	/*  57 */ "TEXT",
+	/* Used by: case_sensitive_like */
+	/*  58 */ "case_sensitive_like",
+	/*  59 */ "INTEGER",
+	/* Used by: count_changes */
+	/*  60 */ "count_changes",
+	/*  61 */ "INTEGER",
+	/* Used by: defer_foreign_keys */
+	/*  62 */ "defer_foreign_keys",
+	/*  63 */ "INTEGER",
+	/* Used by: full_column_names */
+	/*  64 */ "full_column_names",
+	/*  65 */ "INTEGER",
+	/* Used by: parser_trace */
+	/*  66 */ "parser_trace",
+	/*  67 */ "INTEGER",
+	/* Used by: recursive_triggers */
+	/*  68 */ "recursive_triggers",
+	/*  69 */ "INTEGER",
+	/* Used by: reverse_unordered_selects */
+	/*  70 */ "reverse_unordered_selects",
+	/*  71 */ "INTEGER",
+	/* Used by: select_trace */
+	/*  72 */ "select_trace",
+	/*  73 */ "INTEGER",
+	/* Used by: short_column_names */
+	/*  74 */ "short_column_names",
+	/*  75 */ "INTEGER",
+	/* Used by: sql_compound_select_limit */
+	/*  76 */ "sql_compound_select_limit",
+	/*  77 */ "INTEGER",
+	/* Used by: sql_default_engine */
+	/*  78 */ "sql_default_engine",
+	/*  79 */ "TEXT",
+	/* Used by: sql_trace */
+	/*  80 */ "sql_trace",
+	/*  81 */ "INTEGER",
+	/* Used by: vdbe_addoptrace */
+	/*  82 */ "vdbe_addoptrace",
+	/*  83 */ "INTEGER",
+	/* Used by: vdbe_debug */
+	/*  84 */ "vdbe_debug",
+	/*  85 */ "INTEGER",
+	/* Used by: vdbe_eqp */
+	/*  86 */ "vdbe_eqp",
+	/*  87 */ "INTEGER",
+	/* Used by: vdbe_listing */
+	/*  88 */ "vdbe_listing",
+	/*  89 */ "INTEGER",
+	/* Used by: vdbe_trace */
+	/*  90 */ "vdbe_trace",
+	/*  91 */ "INTEGER",
+	/* Used by: where_trace */
+	/*  92 */ "where_trace",
+	/*  93 */ "INTEGER",
 };
 
 /* Definitions of all built-in pragmas */
@@ -79,7 +155,7 @@ typedef struct PragmaName {
 	u8 ePragTyp;		/* PragTyp_XXX value */
 	u8 mPragFlg;		/* Zero or more PragFlg_XXX values */
 	u8 iPragCName;		/* Start of column names in pragCName[] */
-	u8 nPragCName;		/* Num of col names. 0 means use pragma name */
+	u8 nPragCName;		/* Num of col names. */
 	u32 iArg;		/* Extra argument */
 } PragmaName;
 /**
@@ -87,180 +163,138 @@ typedef struct PragmaName {
  * to be sorted. For more info see pragma_locate function.
  */
 static const PragmaName aPragmaName[] = {
-	{ /* zName:     */ "busy_timeout",
-	 /* ePragTyp:  */ PragTyp_BUSY_TIMEOUT,
-	 /* ePragFlg:  */ PragFlg_Result0,
-	 /* ColNames:  */ 31, 1,
-	 /* iArg:      */ 0},
 	{ /* zName:     */ "case_sensitive_like",
-	 /* ePragTyp:  */ PragTyp_CASE_SENSITIVE_LIKE,
-	 /* ePragFlg:  */ PragFlg_NoColumns,
-	 /* ColNames:  */ 0, 0,
-	 /* iArg:      */ 0},
-#if !defined(SQL_OMIT_SCHEMA_PRAGMAS)
+	 /* ePragTyp:  */ PragTyp_FLAG,
+	 /* ePragFlg:  */ PragFlg_Result0 | PragFlg_NoColumns1,
+	 /* ColNames:  */ 58, 1,
+	 /* iArg:      */ LIKE_CASE_SENS_FLAG},
 	{ /* zName:     */ "collation_list",
 	 /* ePragTyp:  */ PragTyp_COLLATION_LIST,
 	 /* ePragFlg:  */ PragFlg_Result0,
-	 /* ColNames:  */ 21, 2,
+	 /* ColNames:  */ 38, 2,
 	 /* iArg:      */ 0},
-#endif
-#if !defined(SQL_OMIT_FLAG_PRAGMAS)
 	{ /* zName:     */ "count_changes",
 	 /* ePragTyp:  */ PragTyp_FLAG,
 	 /* ePragFlg:  */ PragFlg_Result0 | PragFlg_NoColumns1,
-	 /* ColNames:  */ 0, 0,
+	 /* ColNames:  */ 60, 1,
 	 /* iArg:      */ SQL_CountRows},
-#endif
-#if !defined(SQL_OMIT_FLAG_PRAGMAS)
 	{ /* zName:     */ "defer_foreign_keys",
 	 /* ePragTyp:  */ PragTyp_FLAG,
 	 /* ePragFlg:  */ PragFlg_Result0 | PragFlg_NoColumns1,
-	 /* ColNames:  */ 0, 0,
+	 /* ColNames:  */ 62, 1,
 	 /* iArg:      */ SQL_DeferFKs},
-#endif
 	{ /* zName:     */ "foreign_key_list",
 	 /* ePragTyp:  */ PragTyp_FOREIGN_KEY_LIST,
 	 /* ePragFlg:  */
 	 PragFlg_NeedSchema | PragFlg_Result1 | PragFlg_SchemaOpt,
-	 /* ColNames:  */ 23, 8,
+	 /* ColNames:  */ 42, 8,
 	 /* iArg:      */ 0},
-#if !defined(SQL_OMIT_FLAG_PRAGMAS)
 	{ /* zName:     */ "full_column_names",
 	 /* ePragTyp:  */ PragTyp_FLAG,
 	 /* ePragFlg:  */ PragFlg_Result0 | PragFlg_NoColumns1,
-	 /* ColNames:  */ 0, 0,
+	 /* ColNames:  */ 64, 1,
 	 /* iArg:      */ SQL_FullColNames},
-#endif
-#if !defined(SQL_OMIT_SCHEMA_PRAGMAS)
 	{ /* zName:     */ "index_info",
 	 /* ePragTyp:  */ PragTyp_INDEX_INFO,
 	 /* ePragFlg:  */
 	 PragFlg_NeedSchema | PragFlg_Result1 | PragFlg_SchemaOpt,
-	 /* ColNames:  */ 10, 6,
+	 /* ColNames:  */ 20, 6,
 	 /* iArg:      */ 1},
 	{ /* zName:     */ "index_list",
 	 /* ePragTyp:  */ PragTyp_INDEX_LIST,
 	 /* ePragFlg:  */
 	 PragFlg_NeedSchema | PragFlg_Result1 | PragFlg_SchemaOpt,
-	 /* ColNames:  */ 16, 5,
+	 /* ColNames:  */ 32, 3,
 	 /* iArg:      */ 0},
-#endif
-#if defined(SQL_DEBUG) && !defined(SQL_OMIT_PARSER_TRACE)
+#if defined(SQL_DEBUG)
 	{ /* zName:     */ "parser_trace",
-	 /* ePragTyp:  */ PragTyp_PARSER_TRACE,
-	 /* ePragFlg:  */ 0,
-	 /* ColNames:  */ 0, 0,
-	 /* iArg:      */ 0},
+	 /* ePragTyp:  */ PragTyp_FLAG,
+	 /* ePragFlg:  */ PragFlg_Result0 | PragFlg_NoColumns1,
+	 /* ColNames:  */ 66, 1,
+	 /* iArg:      */ PARSER_TRACE_FLAG},
 #endif
-#if !defined(SQL_OMIT_FLAG_PRAGMAS)
-	{ /* zName:     */ "query_only",
-	 /* ePragTyp:  */ PragTyp_FLAG,
-	 /* ePragFlg:  */ PragFlg_Result0 | PragFlg_NoColumns1,
-	 /* ColNames:  */ 0, 0,
-	 /* iArg:      */ SQL_QueryOnly},
-	{ /* zName:     */ "read_uncommitted",
-	 /* ePragTyp:  */ PragTyp_FLAG,
-	 /* ePragFlg:  */ PragFlg_Result0 | PragFlg_NoColumns1,
-	 /* ColNames:  */ 0, 0,
-	 /* iArg:      */ SQL_ReadUncommitted},
 	{ /* zName:     */ "recursive_triggers",
 	 /* ePragTyp:  */ PragTyp_FLAG,
 	 /* ePragFlg:  */ PragFlg_Result0 | PragFlg_NoColumns1,
-	 /* ColNames:  */ 0, 0,
+	 /* ColNames:  */ 68, 1,
 	 /* iArg:      */ SQL_RecTriggers},
-#endif
-#if !defined(SQL_OMIT_FLAG_PRAGMAS)
 	{ /* zName:     */ "reverse_unordered_selects",
 	 /* ePragTyp:  */ PragTyp_FLAG,
 	 /* ePragFlg:  */ PragFlg_Result0 | PragFlg_NoColumns1,
-	 /* ColNames:  */ 0, 0,
+	 /* ColNames:  */ 70, 1,
 	 /* iArg:      */ SQL_ReverseOrder},
-#endif
-#if !defined(SQL_OMIT_FLAG_PRAGMAS) && defined(SQL_ENABLE_SELECTTRACE)
+#if defined(SQL_DEBUG)
 	{ /* zName:     */ "select_trace",
 	/* ePragTyp:  */ PragTyp_FLAG,
 	/* ePragFlg:  */ PragFlg_Result0 | PragFlg_NoColumns1,
-	/* ColNames:  */ 0, 0,
+	/* ColNames:  */ 72, 1,
 	/* iArg:      */ SQL_SelectTrace},
 #endif
-#if !defined(SQL_OMIT_FLAG_PRAGMAS)
 	{ /* zName:     */ "short_column_names",
 	 /* ePragTyp:  */ PragTyp_FLAG,
 	 /* ePragFlg:  */ PragFlg_Result0 | PragFlg_NoColumns1,
-	 /* ColNames:  */ 0, 0,
+	 /* ColNames:  */ 73, 1,
 	 /* iArg:      */ SQL_ShortColNames},
-#endif
 	{ /* zName:     */ "sql_compound_select_limit",
 	/* ePragTyp:  */ PragTyp_COMPOUND_SELECT_LIMIT,
 	/* ePragFlg:  */ PragFlg_Result0,
-	/* ColNames:  */ 0, 0,
+	/* ColNames:  */ 76, 1,
 	/* iArg:      */ 0},
 	{ /* zName:     */ "sql_default_engine",
 	 /* ePragTyp:  */ PragTyp_DEFAULT_ENGINE,
 	 /* ePragFlg:  */ PragFlg_Result0 | PragFlg_NoColumns1,
-	 /* ColNames:  */ 0, 0,
+	 /* ColNames:  */ 78, 1,
 	 /* iArg:      */ 0},
-#if !defined(SQL_OMIT_FLAG_PRAGMAS)
 #if defined(SQL_DEBUG)
 	{ /* zName:     */ "sql_trace",
 	 /* ePragTyp:  */ PragTyp_FLAG,
 	 /* ePragFlg:  */ PragFlg_Result0 | PragFlg_NoColumns1,
-	 /* ColNames:  */ 0, 0,
+	 /* ColNames:  */ 80, 1,
 	 /* iArg:      */ SQL_SqlTrace},
 #endif
-#endif
-#if !defined(SQL_OMIT_SCHEMA_PRAGMAS)
 	{ /* zName:     */ "stats",
 	 /* ePragTyp:  */ PragTyp_STATS,
 	 /* ePragFlg:  */
 	 PragFlg_NeedSchema | PragFlg_Result0 | PragFlg_SchemaReq,
-	 /* ColNames:  */ 6, 4,
+	 /* ColNames:  */ 12, 4,
 	 /* iArg:      */ 0},
-#endif
-#if !defined(SQL_OMIT_SCHEMA_PRAGMAS)
 	{ /* zName:     */ "table_info",
 	 /* ePragTyp:  */ PragTyp_TABLE_INFO,
 	 /* ePragFlg:  */
 	 PragFlg_NeedSchema | PragFlg_Result1 | PragFlg_SchemaOpt,
 	 /* ColNames:  */ 0, 6,
 	 /* iArg:      */ 0},
-#endif
-#if !defined(SQL_OMIT_FLAG_PRAGMAS)
 #if defined(SQL_DEBUG)
 	{ /* zName:     */ "vdbe_addoptrace",
 	 /* ePragTyp:  */ PragTyp_FLAG,
 	 /* ePragFlg:  */ PragFlg_Result0 | PragFlg_NoColumns1,
-	 /* ColNames:  */ 0, 0,
+	 /* ColNames:  */ 82, 1,
 	 /* iArg:      */ SQL_VdbeAddopTrace},
 	{ /* zName:     */ "vdbe_debug",
 	 /* ePragTyp:  */ PragTyp_FLAG,
 	 /* ePragFlg:  */ PragFlg_Result0 | PragFlg_NoColumns1,
-	 /* ColNames:  */ 0, 0,
+	 /* ColNames:  */ 84, 1,
 	 /* iArg:      */
 	 SQL_SqlTrace | SQL_VdbeListing | SQL_VdbeTrace},
 	{ /* zName:     */ "vdbe_eqp",
 	 /* ePragTyp:  */ PragTyp_FLAG,
 	 /* ePragFlg:  */ PragFlg_Result0 | PragFlg_NoColumns1,
-	 /* ColNames:  */ 0, 0,
+	 /* ColNames:  */ 86, 1,
 	 /* iArg:      */ SQL_VdbeEQP},
 	{ /* zName:     */ "vdbe_listing",
 	 /* ePragTyp:  */ PragTyp_FLAG,
 	 /* ePragFlg:  */ PragFlg_Result0 | PragFlg_NoColumns1,
-	 /* ColNames:  */ 0, 0,
+	 /* ColNames:  */ 88, 1,
 	 /* iArg:      */ SQL_VdbeListing},
 	{ /* zName:     */ "vdbe_trace",
 	 /* ePragTyp:  */ PragTyp_FLAG,
 	 /* ePragFlg:  */ PragFlg_Result0 | PragFlg_NoColumns1,
-	 /* ColNames:  */ 0, 0,
+	 /* ColNames:  */ 90, 1,
 	 /* iArg:      */ SQL_VdbeTrace},
-#endif
-#endif
-#if !defined(SQL_OMIT_FLAG_PRAGMAS) && defined(SQL_ENABLE_WHERETRACE)
-
 	{ /* zName:     */ "where_trace",
 	/* ePragTyp:  */ PragTyp_FLAG,
 	/* ePragFlg:  */ PragFlg_Result0 | PragFlg_NoColumns1,
-	/* ColNames:  */ 0, 0,
+	/* ColNames:  */ 92, 1,
 	/* iArg:      */ SQL_WhereTrace},
 #endif
 };

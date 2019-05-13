@@ -1,6 +1,7 @@
 #!/usr/bin/env tarantool
 test = require("sqltester")
-test:plan(6)
+-- test:plan(6)
+test:plan(4)
 
 --!./tcltestrunner.lua
 -- 2007 January 26
@@ -23,7 +24,9 @@ test:plan(6)
 -- ["set","testdir",[["file","dirname",["argv0"]]]]
 -- ["source",[["testdir"],"\/tester.tcl"]]
 
-
+--  Disabled until #3694 is resolved.
+--
+if false then
 test:do_execsql_test(
     "tkt2192-1.1",
     [[
@@ -105,6 +108,7 @@ test:do_test(
 
         -- </tkt2192-1.2>
     })
+end -- if false
 
 test:do_execsql_test(
     "tkt2192-2.1",
@@ -146,7 +150,7 @@ test:do_execsql_test(
 test:do_execsql_test(
     "tkt2192-2.3",
     [[
-        SELECT x.a || '/' || x.b || '/' || y.b
+        SELECT CAST(x.a AS TEXT) || '/' || CAST(x.b AS TEXT) || '/' || CAST(y.b AS TEXT)
           FROM v1 AS x JOIN v1 AS y ON x.a=y.a AND x.b<y.b
          ORDER BY x.a, x.b, y.b
     ]], {
@@ -159,7 +163,7 @@ test:do_execsql_test(
     "tkt2192-2.4",
     [[
         CREATE VIEW v2 AS
-        SELECT x.a || '/' || x.b || '/' || y.b AS z
+        SELECT CAST(x.a AS TEXT) || '/' || CAST(x.b AS TEXT) || '/' || CAST(y.b AS TEXT) AS z
           FROM v1 AS x JOIN v1 AS y ON x.a=y.a AND x.b<y.b
          ORDER BY x.a, x.b, y.b;
         SELECT * FROM v2;

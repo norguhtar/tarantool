@@ -40,7 +40,7 @@ box.snapshot()
 _ = box.space.test:delete{3}
 _ = box.space.test:insert{30}
 fio = require('fio')
-#fio.glob(fio.pathjoin(box.cfg.wal_dir, '*.xlog')) -- 1
+test_run:wait_cond(function() return #fio.glob(fio.pathjoin(box.cfg.wal_dir, '*.xlog')) == 1 end) or fio.pathjoin(box.cfg.wal_dir, '*.xlog')
 box.cfg{checkpoint_count = checkpoint_count}
 
 -- Restart the replica. Since xlogs have been removed,
@@ -76,7 +76,7 @@ for i = 1, 3 do box.space.test:delete{i * 10} end
 box.snapshot()
 for i = 1, 3 do box.space.test:insert{i * 100} end
 fio = require('fio')
-#fio.glob(fio.pathjoin(box.cfg.wal_dir, '*.xlog')) -- 1
+test_run:wait_cond(function() return #fio.glob(fio.pathjoin(box.cfg.wal_dir, '*.xlog')) == 1 end) or fio.pathjoin(box.cfg.wal_dir, '*.xlog')
 box.cfg{checkpoint_count = checkpoint_count}
 test_run:cmd("start server replica")
 test_run:cmd("switch replica")
@@ -121,7 +121,7 @@ box.cfg{checkpoint_count = 1}
 box.snapshot()
 box.cfg{checkpoint_count = default_checkpoint_count}
 fio = require('fio')
-#fio.glob(fio.pathjoin(box.cfg.wal_dir, '*.xlog')) == 1
+test_run:wait_cond(function() return #fio.glob(fio.pathjoin(box.cfg.wal_dir, '*.xlog')) == 1 end) or fio.pathjoin(box.cfg.wal_dir, '*.xlog')
 -- Bump vclock on the replica again.
 test_run:cmd("switch replica")
 for i = 1, 10 do box.space.test:replace{2} end
@@ -142,3 +142,23 @@ test_run:cmd("delete server replica")
 test_run:cleanup_cluster()
 box.space.test:drop()
 box.schema.user.revoke('guest', 'replication')
+
+--
+-- gh-4107: rebootstrap fails if the replica was deleted from
+-- the cluster on the master.
+--
+box.schema.user.grant('guest', 'replication')
+test_run:cmd("create server replica with rpl_master=default, script='replication/replica_uuid.lua'")
+start_cmd = string.format("start server replica with args='%s'", require('uuid').new())
+box.space._cluster:get(2) == nil
+test_run:cmd(start_cmd)
+test_run:cmd("stop server replica")
+test_run:cmd("cleanup server replica")
+box.space._cluster:delete(2) ~= nil
+test_run:cmd(start_cmd)
+box.space._cluster:get(2) ~= nil
+test_run:cmd("stop server replica")
+test_run:cmd("cleanup server replica")
+test_run:cmd("delete server replica")
+box.schema.user.revoke('guest', 'replication')
+test_run:cleanup_cluster()

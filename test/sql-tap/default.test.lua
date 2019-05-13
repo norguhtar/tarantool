@@ -28,7 +28,7 @@ test:do_execsql_test(
 		CREATE TABLE t1(
 		rowid INTEGER PRIMARY KEY AUTOINCREMENT, 
 		a INTEGER,
-		b BLOB DEFAULT x'6869'
+		b SCALAR DEFAULT x'6869'
 		);
 		INSERT INTO t1(a) VALUES(1);
 		SELECT a, b from t1;
@@ -66,7 +66,7 @@ test:do_catchsql_test(
 	);
 	]], {
 	-- <default-1.3>
-	1, "default value of column [Y] is not constant"
+	1, "Failed to create space 'T3': default value of column 'Y' is not constant"
 	-- </default-1.3>
 })
 
@@ -105,7 +105,7 @@ test:do_execsql_test(
 	b INT DEFAULT 12345 UNIQUE NOT NULL CHECK( b>=0 AND b<99999 ),
 	c VARCHAR(123) DEFAULT 'hello' NOT NULL,
 	d REAL,
-	e NUMERIC(5,10) DEFAULT 4.36,
+	e FLOAT DEFAULT 4.36,
 	f VARCHAR(15), --COLLATE RTRIM,
 	g INTEGER DEFAULT( 3600*12 )
 	);
@@ -119,7 +119,7 @@ test:do_execsql_test(
 	-- In current situation I don't know what to do, need Kirill's
 	-- advice.
 	-- Bulat
-	1, "integer", 5, "integer", "row1", "text", 5.25, "real", 8.67, "real", "321", "text", 432, "integer"
+	1, "integer", 5, "integer", "row1", "string", 5.25, "number", 8.67, "number", "321", "string", 432, "integer"
 	-- </default-3.1>
 })
 
@@ -173,7 +173,7 @@ test:do_catchsql_test(
 	);
 	]], {
 	-- <default-4.2>
-	1, "default value of column [B] is not constant"
+	1, "Failed to create space 'T2': default value of column 'B' is not constant"
 	-- </default-4.2>
 })
 
@@ -187,7 +187,7 @@ test:do_catchsql_test(
 	);
 	]], {
 	-- <default-4.3>
-	1, "default value of column [B] is not constant"
+	1, "Failed to create space 'T2': default value of column 'B' is not constant"
 	-- </default-4.3>
 })
 
@@ -201,7 +201,7 @@ test:do_catchsql_test(
 	);
 	]], {
 	-- <default-4.4>
-	1, "default value of column [B] is not constant"
+	1, "Failed to create space 'T2': default value of column 'B' is not constant"
 	-- </default-4.4>
 })
 
@@ -214,7 +214,7 @@ test:do_catchsql_test(
         CREATE TABLE t6(id INTEGER PRIMARY KEY, b TEXT DEFAULT(id));
     ]], {
     -- <default-5.1>
-    1, "default value of column [B] is not constant"
+    1, "Failed to create space 'T6': default value of column 'B' is not constant"
     -- </default-5.1>
 })
 
@@ -224,7 +224,7 @@ test:do_catchsql_test(
         CREATE TABLE t6(id INTEGER PRIMARY KEY, b TEXT DEFAULT id);
     ]], {
     -- <default-5.2>
-    1, "near \"id\": syntax error"
+    1, "Syntax error near 'id'"
     -- </default-5.2>
 })
 
@@ -234,7 +234,7 @@ test:do_catchsql_test(
         CREATE TABLE t6(id INTEGER PRIMARY KEY, b TEXT DEFAULT "id");
     ]], {
     -- <default-5.3>
-    1, "near \"\"id\"\": syntax error"
+    1, "Syntax error near '\"id\"'"
     -- </default-5.3>
 })
 

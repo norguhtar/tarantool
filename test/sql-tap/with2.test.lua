@@ -317,7 +317,7 @@ test:do_catchsql_test(4.1, [[
     SELECT * FROM x;
 ]], {
     -- <4.1>
-    1, [[near ")": syntax error]]
+    1, [[Syntax error near ')']]
     -- </4.1>
 })
 
@@ -389,9 +389,9 @@ genstmt(255), {
 local function do_xfer_test(test, test_func, test_name, func, exp, opts)
     local opts = opts or {}
     local exp_xfer_count = opts.exp_xfer_count
-    local before = box.sql.debug().sql_xfer_count
+    local before = box.stat.sql().sql_xfer_count
     test_func(test, test_name, func, exp)
-    local after = box.sql.debug().sql_xfer_count
+    local after = box.stat.sql().sql_xfer_count
     test:is(after - before, exp_xfer_count,
                    test_name .. '-xfer-count')
 end
@@ -519,7 +519,7 @@ test:do_catchsql_test(6.2, [[
     INSERT INTO t2 VALUES(1, 2,);
 ]], {
     -- <6.2>
-    1, [[near ")": syntax error]]
+    1, [[Syntax error near ')']]
     -- </6.2>
 })
 
@@ -528,7 +528,7 @@ test:do_catchsql_test("6.3.1", [[
     INSERT INTO t2 SELECT a, b, FROM t1;
 ]], {
     -- <6.3>
-    1, [[keyword "FROM" is reserved]]
+    1, [[Keyword 'FROM' is reserved. Please use double quotes if 'FROM' is an identifier.]]
     -- </6.3>
 })
 
@@ -537,7 +537,7 @@ test:do_catchsql_test("6.3.2", [[
     INSERT INTO t2 SELECT a, b FROM abc;
 ]], {
     -- <6.3>
-    1, "no such table: ABC"
+    1, "Space 'ABC' does not exist"
     -- </6.3>
 })
 
@@ -546,7 +546,7 @@ test:do_catchsql_test(6.4, [[
     INSERT INTO t2 SELECT a, b, FROM t1 a a a;
 ]], {
     -- <6.4>
-    1, [[keyword "FROM" is reserved]]
+    1, [[Keyword 'FROM' is reserved. Please use double quotes if 'FROM' is an identifier.]]
     -- </6.4>
 })
 
@@ -555,7 +555,7 @@ test:do_catchsql_test(6.5, [[
     DELETE FROM t2 WHERE;
 ]], {
     -- <6.5>
-    1, [[near ";": syntax error]]
+    1, [[Syntax error near ';']]
     -- </6.5>
 })
 
@@ -563,7 +563,7 @@ test:do_catchsql_test(6.6, [[
     WITH x AS (SELECT * FROM t1) DELETE FROM t2 WHERE
 ]], {
     -- <6.6>
-    1, '/near .* syntax error/'
+    1, "Syntax error near '\n'"
     -- </6.6>
 })
 
@@ -571,7 +571,7 @@ test:do_catchsql_test(6.7, [[
     WITH x AS (SELECT * FROM t1) DELETE FROM t2 WHRE 1;
 ]], {
     -- <6.7>
-    1, '/near .* syntax error/'
+    1, "Syntax error near 'WHRE'"
     -- </6.7>
 })
 
@@ -579,7 +579,7 @@ test:do_catchsql_test(6.8, [[
     WITH x AS (SELECT * FROM t1) UPDATE t2 SET a = 10, b = ;
 ]], {
     -- <6.8>
-    1, '/near .* syntax error/'
+    1, "Syntax error near ';'"
     -- </6.8>
 })
 
@@ -587,7 +587,7 @@ test:do_catchsql_test(6.9, [[
     WITH x AS (SELECT * FROM t1) UPDATE t2 SET a = 10, b = 1 WHERE a===b;
 ]], {
     -- <6.9>
-    1, '/near .* syntax error/'
+    1, "Syntax error near '='"
     -- </6.9>
 })
 
@@ -600,7 +600,7 @@ test:do_catchsql_test("6.10", [[
     SELECT * FROM x
 ]], {
     -- <6.10>
-    1, "no such column: C"
+    1, "Can’t resolve field 'C'"
     -- </6.10>
 })
 

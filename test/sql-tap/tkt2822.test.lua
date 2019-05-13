@@ -1,6 +1,6 @@
 #!/usr/bin/env tarantool
 test = require("sqltester")
-test:plan(36)
+test:plan(30)
 
 --!./tcltestrunner.lua
 -- 2007 Dec 4
@@ -163,19 +163,6 @@ test:do_execsql_test(
         -- </tkt2822-3.2>
     })
 
--- Test that if a match cannot be found in the leftmost SELECT, an
--- attempt is made to find a match in subsequent SELECT statements.
---
-test:do_execsql_test(
-    "tkt2822-3.3",
-    [[
-        SELECT a, b, c FROM t1 UNION ALL SELECT a AS x, b, c FROM t2 ORDER BY x;
-    ]], {
-        -- <tkt2822-3.3>
-        1, 3, 9, 2, 6, 18, 3, 9, 27, 4, 12, 36, 5, 15, 45, 6, 18, 54
-        -- </tkt2822-3.3>
-    })
-
 test:do_test(
     "tkt2822-3.4",
     function()
@@ -213,7 +200,7 @@ test:do_catchsql_test(
         SELECT a, b, c FROM t1 UNION ALL SELECT a, b, c FROM t2 ORDER BY x
     ]], {
         -- <tkt2822-4.1>
-        1, "1st ORDER BY term does not match any column in the result set"
+        1, "Error at ORDER BY in place 1: term does not match any column in the result set"
         -- </tkt2822-4.1>
     })
 
@@ -295,61 +282,6 @@ test:do_execsql_test(
         -- </tkt2822-6.1>
     })
 
-test:do_execsql_test(
-    "tkt2822-6.2",
-    [[
-        SELECT p PX, q QX FROM t6a UNION ALL SELECT x XX, y YX FROM t6b
-        ORDER BY PX, YX
-    ]], {
-        -- <tkt2822-6.2>
-        1, 7, 1, 8, 7, 2, 9, 2
-        -- </tkt2822-6.2>
-    })
-
-test:do_execsql_test(
-    "tkt2822-6.3",
-    [[
-        SELECT p PX, q QX FROM t6a UNION ALL SELECT x XX, y YX FROM t6b
-        ORDER BY XX, QX
-    ]], {
-        -- <tkt2822-6.3>
-        1, 7, 1, 8, 7, 2, 9, 2
-        -- </tkt2822-6.3>
-    })
-
-test:do_execsql_test(
-    "tkt2822-6.4",
-    [[
-        SELECT p PX, q QX FROM t6a UNION ALL SELECT x XX, y YX FROM t6b
-        ORDER BY QX, XX
-    ]], {
-        -- <tkt2822-6.4>
-        7, 2, 9, 2, 1, 7, 1, 8
-        -- </tkt2822-6.4>
-    })
-
-test:do_execsql_test(
-    "tkt2822-6.5",
-    [[
-        SELECT p PX, q QX FROM t6a UNION ALL SELECT x XX, y YX FROM t6b
-        ORDER BY t6b.x, QX
-    ]], {
-        -- <tkt2822-6.5>
-        1, 7, 1, 8, 7, 2, 9, 2
-        -- </tkt2822-6.5>
-    })
-
-test:do_execsql_test(
-    "tkt2822-6.6",
-    [[
-        SELECT p PX, q QX FROM t6a UNION ALL SELECT x XX, y YX FROM t6b
-        ORDER BY t6a.q, XX
-    ]], {
-        -- <tkt2822-6.6>
-        7, 2, 9, 2, 1, 7, 1, 8
-        -- </tkt2822-6.6>
-    })
-
 -- More error message tests.  This is really more of a test of the
 -- %r ordinal value formatting capablity added to sql_snprintf()
 -- by ticket #2822.
@@ -366,7 +298,7 @@ test:do_test(
         ]]
     end, {
         -- <tkt2822-7.1>
-        1, "1st ORDER BY term out of range - should be between 1 and 25"
+        1, "Error at ORDER BY in place 1: term out of range - should be between 1 and 25"
         -- </tkt2822-7.1>
     })
 
@@ -376,7 +308,7 @@ test:do_catchsql_test(
         SELECT * FROM t7 ORDER BY 1, 0;
     ]], {
         -- <tkt2822-7.2.1>
-        1, "2nd ORDER BY term out of range - should be between 1 and 25"
+        1, "Error at ORDER BY in place 2: term out of range - should be between 1 and 25"
         -- </tkt2822-7.2.1>
     })
 
@@ -386,7 +318,7 @@ test:do_catchsql_test(
         SELECT * FROM t7 ORDER BY 1, 26;
     ]], {
         -- <tkt2822-7.2.2>
-        1, "2nd ORDER BY term out of range - should be between 1 and 25"
+        1, "Error at ORDER BY in place 2: term out of range - should be between 1 and 25"
         -- </tkt2822-7.2.2>
     })
 
@@ -396,7 +328,7 @@ test:do_catchsql_test(
         SELECT * FROM t7 ORDER BY 1, 65536;
     ]], {
         -- <tkt2822-7.2.3>
-        1, "2nd ORDER BY term out of range - should be between 1 and 25"
+        1, "Error at ORDER BY in place 2: term out of range - should be between 1 and 25"
         -- </tkt2822-7.2.3>
     })
 
@@ -406,7 +338,7 @@ test:do_catchsql_test(
         SELECT * FROM t7 ORDER BY 1, 2, 0;
     ]], {
         -- <tkt2822-7.3>
-        1, "3rd ORDER BY term out of range - should be between 1 and 25"
+        1, "Error at ORDER BY in place 3: term out of range - should be between 1 and 25"
         -- </tkt2822-7.3>
     })
 
@@ -416,7 +348,7 @@ test:do_catchsql_test(
         SELECT * FROM t7 ORDER BY 1, 2, 3, 0;
     ]], {
         -- <tkt2822-7.4>
-        1, "4th ORDER BY term out of range - should be between 1 and 25"
+        1, "Error at ORDER BY in place 4: term out of range - should be between 1 and 25"
         -- </tkt2822-7.4>
     })
 
@@ -426,7 +358,7 @@ test:do_catchsql_test(
         SELECT * FROM t7 ORDER BY 1, 2, 3, 4, 5, 6, 7, 8, 0;
     ]], {
         -- <tkt2822-7.9>
-        1, "9th ORDER BY term out of range - should be between 1 and 25"
+        1, "Error at ORDER BY in place 9: term out of range - should be between 1 and 25"
         -- </tkt2822-7.9>
     })
 
@@ -436,7 +368,7 @@ test:do_catchsql_test(
         SELECT * FROM t7 ORDER BY 1, 2, 3, 4, 5, 6, 7, 8, 9, 0;
     ]], {
         -- <tkt2822-7.10>
-        1, "10th ORDER BY term out of range - should be between 1 and 25"
+        1, "Error at ORDER BY in place 10: term out of range - should be between 1 and 25"
         -- </tkt2822-7.10>
     })
 
@@ -446,7 +378,7 @@ test:do_catchsql_test(
         SELECT * FROM t7 ORDER BY 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 0;
     ]], {
         -- <tkt2822-7.11>
-        1, "11th ORDER BY term out of range - should be between 1 and 25"
+        1, "Error at ORDER BY in place 11: term out of range - should be between 1 and 25"
         -- </tkt2822-7.11>
     })
 
@@ -456,7 +388,7 @@ test:do_catchsql_test(
         SELECT * FROM t7 ORDER BY 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 0;
     ]], {
         -- <tkt2822-7.12>
-        1, "12th ORDER BY term out of range - should be between 1 and 25"
+        1, "Error at ORDER BY in place 12: term out of range - should be between 1 and 25"
         -- </tkt2822-7.12>
     })
 
@@ -466,7 +398,7 @@ test:do_catchsql_test(
         SELECT * FROM t7 ORDER BY 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 13, 0;
     ]], {
         -- <tkt2822-7.13>
-        1, "13th ORDER BY term out of range - should be between 1 and 25"
+        1, "Error at ORDER BY in place 13: term out of range - should be between 1 and 25"
         -- </tkt2822-7.13>
     })
 
@@ -477,7 +409,7 @@ test:do_catchsql_test(
                                  11,12,13,14,15,16,17,18,19, 0
     ]], {
         -- <tkt2822-7.20>
-        1, "20th ORDER BY term out of range - should be between 1 and 25"
+        1, "Error at ORDER BY in place 20: term out of range - should be between 1 and 25"
         -- </tkt2822-7.20>
     })
 
@@ -488,7 +420,7 @@ test:do_catchsql_test(
                                  11,12,13,14,15,16,17,18,19, 20, 0
     ]], {
         -- <tkt2822-7.21>
-        1, "21st ORDER BY term out of range - should be between 1 and 25"
+        1, "Error at ORDER BY in place 21: term out of range - should be between 1 and 25"
         -- </tkt2822-7.21>
     })
 
@@ -499,7 +431,7 @@ test:do_catchsql_test(
                                  11,12,13,14,15,16,17,18,19, 20, 21, 0
     ]], {
         -- <tkt2822-7.22>
-        1, "22nd ORDER BY term out of range - should be between 1 and 25"
+        1, "Error at ORDER BY in place 22: term out of range - should be between 1 and 25"
         -- </tkt2822-7.22>
     })
 

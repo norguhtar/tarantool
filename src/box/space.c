@@ -163,8 +163,8 @@ space_create(struct space *space, struct engine *engine,
 		space->index_map[index_def->iid] = index;
 	}
 	space_fill_index_map(space);
-	rlist_create(&space->parent_fkey);
-	rlist_create(&space->child_fkey);
+	rlist_create(&space->parent_fk_constraint);
+	rlist_create(&space->child_fk_constraint);
 	return 0;
 
 fail_free_indexes:
@@ -223,8 +223,8 @@ space_delete(struct space *space)
 	 * on_replace_dd_trigger on deletion from _trigger.
 	 */
 	assert(space->sql_triggers == NULL);
-	assert(rlist_empty(&space->parent_fkey));
-	assert(rlist_empty(&space->child_fkey));
+	assert(rlist_empty(&space->parent_fk_constraint));
+	assert(rlist_empty(&space->child_fk_constraint));
 	space->vtab->destroy(space);
 }
 
@@ -423,6 +423,15 @@ space_before_replace(struct space *space, struct txn *txn,
 	assert(stmt->old_tuple == NULL && stmt->new_tuple == NULL);
 	stmt->old_tuple = old_tuple;
 	stmt->new_tuple = new_tuple;
+	/*
+	 * A fake row attached to txn_stmt during execution
+	 * of before_replace triggers to store operation type.
+	 * It is pushed to the before_replace trigger in lua.
+	 */
+	struct xrow_header temp_header;
+	temp_header.type = type;
+	assert(stmt->row == NULL);
+	stmt->row = &temp_header;
 
 	int rc = trigger_run(&space->before_replace, txn);
 
@@ -435,6 +444,7 @@ space_before_replace(struct space *space, struct txn *txn,
 	assert(stmt->old_tuple == old_tuple);
 	stmt->old_tuple = NULL;
 	stmt->new_tuple = NULL;
+	stmt->row = NULL;
 
 	if (rc != 0)
 		goto out;
@@ -635,6 +645,12 @@ generic_space_prepare_alter(struct space *old_space, struct space *new_space)
 	(void)old_space;
 	(void)new_space;
 	return 0;
+}
+
+void
+generic_space_invalidate(struct space *space)
+{
+	(void)space;
 }
 
 /* }}} */

@@ -4,22 +4,25 @@ test_run = require('test_run').new()
 engine = test_run:get_cfg('engine')
 ---
 ...
-box.sql.execute('pragma sql_default_engine=\''..engine..'\'')
+box.execute('pragma sql_default_engine=\''..engine..'\'')
 ---
+- row_count: 0
 ...
 -- Verify that constraints on 'view' option are working.
 -- box.cfg()
 -- Create space and view.
-box.sql.execute("CREATE TABLE t1(a INT, b INT, PRIMARY KEY(a, b));");
+box.execute("CREATE TABLE t1(a INT, b INT, PRIMARY KEY(a, b));");
 ---
+- row_count: 1
 ...
-box.sql.execute("CREATE VIEW v1 AS SELECT a+b FROM t1;");
+box.execute("CREATE VIEW v1 AS SELECT a+b FROM t1;");
 ---
+- row_count: 1
 ...
 -- View can't have any indexes.
-box.sql.execute("CREATE INDEX i1 on v1(a);");
+box.execute("CREATE INDEX i1 on v1(a);");
 ---
-- error: views can not be indexed
+- error: 'Can''t create or modify index ''I1'' in space ''V1'': views can not be indexed'
 ...
 v1 = box.space.V1;
 ---
@@ -73,7 +76,7 @@ box.schema.create_space('view', {view = true})
 - error: Illegal parameters, unexpected option 'view'
 ...
 -- Space referenced by a view can't be renamed.
-box.sql.execute("ALTER TABLE t1 RENAME TO new_name;")
+box.execute("ALTER TABLE t1 RENAME TO new_name;")
 ---
 - error: 'Can''t modify space ''T1'': can not rename space which is referenced by
     view'
@@ -114,30 +117,36 @@ sp = box.space._space:replace(raw_sp);
 - error: 'Failed to execute SQL statement: SELECT 1;'
 ...
 -- Can't drop space via Lua if at least one view refers to it.
-box.sql.execute('CREATE TABLE t2(id INT PRIMARY KEY);');
+box.execute('CREATE TABLE t2(id INT PRIMARY KEY);');
 ---
+- row_count: 1
 ...
-box.sql.execute('CREATE VIEW v2 AS SELECT * FROM t2;');
+box.execute('CREATE VIEW v2 AS SELECT * FROM t2;');
 ---
+- row_count: 1
 ...
 box.space.T2:drop();
 ---
 - error: 'Can''t drop space ''T2'': other views depend on this space'
 ...
-box.sql.execute('DROP VIEW v2;');
+box.execute('DROP VIEW v2;');
 ---
+- row_count: 1
 ...
-box.sql.execute('DROP TABLE t2;');
+box.execute('DROP TABLE t2;');
 ---
+- row_count: 1
 ...
 -- Check that alter transfers reference counter.
-box.sql.execute("CREATE TABLE t2(id INTEGER PRIMARY KEY);");
+box.execute("CREATE TABLE t2(id INTEGER PRIMARY KEY);");
 ---
+- row_count: 1
 ...
-box.sql.execute("CREATE VIEW v2 AS SELECT * FROM t2;");
+box.execute("CREATE VIEW v2 AS SELECT * FROM t2;");
 ---
+- row_count: 1
 ...
-box.sql.execute("DROP TABLE t2;");
+box.execute("DROP TABLE t2;");
 ---
 - error: 'Can''t drop space ''T2'': other views depend on this space'
 ...
@@ -147,104 +156,162 @@ sp = box.space._space:get{box.space.T2.id};
 sp = box.space._space:replace(sp);
 ---
 ...
-box.sql.execute("DROP TABLE t2;");
+box.execute("DROP TABLE t2;");
 ---
 - error: 'Can''t drop space ''T2'': other views depend on this space'
 ...
-box.sql.execute("DROP VIEW v2;");
+box.execute("DROP VIEW v2;");
 ---
+- row_count: 1
 ...
-box.sql.execute("DROP TABLE t2;");
+box.execute("DROP TABLE t2;");
 ---
+- row_count: 1
 ...
 -- gh-3849: failed to create VIEW in form of AS VALUES (const);
 --
-box.sql.execute("CREATE VIEW cv AS VALUES(1);")
+box.execute("CREATE VIEW cv AS VALUES(1);")
 ---
+- row_count: 1
 ...
-box.sql.execute("CREATE VIEW cv1 AS VALUES('k', 1);")
+box.execute("CREATE VIEW cv1 AS VALUES('k', 1);")
 ---
+- row_count: 1
 ...
-box.sql.execute("CREATE VIEW cv2 AS VALUES((VALUES((SELECT 1))));")
+box.execute("CREATE VIEW cv2 AS VALUES((VALUES((SELECT 1))));")
 ---
+- row_count: 1
 ...
-box.sql.execute("CREATE VIEW cv3 AS VALUES(1+2, 1+2);")
+box.execute("CREATE VIEW cv3 AS VALUES(1+2, 1+2);")
 ---
+- row_count: 1
 ...
-box.sql.execute("DROP VIEW cv;")
+box.execute("DROP VIEW cv;")
 ---
+- row_count: 1
 ...
-box.sql.execute("DROP VIEW cv1;")
+box.execute("DROP VIEW cv1;")
 ---
+- row_count: 1
 ...
-box.sql.execute("DROP VIEW cv2;")
+box.execute("DROP VIEW cv2;")
 ---
+- row_count: 1
 ...
-box.sql.execute("DROP VIEW cv3;")
+box.execute("DROP VIEW cv3;")
 ---
+- row_count: 1
 ...
 -- gh-3815: AS VALUES syntax didn't incerement VIEW reference
 -- counter. Moreover, tables within sub-select were not accounted
 -- as well.
 --
-box.sql.execute("CREATE TABLE b (s1 INT PRIMARY KEY);")
+box.execute("CREATE TABLE b (s1 INT PRIMARY KEY);")
 ---
+- row_count: 1
 ...
-box.sql.execute("CREATE VIEW bv (wombat) AS VALUES ((SELECT 'k' FROM b));")
+box.execute("CREATE VIEW bv (wombat) AS VALUES ((SELECT 'k' FROM b));")
 ---
+- row_count: 1
 ...
-box.sql.execute("DROP TABLE b;")
+box.execute("DROP TABLE b;")
 ---
 - error: 'Can''t drop space ''B'': other views depend on this space'
 ...
-box.sql.execute("DROP VIEW bv;")
+box.execute("DROP VIEW bv;")
 ---
+- row_count: 1
 ...
-box.sql.execute("DROP TABLE b;")
+box.execute("DROP TABLE b;")
 ---
+- row_count: 1
 ...
-box.sql.execute("CREATE TABLE b (s1 INT PRIMARY KEY);")
+box.execute("CREATE TABLE b (s1 INT PRIMARY KEY);")
 ---
+- row_count: 1
 ...
-box.sql.execute("CREATE TABLE c (s1 INT PRIMARY KEY);")
+box.execute("CREATE TABLE c (s1 INT PRIMARY KEY);")
 ---
+- row_count: 1
 ...
-box.sql.execute("CREATE VIEW bcv AS SELECT * FROM b WHERE s1 IN (SELECT * FROM c);")
+box.execute("CREATE VIEW bcv AS SELECT * FROM b WHERE s1 IN (SELECT * FROM c);")
 ---
+- row_count: 1
 ...
-box.sql.execute("DROP TABLE c;")
+box.execute("DROP TABLE c;")
 ---
 - error: 'Can''t drop space ''C'': other views depend on this space'
 ...
-box.sql.execute("DROP VIEW bcv;")
+box.execute("DROP VIEW bcv;")
 ---
+- row_count: 1
 ...
-box.sql.execute("DROP TABLE c;")
+box.execute("DROP TABLE c;")
 ---
+- row_count: 1
 ...
-box.sql.execute("CREATE TABLE c (s1 INT PRIMARY KEY);")
+box.execute("CREATE TABLE c (s1 INT PRIMARY KEY);")
 ---
+- row_count: 1
 ...
-box.sql.execute("CREATE VIEW bcv(x, y) AS VALUES((SELECT 'k' FROM b), (VALUES((SELECT 1 FROM b WHERE s1 IN (VALUES((SELECT 1 + c.s1 FROM c)))))))")
+box.execute("CREATE VIEW bcv(x, y) AS VALUES((SELECT 'k' FROM b), (VALUES((SELECT 1 FROM b WHERE s1 IN (VALUES((SELECT 1 + c.s1 FROM c)))))))")
 ---
+- row_count: 1
 ...
-box.sql.execute("DROP TABLE c;")
+box.execute("DROP TABLE c;")
 ---
 - error: 'Can''t drop space ''C'': other views depend on this space'
 ...
 box.space.BCV:drop()
 ---
 ...
-box.sql.execute("DROP TABLE c;")
+box.execute("DROP TABLE c;")
+---
+- row_count: 1
+...
+box.execute("DROP TABLE b;")
+---
+- row_count: 1
+...
+-- gh-3814: make sure that recovery of view processed without
+-- unexpected errors.
+--
+box.snapshot()
+---
+- ok
+...
+box.execute("CREATE TABLE t2 (id INT PRIMARY KEY);")
+---
+- row_count: 1
+...
+box.execute("CREATE VIEW v2 AS SELECT * FROM t2;")
+---
+- row_count: 1
+...
+test_run:cmd('restart server default')
+box.execute("DROP TABLE t2;")
+---
+- error: 'Can''t drop space ''T2'': other views depend on this space'
+...
+box.execute("SELECT * FROM v2;")
+---
+- metadata:
+  - name: ID
+    type: integer
+  rows: []
+...
+box.space.V2:drop()
 ---
 ...
-box.sql.execute("DROP TABLE b;")
+box.space.T2:drop()
 ---
 ...
 -- Cleanup
-box.sql.execute("DROP VIEW v1;");
+box.execute("DROP VIEW v1;");
 ---
+- row_count: 1
 ...
-box.sql.execute("DROP TABLE t1;");
+box.execute("DROP TABLE t1;");
 ---
+- row_count: 1
 ...

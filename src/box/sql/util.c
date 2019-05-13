@@ -41,6 +41,9 @@
 #if HAVE_ISNAN || SQL_HAVE_ISNAN
 #include <math.h>
 #endif
+#include "coll/coll.h"
+#include <unicode/ucasemap.h>
+#include "errinj.h"
 
 /*
  * Routine needed to support the testcase() macro.
@@ -211,42 +214,6 @@ sqlErrorWithMsg(sql * db, int err_code, const char *zFormat, ...)
 }
 
 /*
- * Add an error message to pParse->zErrMsg and increment pParse->nErr.
- * The following formatting characters are allowed:
- *
- *      %s      Insert a string
- *      %z      A string that should be freed after use
- *      %d      Insert an integer
- *      %T      Insert a token
- *      %S      Insert the first element of a SrcList
- *
- * This function should be used to report any error that occurs while
- * compiling an SQL statement (i.e. within sql_prepare()). The
- * last thing the sql_prepare() function does is copy the error
- * stored by this function into the database handle using sqlError().
- * Functions sqlError() or sqlErrorWithMsg() should be used
- * during statement execution (sql_step() etc.).
- */
-void
-sqlErrorMsg(Parse * pParse, const char *zFormat, ...)
-{
-	char *zMsg;
-	va_list ap;
-	sql *db = pParse->db;
-	va_start(ap, zFormat);
-	zMsg = sqlVMPrintf(db, zFormat, ap);
-	va_end(ap);
-	if (db->suppressErr) {
-		sqlDbFree(db, zMsg);
-	} else {
-		pParse->nErr++;
-		sqlDbFree(db, pParse->zErrMsg);
-		pParse->zErrMsg = zMsg;
-		pParse->rc = SQL_ERROR;
-	}
-}
-
-/*
  * Convert an SQL-style quoted string into a normal string by removing
  * the quote characters.  The conversion is done in-place.  If the
  * input does not begin with a quote character, then this routine
@@ -289,33 +256,77 @@ sqlDequote(char *z)
 	z[j] = 0;
 }
 
-
-void
-sqlNormalizeName(char *z)
+int
+sql_normalize_name(char *dst, int dst_size, const char *src, int src_len)
 {
-	char quote;
-	int i=0;
-	if (z == 0)
-		return;
-	quote = z[0];
-	if (sqlIsquote(quote)){
-		sqlDequote(z);
-		return;
+	assert(src != NULL);
+	assert(dst != NULL && dst_size > 0);
+	if (sqlIsquote(src[0])){
+		memcpy(dst, src, src_len);
+		dst[src_len] = '\0';
+		sqlDequote(dst);
+		return src_len + 1;
 	}
-	while(z[i]!=0){
-		z[i] = (char)sqlToupper(z[i]);
-		i++;
-	}
+	UErrorCode status = U_ZERO_ERROR;
+	assert(icu_ucase_default_map != NULL);
+	int len = ucasemap_utf8ToUpper(icu_ucase_default_map, dst, dst_size,
+				       src, src_len, &status);
+	assert(U_SUCCESS(status) || status == U_BUFFER_OVERFLOW_ERROR);
+	return len + 1;
 }
 
-/*
- * Generate a Token object from a string
- */
-void
-sqlTokenInit(Token * p, char *z)
+char *
+sql_normalized_name_db_new(struct sql *db, const char *name, int len)
 {
-	p->z = z;
-	p->n = sqlStrlen30(z);
+	int size = len + 1;
+	ERROR_INJECT(ERRINJ_SQL_NAME_NORMALIZATION, {
+		diag_set(OutOfMemory, size, "sqlDbMallocRawNN", "res");
+		return NULL;
+	});
+	char *res = sqlDbMallocRawNN(db, size);
+	if (res == NULL)
+		return NULL;
+	int rc = sql_normalize_name(res, size, name, len);
+	if (rc <= size)
+		return res;
+
+	size = rc;
+	res = sqlDbReallocOrFree(db, res, size);
+	if (res == NULL)
+		return NULL;
+	if (sql_normalize_name(res, size, name, len) > size)
+		unreachable();
+	return res;
+}
+
+char *
+sql_normalized_name_region_new(struct region *r, const char *name, int len)
+{
+	int size = len + 1;
+	ERROR_INJECT(ERRINJ_SQL_NAME_NORMALIZATION, {
+		diag_set(OutOfMemory, size, "region_alloc", "res");
+		return NULL;
+	});
+	size_t region_svp = region_used(r);
+	char *res = region_alloc(r, size);
+	if (res == NULL)
+		goto oom_error;
+	int rc = sql_normalize_name(res, size, name, len);
+	if (rc <= size)
+		return res;
+
+	size = rc;
+	region_truncate(r, region_svp);
+	res = region_alloc(r, size);
+	if (res == NULL)
+		goto oom_error;
+	if (sql_normalize_name(res, size, name, len) > size)
+		unreachable();
+	return res;
+
+oom_error:
+	diag_set(OutOfMemory, size, "region_alloc", "res");
+	return NULL;
 }
 
 /* Convenient short-hand */

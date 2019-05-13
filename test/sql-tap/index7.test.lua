@@ -292,7 +292,7 @@ test:do_catchsql_test(
         CREATE TABLE t1 (a INTEGER PRIMARY KEY, b INTEGER);
         CREATE UNIQUE INDEX i ON t1 (a) WHERE a = 3;
     ]], {
-        1, "keyword \"WHERE\" is reserved"
+        1, "Keyword 'WHERE' is reserved. Please use double quotes if 'WHERE' is an identifier."
     })
 
 -- Currently, when a user tries to create index (or primary key,
@@ -397,6 +397,6 @@ test:do_catchsql_test(
                 "_index"."id" = "_space"."id" AND
                 "_space"."name"='TEST8';
         ]],
-        {0, {"pk_TEST8_2",0,"unique_C1_1",1}})
+        {0, {"pk_unnamed_TEST8_2",0,"unique_C1_1",1}})
 
 test:finish_test()

@@ -242,6 +242,13 @@ luaL_checkserializer(struct lua_State *L) {
 }
 
 /**
+ * Initialize serializer with default parameters.
+ * @param cfg Serializer to inherit configuration.
+ */
+void
+luaL_serializer_create(struct luaL_serializer *cfg);
+
+/**
  * Parse configuration table into @a cfg.
  * @param L Lua stack.
  * @param cfg Serializer to inherit configuration.
@@ -304,8 +311,11 @@ struct luaL_field {
  * @param cfg configuration
  * @param index stack index
  * @param field conversion result
+ *
+ * @retval  0 Success.
+ * @retval -1 Error.
  */
-void
+int
 luaL_tofield(struct lua_State *L, struct luaL_serializer *cfg, int index,
 	     struct luaL_field *field);
 
@@ -345,7 +355,8 @@ static inline void
 luaL_checkfield(struct lua_State *L, struct luaL_serializer *cfg, int idx,
 		struct luaL_field *field)
 {
-	luaL_tofield(L, cfg, idx, field);
+	if (luaL_tofield(L, cfg, idx, field) < 0)
+		luaT_error(L);
 	if (field->type != MP_EXT)
 		return;
 	luaL_convertfield(L, cfg, idx, field);

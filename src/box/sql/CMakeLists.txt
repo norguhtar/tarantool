@@ -1,7 +1,5 @@
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
   add_definitions(-DSQL_DEBUG=1)
-  add_definitions(-DSQL_ENABLE_SELECTTRACE)
-  add_definitions(-DSQL_ENABLE_WHERETRACE)
 endif()
 
 set(EXT_SRC_DIR ${CMAKE_SOURCE_DIR}/extra)
@@ -35,7 +33,7 @@ add_library(sql STATIC
     delete.c
     expr.c
     fault.c
-    fkey.c
+    fk_constraint.c
     func.c
     global.c
     hash.c
@@ -45,6 +43,7 @@ add_library(sql STATIC
     malloc.c
     os.c
     os_unix.c
+    parse_def.c
     pragma.c
     prepare.c
     printf.c
@@ -52,7 +51,6 @@ add_library(sql STATIC
     resolve.c
     select.c
     status.c
-    table.c
     tokenize.c
     treeview.c
     trigger.c

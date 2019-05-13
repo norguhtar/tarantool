@@ -130,7 +130,7 @@ struct vy_lsm_env {
 /** Create a common LSM tree environment. */
 int
 vy_lsm_env_create(struct vy_lsm_env *env, const char *path,
-		  int64_t *p_generation,
+		  int64_t *p_generation, struct tuple_format *key_format,
 		  vy_upsert_thresh_cb upsert_thresh_cb,
 		  void *upsert_thresh_arg);
 
@@ -199,6 +199,12 @@ struct vy_lsm {
 	struct key_def *cmp_def;
 	/** Key definition passed by the user. */
 	struct key_def *key_def;
+	/**
+	 * Key definition to extract primary key parts from
+	 * a secondary key. NULL if this LSM tree corresponds
+	 * to a primary index.
+	 */
+	struct key_def *pk_in_cmp_def;
 	/**
 	 * If the following flag is set, the index this LSM tree
 	 * is created for is unique and it must be checked for

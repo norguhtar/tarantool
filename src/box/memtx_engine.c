@@ -49,6 +49,12 @@
 #include "schema.h"
 #include "gc.h"
 
+/* sync snapshot every 16MB */
+#define SNAP_SYNC_INTERVAL	(1 << 24)
+
+static void
+checkpoint_cancel(struct checkpoint *ckpt);
+
 /*
  * Memtx yield-in-transaction trigger: roll back the effects
  * of the transaction and mark the transaction as aborted.
@@ -176,14 +182,11 @@ static void
 memtx_engine_shutdown(struct engine *engine)
 {
 	struct memtx_engine *memtx = (struct memtx_engine *)engine;
-	if (mempool_is_initialized(&memtx->tree_iterator_pool))
-		mempool_destroy(&memtx->tree_iterator_pool);
+	if (memtx->checkpoint != NULL)
+		checkpoint_cancel(memtx->checkpoint);
+	mempool_destroy(&memtx->iterator_pool);
 	if (mempool_is_initialized(&memtx->rtree_iterator_pool))
 		mempool_destroy(&memtx->rtree_iterator_pool);
-	if (mempool_is_initialized(&memtx->hash_iterator_pool))
-		mempool_destroy(&memtx->hash_iterator_pool);
-	if (mempool_is_initialized(&memtx->bitset_iterator_pool))
-		mempool_destroy(&memtx->bitset_iterator_pool);
 	mempool_destroy(&memtx->index_extent_pool);
 	slab_cache_destroy(&memtx->index_slab_cache);
 	small_alloc_destroy(&memtx->alloc);
@@ -576,7 +579,6 @@ struct checkpoint {
 	 * read view iterators.
 	 */
 	struct rlist entries;
-	uint64_t snap_io_rate_limit;
 	struct cord cord;
 	bool waiting_for_snap_thread;
 	/** The vclock of the snapshot file. */
@@ -600,8 +602,11 @@ checkpoint_new(const char *snap_dirname, uint64_t snap_io_rate_limit)
 	}
 	rlist_create(&ckpt->entries);
 	ckpt->waiting_for_snap_thread = false;
-	xdir_create(&ckpt->dir, snap_dirname, SNAP, &INSTANCE_UUID);
-	ckpt->snap_io_rate_limit = snap_io_rate_limit;
+	struct xlog_opts opts = xlog_opts_default;
+	opts.rate_limit = snap_io_rate_limit;
+	opts.sync_interval = SNAP_SYNC_INTERVAL;
+	opts.free_cache = true;
+	xdir_create(&ckpt->dir, snap_dirname, SNAP, &INSTANCE_UUID, &opts);
 	vclock_create(&ckpt->vclock);
 	ckpt->touch = false;
 	return ckpt;
@@ -619,6 +624,20 @@ checkpoint_delete(struct checkpoint *ckpt)
 	free(ckpt);
 }
 
+static void
+checkpoint_cancel(struct checkpoint *ckpt)
+{
+	/*
+	 * Cancel the checkpoint thread if it's running and wait
+	 * for it to terminate so as to eliminate the possibility
+	 * of use-after-free.
+	 */
+	if (ckpt->waiting_for_snap_thread) {
+		tt_pthread_cancel(ckpt->cord.id);
+		tt_pthread_join(ckpt->cord.id, NULL);
+	}
+	checkpoint_delete(ckpt);
+}
 
 static int
 checkpoint_add_space(struct space *sp, void *data)
@@ -665,8 +684,6 @@ checkpoint_f(va_list ap)
 	struct xlog snap;
 	if (xdir_create_xlog(&ckpt->dir, &snap, &ckpt->vclock) != 0)
 		return -1;
-
-	snap.rate_limit = ckpt->snap_io_rate_limit;
 
 	say_info("saving snapshot `%s'", snap.filename);
 	struct checkpoint_entry *entry;
@@ -862,7 +879,8 @@ memtx_initial_join_f(va_list ap)
 	 * snap_dirname and INSTANCE_UUID don't change after start,
 	 * safe to use in another thread.
 	 */
-	xdir_create(&dir, snap_dirname, SNAP, &INSTANCE_UUID);
+	xdir_create(&dir, snap_dirname, SNAP, &INSTANCE_UUID,
+		    &xlog_opts_default);
 	struct xlog_cursor cursor;
 	int rc = xdir_open_cursor(&dir, checkpoint_lsn, &cursor);
 	xdir_destroy(&dir);
@@ -941,6 +959,7 @@ static const struct engine_vtab memtx_engine_vtab = {
 	/* .commit = */ generic_engine_commit,
 	/* .rollback_statement = */ memtx_engine_rollback_statement,
 	/* .rollback = */ memtx_engine_rollback,
+	/* .switch_to_ro = */ generic_engine_switch_to_ro,
 	/* .bootstrap = */ memtx_engine_bootstrap,
 	/* .begin_initial_recovery = */ memtx_engine_begin_initial_recovery,
 	/* .begin_final_recovery = */ memtx_engine_begin_final_recovery,
@@ -1015,7 +1034,8 @@ memtx_engine_new(const char *snap_dirname, bool force_recovery,
 		return NULL;
 	}
 
-	xdir_create(&memtx->snap_dir, snap_dirname, SNAP, &INSTANCE_UUID);
+	xdir_create(&memtx->snap_dir, snap_dirname, SNAP, &INSTANCE_UUID,
+		    &xlog_opts_default);
 	memtx->snap_dir.force_recovery = force_recovery;
 
 	if (xdir_scan(&memtx->snap_dir) != 0)
@@ -1069,6 +1089,8 @@ memtx_engine_new(const char *snap_dirname, bool force_recovery,
 	slab_cache_create(&memtx->index_slab_cache, &memtx->arena);
 	mempool_create(&memtx->index_extent_pool, &memtx->index_slab_cache,
 		       MEMTX_EXTENT_SIZE);
+	mempool_create(&memtx->iterator_pool, cord_slab_cache(),
+		       MEMTX_ITERATOR_SIZE);
 	memtx->num_reserved_extents = 0;
 	memtx->reserved_extents = NULL;
 
@@ -1124,18 +1146,25 @@ memtx_tuple_new(struct tuple_format *format, const char *data, const char *end)
 {
 	struct memtx_engine *memtx = (struct memtx_engine *)format->engine;
 	assert(mp_typeof(*data) == MP_ARRAY);
+	struct tuple *tuple = NULL;
+	struct region *region = &fiber()->gc;
+	size_t region_svp = region_used(region);
+	uint32_t *field_map, field_map_size;
+	if (tuple_field_map_create(format, data, true, &field_map,
+				   &field_map_size) != 0)
+		goto end;
+
 	size_t tuple_len = end - data;
-	size_t total = sizeof(struct memtx_tuple) + format->field_map_size +
-		tuple_len;
+	size_t total = sizeof(struct memtx_tuple) + field_map_size + tuple_len;
 
 	ERROR_INJECT(ERRINJ_TUPLE_ALLOC, {
 		diag_set(OutOfMemory, total, "slab allocator", "memtx_tuple");
-		return NULL;
+		goto end;
 	});
 	if (unlikely(total > memtx->max_tuple_size)) {
 		diag_set(ClientError, ER_MEMTX_MAX_TUPLE_SIZE, total);
 		error_log(diag_last_error(diag_get()));
-		return NULL;
+		goto end;
 	}
 
 	struct memtx_tuple *memtx_tuple;
@@ -1147,9 +1176,9 @@ memtx_tuple_new(struct tuple_format *format, const char *data, const char *end)
 	}
 	if (memtx_tuple == NULL) {
 		diag_set(OutOfMemory, total, "slab allocator", "memtx_tuple");
-		return NULL;
+		goto end;
 	}
-	struct tuple *tuple = &memtx_tuple->base;
+	tuple = &memtx_tuple->base;
 	tuple->refs = 0;
 	memtx_tuple->version = memtx->snapshot_version;
 	assert(tuple_len <= UINT32_MAX); /* bsize is UINT32_MAX */
@@ -1161,15 +1190,13 @@ memtx_tuple_new(struct tuple_format *format, const char *data, const char *end)
 	 * tuple base, not from memtx_tuple, because the struct
 	 * tuple is not the first field of the memtx_tuple.
 	 */
-	tuple->data_offset = sizeof(struct tuple) + format->field_map_size;
+	tuple->data_offset = sizeof(struct tuple) + field_map_size;
 	char *raw = (char *) tuple + tuple->data_offset;
-	uint32_t *field_map = (uint32_t *) raw;
+	memcpy(raw - field_map_size, field_map, field_map_size);
 	memcpy(raw, data, tuple_len);
-	if (tuple_init_field_map(format, field_map, raw, true)) {
-		memtx_tuple_delete(format, tuple);
-		return NULL;
-	}
 	say_debug("%s(%zu) = %p", __func__, tuple_len, memtx_tuple);
+end:
+	region_truncate(region, region_svp);
 	return tuple;
 }
 

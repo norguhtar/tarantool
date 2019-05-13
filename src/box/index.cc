@@ -37,7 +37,7 @@
 #include "iproto_constants.h"
 #include "txn.h"
 #include "rmean.h"
-#include "info.h"
+#include "info/info.h"
 
 /* {{{ Utilities. **********************************************/
 
@@ -380,6 +380,7 @@ box_index_iterator(uint32_t space_id, uint32_t index_id, int type,
 		return NULL;
 	}
 	txn_commit_ro_stmt(txn);
+	rmean_collect(rmean_box, IPROTO_SELECT, 1);
 	return it;
 }
 

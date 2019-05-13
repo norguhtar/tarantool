@@ -480,7 +480,7 @@ test:do_catchsql_test(
         SELECT * FROM t1 NATURAL RIGHT OUTER JOIN t2;
     ]], {
         -- <join-2.3>
-        1, "RIGHT and FULL OUTER JOINs are not currently supported"
+        1, "Tarantool does not support RIGHT and FULL OUTER JOINs"
         -- </join-2.3>
     })
 
@@ -570,7 +570,7 @@ test:do_catchsql_test(
         SELECT * FROM t1 USING(a) 
     ]], {
         -- <join-3.5>
-        1, "a JOIN clause is required before USING"
+        1, "Syntax error in FROM clause: a JOIN clause is required before ON and USING"
         -- </join-3.5>
     })
 
@@ -580,7 +580,7 @@ test:do_catchsql_test(
         SELECT * FROM t1 JOIN t2 ON t3.a=t2.b;
     ]], {
         -- <join-3.6>
-        1, "no such column: T3.A"
+        1, "Field 'A' was not found in the space 'T3' format"
         -- </join-3.6>
     })
 
@@ -1067,11 +1067,11 @@ end
 jointest("join-12.2", 30, {0, {1}})
 jointest("join-12.3", 63, {0, {1}})
 jointest("join-12.4", 64, {0, {1}})
-jointest("join-12.5", 65, {1, 'at most 64 tables in a join'})
-jointest("join-12.6", 66, {1, 'at most 64 tables in a join'})
-jointest("join-12.7", 127, {1, 'at most 64 tables in a join'})
-jointest("join-12.8", 128, {1, 'at most 64 tables in a join'})
-jointest("join-12.9", 1000, {1, 'at most 64 tables in a join'})
+jointest("join-12.5", 65, {1, 'The number of tables in a join 65 exceeds the limit (64)'})
+jointest("join-12.6", 66, {1, 'The number of tables in a join 66 exceeds the limit (64)'})
+jointest("join-12.7", 127, {1, 'The number of tables in a join 127 exceeds the limit (64)'})
+jointest("join-12.8", 128, {1, 'The number of tables in a join 128 exceeds the limit (64)'})
+jointest("join-12.9", 1000, {1, 'The number of tables in a join 1000 exceeds the limit (64)'})
 -- If sql is built with sql_MEMDEBUG, then the huge number of realloc()
 -- calls made by the following test cases are too time consuming to run.
 -- Without sql_MEMDEBUG, realloc() is fast enough that these are not
@@ -1079,10 +1079,10 @@ jointest("join-12.9", 1000, {1, 'at most 64 tables in a join'})
 --if X(0, "X!capable", [["pragma&&compileoption_diags"]]) then
 --    if X(703, "X!cmd", [=[["expr","[lsearch [db eval {PRAGMA compile_options}] MEMDEBUG]<0"]]=])
 -- then
-jointest("join-12.10", 65534, {1, 'at most 64 tables in a join'})
-jointest("join-12.11", 65535, {1, 'at most 64 tables in a join'})
-jointest("join-12.12", 65536, {1, 'at most 64 tables in a join'})
-jointest("join-12.13", 65537, {1, 'at most 64 tables in a join'})
+jointest("join-12.10", 65534, {1, 'The number of tables in a join 65534 exceeds the limit (64)'})
+jointest("join-12.11", 65535, {1, 'The number of tables in a join 65535 exceeds the limit (64)'})
+jointest("join-12.12", 65536, {1, 'The number of tables in a join 65536 exceeds the limit (64)'})
+jointest("join-12.13", 65537, {1, 'The number of tables in a join 65537 exceeds the limit (64)'})
 --    end
 --end
 

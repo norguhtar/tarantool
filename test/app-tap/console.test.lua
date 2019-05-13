@@ -21,7 +21,7 @@ local EOL = "\n...\n"
 
 test = tap.test("console")
 
-test:plan(59)
+test:plan(72)
 
 -- Start console and connect to it
 local server = console.listen(CONSOLE_SOCKET)
@@ -77,11 +77,27 @@ test:is(yaml.decode(client:read(EOL)), '', "clear delimiter")
 
 --
 -- gh-3476: yaml.encode encodes 'false' and 'true' incorrectly.
+-- gh-3662: yaml.encode encodes booleans with multiline format.
+-- gh-3583: yaml.encode encodes null incorrectly.
 --
+
 test:is(type(yaml.decode(yaml.encode('false'))), 'string')
 test:is(type(yaml.decode(yaml.encode('true'))), 'string')
 test:is(type(yaml.decode(yaml.encode({a = 'false'})).a), 'string')
 test:is(type(yaml.decode(yaml.encode({a = 'false'})).a), 'string')
+
+test:is(yaml.encode(false), "--- false\n...\n")
+test:is(yaml.encode(true), "--- true\n...\n")
+test:is(yaml.encode('false'), "--- 'false'\n...\n")
+test:is(yaml.encode('true'), "--- 'true'\n...\n")
+test:is(yaml.encode(nil), "--- null\n...\n")
+
+test:is(yaml.decode('false'), false)
+test:is(yaml.decode('no'), false)
+test:is(yaml.decode('true'), true)
+test:is(yaml.decode('yes'), true)
+test:is(yaml.decode('~'), nil)
+test:is(yaml.decode('null'), nil)
 
 box.cfg{
     listen=IPROTO_SOCKET;
@@ -254,6 +270,18 @@ box.session.on_auth(nil, console_on_auth_error)
 box.session.on_connect(nil, console_on_connect)
 box.session.on_disconnect(nil, console_on_disconnect)
 box.session.on_auth(nil, console_on_auth)
+
+
+--
+-- gh-2027: Fix custom delimiter for telnet connection.
+--
+client = socket.tcp_connect("unix/", CONSOLE_SOCKET)
+_ = client:read(128)
+client:write("console = require('console'); console.delimiter('#');\n")
+test:is(yaml.decode(client:read(EOL))[1], nil, "session type")
+client:write("box.NULL#\r\n")
+test:is(yaml.decode(client:read(EOL))[1], box.NULL, "test new delimiter")
+client:close()
 
 --
 -- gh-2642 "box.session.type()"

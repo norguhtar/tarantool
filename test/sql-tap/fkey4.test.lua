@@ -30,7 +30,7 @@ test:do_catchsql_test(
         DELETE FROM p1 WHERE a = 2;
     ]], {
         -- <fkey8-1.2>
-        1, "NOT NULL constraint failed: C1.B"
+        1, "Failed to execute SQL statement: NOT NULL constraint failed: C1.B"
         -- </fkey8-1.2>
     })
 
@@ -58,7 +58,7 @@ test:do_execsql_test(
         DROP TABLE IF EXISTS p1;
         CREATE TABLE p1(a INT PRIMARY KEY);
         CREATE TABLE c1(b INT PRIMARY KEY REFERENCES p1 ON DELETE CASCADE);
-        CREATE TRIGGER ct1 AFTER DELETE ON c1 BEGIN INSERT INTO p1 VALUES(0); END;
+        CREATE TRIGGER ct1 AFTER DELETE ON c1 FOR EACH ROW BEGIN INSERT INTO p1 VALUES(0); END;
         INSERT INTO p1 VALUES (1), (2), (3);
         INSERT INTO c1 VALUES (2);
         DELETE FROM p1 WHERE a = 2;
@@ -83,7 +83,7 @@ test:do_catchsql_test(
         DELETE FROM p1 WHERE a = 2;
     ]], {
         -- <fkey8-1.5>
-        1, "FOREIGN KEY constraint failed"
+        1, "Failed to execute SQL statement: FOREIGN KEY constraint failed"
         -- </fkey8-1.5>
     })
 
@@ -159,7 +159,7 @@ test:do_catchsql_test(
         UPDATE OR IGNORE p1 SET a = 4 WHERE a = 2;
     ]], {
         -- <fkey8-1.9>
-        1, "NOT NULL constraint failed: C1.B"
+        1, "Failed to execute SQL statement: NOT NULL constraint failed: C1.B"
         -- </fkey8-1.9>
     })
 
@@ -203,7 +203,7 @@ test:do_catchsql_test(
         INSERT OR REPLACE INTO p1 VALUES(2, 'two');
     ]], {
         -- <fkey8-2.2>
-        1, "FOREIGN KEY constraint failed"
+        1, "Failed to execute SQL statement: FOREIGN KEY constraint failed"
         -- </fkey8-2.2>
     })
 
@@ -243,7 +243,7 @@ test:do_execsql_test(
         INSERT INTO c3 VALUES(1);
         INSERT INTO c3 VALUES(2);
 
-        CREATE TRIGGER p3d AFTER DELETE ON p3 WHEN old.a=1 BEGIN
+        CREATE TRIGGER p3d AFTER DELETE ON p3 FOR EACH ROW WHEN old.a=1 BEGIN
             INSERT OR REPLACE INTO p3 VALUES(2, 'three');
         END;
     ]], {
@@ -263,7 +263,7 @@ test:do_execsql_test(
         INSERT INTO c3 VALUES(1);
         INSERT INTO c3 VALUES(2);
 
-        CREATE TRIGGER p3d AFTER DELETE ON p3 WHEN old.a=1 BEGIN
+        CREATE TRIGGER p3d AFTER DELETE ON p3 FOR EACH ROW WHEN old.a=1 BEGIN
             INSERT OR REPLACE INTO p3 VALUES(2, 'three');
         END;
     ]], {
@@ -278,7 +278,7 @@ test:do_catchsql_test(
         DELETE FROM p3 WHERE a=1;
     ]], {
         -- <fkey8-4.3>
-        1, "FOREIGN KEY constraint failed"
+        1, "Failed to execute SQL statement: FOREIGN KEY constraint failed"
         -- </fkey8-4.3>
     })
 

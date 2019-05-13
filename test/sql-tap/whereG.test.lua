@@ -193,7 +193,7 @@ test:do_catchsql_test(
            AND album.aid=track.aid;
     ]], {
         -- <whereG-2.1>
-        1, "second argument to likelihood() must be a constant between 0.0 and 1.0"
+        1, "Illegal parameters, second argument to likelihood() must be a constant between 0.0 and 1.0"
         -- </whereG-2.1>
     })
 
@@ -207,7 +207,7 @@ test:do_catchsql_test(
            AND album.aid=track.aid;
     ]], {
         -- <whereG-2.2>
-        1, "second argument to likelihood() must be a constant between 0.0 and 1.0"
+        1, "Illegal parameters, second argument to likelihood() must be a constant between 0.0 and 1.0"
         -- </whereG-2.2>
     })
 
@@ -221,7 +221,7 @@ test:do_catchsql_test(
            AND album.aid=track.aid;
     ]], {
         -- <whereG-2.3>
-        1, "second argument to likelihood() must be a constant between 0.0 and 1.0"
+        1, "Illegal parameters, second argument to likelihood() must be a constant between 0.0 and 1.0"
         -- </whereG-2.3>
     })
 
@@ -449,10 +449,12 @@ test:do_execsql_test(
 test:do_execsql_test(
     "7.3",
     [[
-        ANALYZE;
+        -- ANALYZE;
         EXPLAIN QUERY PLAN SELECT name FROM people WHERE height>=180;
     ]],
-    {0,0,0,"SEARCH TABLE PEOPLE USING COVERING INDEX PEOPLE_IDX1" ..
-        " (ANY(ROLE) AND HEIGHT>?)"})
+    -- {0,0,0,"SEARCH TABLE PEOPLE USING COVERING INDEX PEOPLE_IDX1" ..
+    --     " (ANY(ROLE) AND HEIGHT>?)"}
+    {0,0,0,"SCAN TABLE PEOPLE" }
+    )
 
 test:finish_test()

@@ -390,7 +390,7 @@ op_adjust_field_no(struct tuple_update *update, struct update_op *op,
 	if (op->field_no >= 0) {
 		if (op->field_no < field_max)
 			return 0;
-		diag_set(ClientError, ER_NO_SUCH_FIELD, update->index_base +
+		diag_set(ClientError, ER_NO_SUCH_FIELD_NO, update->index_base +
 			 op->field_no);
 		return -1;
 	} else {
@@ -398,7 +398,7 @@ op_adjust_field_no(struct tuple_update *update, struct update_op *op,
 			op->field_no += field_max;
 			return 0;
 		}
-		diag_set(ClientError, ER_NO_SUCH_FIELD, op->field_no);
+		diag_set(ClientError, ER_NO_SUCH_FIELD_NO, op->field_no);
 		return -1;
 	}
 }
@@ -834,6 +834,8 @@ update_create_rope(struct tuple_update *update, const char *tuple_data,
 		return -1;
 	const char *field = tuple_data;
 	const char *end = tuple_data_end;
+	if (field == end)
+		return 0;
 
 	/* Add first field to rope */
 	mp_next(&tuple_data);
@@ -1017,7 +1019,7 @@ update_read_ops(struct tuple_update *update, const char *expr,
 		} else if (field_no < 0) {
 			op->field_no = field_no;
 		} else {
-			diag_set(ClientError, ER_NO_SUCH_FIELD, field_no);
+			diag_set(ClientError, ER_NO_SUCH_FIELD_NO, field_no);
 			return -1;
 		}
 		if (op->meta->read_arg(update->index_base, op, &expr))

@@ -4,8 +4,9 @@ test_run = require('test_run').new()
 engine = test_run:get_cfg('engine')
 ---
 ...
-box.sql.execute('pragma sql_default_engine=\''..engine..'\'')
+box.execute('pragma sql_default_engine=\''..engine..'\'')
 ---
+- row_count: 0
 ...
 work_dir = 'sql/upgrade/1.10/'
 ---
@@ -28,29 +29,9 @@ box.space._space.index['name']:get('_trigger')
 - [328, 1, '_trigger', 'memtx', 0, {}, [{'name': 'name', 'type': 'string'}, {'name': 'space_id',
       'type': 'unsigned'}, {'name': 'opts', 'type': 'map'}]]
 ...
-box.space._space.index['name']:get('_sql_stat1')
----
-- [348, 1, '_sql_stat1', 'memtx', 0, {}, [{'name': 'tbl', 'type': 'string'}, {'name': 'idx',
-      'type': 'string'}, {'name': 'stat', 'type': 'string'}]]
-...
-box.space._space.index['name']:get('_sql_stat4')
----
-- [349, 1, '_sql_stat4', 'memtx', 0, {}, [{'name': 'tbl', 'type': 'string'}, {'name': 'idx',
-      'type': 'string'}, {'name': 'neq', 'type': 'string'}, {'name': 'nlt', 'type': 'string'},
-    {'name': 'ndlt', 'type': 'string'}, {'name': 'sample', 'type': 'scalar'}]]
-...
 box.space._index:get({box.space._space.index['name']:get('_trigger').id, 0})
 ---
 - [328, 0, 'primary', 'tree', {'unique': true}, [[0, 'string']]]
-...
-box.space._index:get({box.space._space.index['name']:get('_sql_stat1').id, 0})
----
-- [348, 0, 'primary', 'tree', {'unique': true}, [[0, 'string'], [1, 'string']]]
-...
-box.space._index:get({box.space._space.index['name']:get('_sql_stat4').id, 0})
----
-- [349, 0, 'primary', 'tree', {'unique': true}, [[0, 'string'], [1, 'string'], [5,
-      'scalar']]]
 ...
 box.space._schema:format()
 ---
@@ -66,17 +47,21 @@ box.space._index:get({box.space._space.index['name']:get('T1').id, 0})
 - [512, 0, 'primary', 'tree', {'unique': true}, [[0, 'unsigned']]]
 ...
 -- test system tables functionality
-box.sql.execute("CREATE TABLE t(x INTEGER PRIMARY KEY);")
+box.execute("CREATE TABLE t(x INTEGER PRIMARY KEY);")
 ---
+- row_count: 1
 ...
-box.sql.execute("CREATE TABLE t_out(x INTEGER PRIMARY KEY);")
+box.execute("CREATE TABLE t_out(x INTEGER PRIMARY KEY);")
 ---
+- row_count: 1
 ...
-box.sql.execute("CREATE TRIGGER t1t AFTER INSERT ON t BEGIN INSERT INTO t_out VALUES(1); END;")
+box.execute("CREATE TRIGGER t1t AFTER INSERT ON t FOR EACH ROW BEGIN INSERT INTO t_out VALUES(1); END;")
 ---
+- row_count: 1
 ...
-box.sql.execute("CREATE TRIGGER t2t AFTER INSERT ON t BEGIN INSERT INTO t_out VALUES(2); END;")
+box.execute("CREATE TRIGGER t2t AFTER INSERT ON t FOR EACH ROW BEGIN INSERT INTO t_out VALUES(2); END;")
 ---
+- row_count: 1
 ...
 box.space._space.index['name']:get('T')
 ---
@@ -100,8 +85,8 @@ t1t.name
 ...
 t1t.opts
 ---
-- {'sql': 'CREATE TRIGGER t1t AFTER INSERT ON t BEGIN INSERT INTO t_out VALUES(1);
-    END;'}
+- {'sql': 'CREATE TRIGGER t1t AFTER INSERT ON t FOR EACH ROW BEGIN INSERT INTO t_out
+    VALUES(1); END;'}
 ...
 t2t.name
 ---
@@ -109,8 +94,8 @@ t2t.name
 ...
 t2t.opts
 ---
-- {'sql': 'CREATE TRIGGER t2t AFTER INSERT ON t BEGIN INSERT INTO t_out VALUES(2);
-    END;'}
+- {'sql': 'CREATE TRIGGER t2t AFTER INSERT ON t FOR EACH ROW BEGIN INSERT INTO t_out
+    VALUES(2); END;'}
 ...
 assert(t1t.space_id == t2t.space_id)
 ---
@@ -120,8 +105,9 @@ assert(t1t.space_id == box.space.T.id)
 ---
 - true
 ...
-box.sql.execute("INSERT INTO T VALUES(1);")
+box.execute("INSERT INTO T VALUES(1);")
 ---
+- row_count: 1
 ...
 box.space.T:select()
 ---
@@ -132,19 +118,29 @@ box.space.T_OUT:select()
 - - [1]
   - [2]
 ...
-box.sql.execute("SELECT * FROM T")
+box.execute("SELECT * FROM T")
 ---
-- - [1]
+- metadata:
+  - name: X
+    type: integer
+  rows:
+  - [1]
 ...
-box.sql.execute("SELECT * FROM T")
+box.execute("SELECT * FROM T")
 ---
-- - [1]
+- metadata:
+  - name: X
+    type: integer
+  rows:
+  - [1]
 ...
-box.sql.execute("DROP TABLE T;")
+box.execute("DROP TABLE T;")
 ---
+- row_count: 1
 ...
-box.sql.execute("DROP TABLE T_OUT;")
+box.execute("DROP TABLE T_OUT;")
 ---
+- row_count: 1
 ...
 test_run:switch('default')
 ---
@@ -155,6 +151,55 @@ test_run:cmd('stop server upgrade')
 - true
 ...
 test_run:cmd('cleanup server upgrade')
+---
+- true
+...
+-- Test Tarantool 2.1.0 to 2.1.1 migration.
+work_dir = 'sql/upgrade/2.1.0/'
+---
+...
+test_run:cmd('create server upgrade210 with script="sql/upgrade/upgrade.lua", workdir="' .. work_dir .. '"')
+---
+- true
+...
+test_run:cmd('start server upgrade210')
+---
+- true
+...
+test_run:switch('upgrade210')
+---
+- true
+...
+s = box.space.T5
+---
+...
+s ~= nil
+---
+- true
+...
+i = box.space._index:select(s.id)
+---
+...
+i ~= nil
+---
+- true
+...
+i[1].opts.sql == nil
+---
+- true
+...
+s:drop()
+---
+...
+test_run:switch('default')
+---
+- true
+...
+test_run:cmd('stop server upgrade210')
+---
+- true
+...
+test_run:cmd('cleanup server upgrade210')
 ---
 - true
 ...

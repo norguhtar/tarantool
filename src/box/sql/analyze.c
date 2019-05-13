@@ -108,7 +108,6 @@
 #include "box/box.h"
 #include "box/index.h"
 #include "box/key_def.h"
-#include "box/tuple_compare.h"
 #include "box/schema.h"
 #include "third_party/qsort_arg.h"
 
@@ -128,7 +127,6 @@ static void
 vdbe_emit_stat_space_open(struct Parse *parse, const char *table_name)
 {
 	const char *stat_names[] = {"_sql_stat1", "_sql_stat4"};
-	const uint32_t stat_ids[] = {BOX_SQL_STAT1_ID, BOX_SQL_STAT4_ID};
 	struct Vdbe *v = sqlGetVdbe(parse);
 	assert(v != NULL);
 	assert(sqlVdbeDb(v) == parse->db);
@@ -138,7 +136,9 @@ vdbe_emit_stat_space_open(struct Parse *parse, const char *table_name)
 			vdbe_emit_stat_space_clear(parse, space_name, NULL,
 						   table_name);
 		} else {
-			sqlVdbeAddOp1(v, OP_Clear, stat_ids[i]);
+			struct space *stat_space = space_by_name(stat_names[i]);
+			assert(stat_space != NULL);
+			sqlVdbeAddOp1(v, OP_Clear, stat_space->def->id);
 		}
 	}
 }
@@ -359,7 +359,7 @@ static const FuncDef statInitFuncdef = {
 	0,			/* xFinalize */
 	"stat_init",		/* zName */
 	{0},
-	0
+	0, false
 };
 
 /*
@@ -615,7 +615,7 @@ static const FuncDef statPushFuncdef = {
 	0,			/* xFinalize */
 	"stat_push",		/* zName */
 	{0},
-	0
+	0, false
 };
 
 #define STAT_GET_STAT1 0	/* "stat" column of stat1 table */
@@ -743,7 +743,7 @@ static const FuncDef statGetFuncdef = {
 	0,			/* xFinalize */
 	"stat_get",		/* zName */
 	{0},
-	0
+	0, false
 };
 
 static void
@@ -767,9 +767,9 @@ static void
 vdbe_emit_analyze_space(struct Parse *parse, struct space *space)
 {
 	assert(space != NULL);
-	struct space *stat1 = space_by_id(BOX_SQL_STAT1_ID);
+	struct space *stat1 = space_by_name("_sql_stat1");
 	assert(stat1 != NULL);
-	struct space *stat4 = space_by_id(BOX_SQL_STAT4_ID);
+	struct space *stat4 = space_by_name("_sql_stat4");
 	assert(stat4 != NULL);
 
 	/* Register to hold Stat4Accum object. */
@@ -908,8 +908,7 @@ vdbe_emit_analyze_space(struct Parse *parse, struct space *space)
 		if (jump_addrs == NULL) {
 			diag_set(OutOfMemory, sizeof(int) * part_count,
 				 "region", "jump_addrs");
-			parse->rc = SQL_TARANTOOL_ERROR;
-			parse->nErr++;
+			parse->is_aborted = true;
 			return;
 		}
 		/*
@@ -1112,32 +1111,33 @@ vdbe_emit_analyze_table(struct Parse *parse, struct space *space)
 void
 sqlAnalyze(Parse * pParse, Token * pName)
 {
-	sql *db = pParse->db;
+	struct sql *db = pParse->db;
 	if (pName == NULL) {
 		/* Form 1:  Analyze everything */
 		sql_analyze_database(pParse);
 	} else {
 		/* Form 2:  Analyze table named */
-		char *z = sqlNameFromToken(db, pName);
-		if (z != NULL) {
-			struct space *sp = space_by_name(z);
-			if (sp != NULL) {
-				if (sp->def->opts.is_view) {
-					sqlErrorMsg(pParse, "VIEW isn't "\
-							"allowed to be "\
-							"analyzed");
-				} else {
-					vdbe_emit_analyze_table(pParse, sp);
-				}
-			} else {
-				diag_set(ClientError, ER_NO_SUCH_SPACE, z);
-				pParse->rc = SQL_TARANTOOL_ERROR;
-				pParse->nErr++;
-			}
-			sqlDbFree(db, z);
+		char *z = sql_name_from_token(db, pName);
+		if (z == NULL) {
+			pParse->is_aborted = true;
+			return;
 		}
+		struct space *sp = space_by_name(z);
+		if (sp != NULL) {
+			if (sp->def->opts.is_view) {
+				diag_set(ClientError, ER_SQL_ANALYZE_ARGUMENT,
+					 sp->def->name);
+				pParse->is_aborted = true;
+			} else {
+				vdbe_emit_analyze_table(pParse, sp);
+			}
+		} else {
+			diag_set(ClientError, ER_NO_SUCH_SPACE, z);
+			pParse->is_aborted = true;
+		}
+		sqlDbFree(db, z);
 	}
-	Vdbe *v = sqlGetVdbe(pParse);
+	struct Vdbe *v = sqlGetVdbe(pParse);
 	if (v != NULL)
 		sqlVdbeAddOp0(v, OP_Expire);
 }
@@ -1375,7 +1375,9 @@ load_stat_from_space(struct sql *db, const char *sql_select_prepare,
 		     const char *sql_select_load, struct index_stat *stats)
 {
 	struct index **indexes = NULL;
-	uint32_t index_count = box_index_len(BOX_SQL_STAT4_ID, 0);
+	struct space *stat_space = space_by_name("_sql_stat4");
+	assert(stat_space != NULL);
+	uint32_t index_count = box_index_len(stat_space->def->id, 0);
 	if (index_count > 0) {
 		size_t alloc_size = sizeof(struct index *) * index_count;
 		indexes = region_alloc(&fiber()->gc, alloc_size);
@@ -1591,11 +1593,11 @@ const log_est_t default_tuple_est[] = {DEFAULT_TUPLE_LOG_COUNT,
 				       33, 32, 30, 28, 26, 23};
 
 LogEst
-sql_space_tuple_log_count(struct Table *tab)
+sql_space_tuple_log_count(struct space *space)
 {
-	struct space *space = space_by_id(tab->def->id);
-	if (space == NULL)
-		return tab->tuple_log_count;
+	if (space == NULL || space->index_map == NULL)
+		return 0;
+
 	struct index *pk = space_index(space, 0);
 	assert(sqlLogEst(DEFAULT_TUPLE_COUNT) == DEFAULT_TUPLE_LOG_COUNT);
 	/* If space represents VIEW, return default number. */
@@ -1684,7 +1686,9 @@ stat_copy(struct index_stat *dest, const struct index_stat *src)
 int
 sql_analysis_load(struct sql *db)
 {
-	ssize_t index_count = box_index_len(BOX_SQL_STAT1_ID, 0);
+	struct space *stat_space = space_by_name("_sql_stat1");
+	assert(stat_space != NULL);
+	ssize_t index_count = box_index_len(stat_space->def->id, 0);
 	if (index_count < 0)
 		return SQL_TARANTOOL_ERROR;
 	if (box_txn_begin() != 0)

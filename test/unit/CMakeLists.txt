@@ -25,7 +25,9 @@ add_executable(uri.test uri.c unit.c)
 target_link_libraries(uri.test uri unit)
 add_executable(queue.test queue.c)
 add_executable(mhash.test mhash.c)
+target_link_libraries(mhash.test unit)
 add_executable(mhash_bytemap.test mhash_bytemap.c)
+target_link_libraries(mhash_bytemap.test unit)
 add_executable(rope_basic.test rope_basic.c)
 target_link_libraries(rope_basic.test salad)
 add_executable(rope_avl.test rope_avl.c)
@@ -123,9 +125,9 @@ add_executable(find_path.test find_path.c
 )
 
 add_executable(reflection_c.test reflection_c.c unit.c
-    ${CMAKE_SOURCE_DIR}/src/reflection.c)
+    ${CMAKE_SOURCE_DIR}/src/lib/core/reflection.c)
 add_executable(reflection_cxx.test reflection_cxx.cc unit.c
-    ${CMAKE_SOURCE_DIR}/src/reflection.c)
+    ${CMAKE_SOURCE_DIR}/src/lib/core/reflection.c)
 add_executable(csv.test csv.c)
 target_link_libraries(csv.test csv)
 
@@ -152,7 +154,7 @@ set(ITERATOR_TEST_SOURCES
 set(ITERATOR_TEST_LIBS core tuple xrow unit)
 
 add_executable(vy_mem.test vy_mem.c ${ITERATOR_TEST_SOURCES})
-target_link_libraries(vy_mem.test ${ITERATOR_TEST_LIBS})
+target_link_libraries(vy_mem.test ${ITERATOR_TEST_LIBS} dl)
 
 add_executable(vy_point_lookup.test
     vy_point_lookup.c
@@ -174,7 +176,7 @@ add_executable(vy_point_lookup.test
     ${PROJECT_SOURCE_DIR}/src/box/schema_def.c
     ${PROJECT_SOURCE_DIR}/src/box/identifier.c
 )
-target_link_libraries(vy_point_lookup.test core tuple xrow xlog unit)
+target_link_libraries(vy_point_lookup.test core tuple xrow xlog unit dl)
 
 add_executable(column_mask.test
     column_mask.c)
@@ -187,13 +189,13 @@ add_executable(vy_write_iterator.test
     ${PROJECT_SOURCE_DIR}/src/box/vy_write_iterator.c
     ${ITERATOR_TEST_SOURCES}
 )
-target_link_libraries(vy_write_iterator.test xlog ${ITERATOR_TEST_LIBS})
+target_link_libraries(vy_write_iterator.test xlog ${ITERATOR_TEST_LIBS} dl)
 
 add_executable(vy_cache.test vy_cache.c ${ITERATOR_TEST_SOURCES})
-target_link_libraries(vy_cache.test ${ITERATOR_TEST_LIBS})
+target_link_libraries(vy_cache.test ${ITERATOR_TEST_LIBS} dl)
 
 add_executable(coll.test coll.cpp)
-target_link_libraries(coll.test core unit ${ICU_LIBRARIES} misc)
+target_link_libraries(coll.test coll unit misc dl)
 
 add_executable(tuple_bigref.test tuple_bigref.c)
 target_link_libraries(tuple_bigref.test tuple unit)
@@ -203,3 +205,14 @@ add_executable(checkpoint_schedule.test
     ${PROJECT_SOURCE_DIR}/src/box/checkpoint_schedule.c
 )
 target_link_libraries(checkpoint_schedule.test m unit)
+
+add_executable(sio.test sio.c)
+target_link_libraries(sio.test unit core)
+
+add_executable(swim.test swim.c swim_test_transport.c swim_test_ev.c
+               swim_test_utils.c ${PROJECT_SOURCE_DIR}/src/version.c)
+target_link_libraries(swim.test unit swim)
+
+add_executable(swim_proto.test swim_proto.c swim_test_transport.c swim_test_ev.c
+               swim_test_utils.c ${PROJECT_SOURCE_DIR}/src/version.c)
+target_link_libraries(swim_proto.test unit swim)

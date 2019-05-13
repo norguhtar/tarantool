@@ -521,13 +521,13 @@ box.schema.space.drop = function(space_id, space_name, opts)
     for _, t in _trigger.index.space_id:pairs({space_id}) do
         _trigger:delete({t.name})
     end
+    for _, t in _fk_constraint.index.child_id:pairs({space_id}) do
+        _fk_constraint:delete({t.name, space_id})
+    end
     local keys = _vindex:select(space_id)
     for i = #keys, 1, -1 do
         local v = keys[i]
         _index:delete{v[1], v[2]}
-    end
-    for _, t in _fk_constraint.index.child_id:pairs({space_id}) do
-        _fk_constraint:delete({t.name, space_id})
     end
     revoke_object_privs('space', space_id)
     _truncate:delete{space_id}
@@ -947,7 +947,7 @@ box.schema.index.alter = function(space_id, index_id, options)
         box.error(box.error.NO_SUCH_SPACE, '#'..tostring(space_id))
     end
     if space.index[index_id] == nil then
-        box.error(box.error.NO_SUCH_INDEX, index_id, space.name)
+        box.error(box.error.NO_SUCH_INDEX_ID, index_id, space.name)
     end
     if options == nil then
         return
@@ -1175,7 +1175,7 @@ box.internal.check_index_arg = check_index_arg -- for net.box
 local function check_primary_index(space)
     local pk = space.index[0]
     if pk == nil then
-        box.error(box.error.NO_SUCH_INDEX, 0, space.name)
+        box.error(box.error.NO_SUCH_INDEX_ID, 0, space.name)
     end
     return pk
 end
@@ -2057,6 +2057,10 @@ box.internal.collation.create = function(name, coll_type, locale, opts)
     local lua_opts = {if_not_exists = opts.if_not_exists }
     check_param_table(lua_opts, {if_not_exists = 'boolean'})
     opts.if_not_exists = nil
+    local collation_defaults = {
+        strength = "tertiary",
+    }
+    opts = update_param_table(opts, collation_defaults)
     opts = setmap(opts)
 
     local _coll = box.space[box.schema.COLLATION_ID]

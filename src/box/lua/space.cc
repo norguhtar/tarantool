@@ -49,6 +49,7 @@ extern "C" {
 #include "box/sequence.h"
 #include "box/coll_id_cache.h"
 #include "box/replication.h" /* GROUP_LOCAL */
+#include "box/iproto_constants.h" /* iproto_type_name */
 
 /**
  * Trigger function for all spaces
@@ -70,7 +71,10 @@ lbox_push_txn_stmt(struct lua_State *L, void *event)
 	}
 	/* @todo: maybe the space object has to be here */
 	lua_pushstring(L, stmt->space->def->name);
-	return 3;
+	assert(stmt->row != NULL);
+	/* operation type: INSERT/UPDATE/UPSERT/REPLACE/DELETE */
+	lua_pushstring(L, iproto_type_name(stmt->row->type));
+	return 4;
 }
 
 static int
@@ -510,7 +514,7 @@ lbox_space_frommap(struct lua_State *L)
 
 	lua_replace(L, 1);
 	lua_settop(L, 1);
-	return lbox_tuple_new(L);
+	return luaT_tuple_new(L, space->format);
 usage_error:
 	return luaL_error(L, "Usage: space:frommap(map, opts)");
 }
@@ -556,10 +560,6 @@ box_lua_space_init(struct lua_State *L)
 	lua_setfield(L, -2, "CLUSTER_ID");
 	lua_pushnumber(L, BOX_TRIGGER_ID);
 	lua_setfield(L, -2, "TRIGGER_ID");
-	lua_pushnumber(L, BOX_SQL_STAT1_ID);
-	lua_setfield(L, -2, "SQL_STAT1_ID");
-	lua_pushnumber(L, BOX_SQL_STAT4_ID);
-	lua_setfield(L, -2, "SQL_STAT4_ID");
 	lua_pushnumber(L, BOX_FK_CONSTRAINT_ID);
 	lua_setfield(L, -2, "FK_CONSTRAINT_ID");
 	lua_pushnumber(L, BOX_TRUNCATE_ID);

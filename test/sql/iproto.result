@@ -7,11 +7,13 @@ test_run = require('test_run').new()
 engine = test_run:get_cfg('engine')
 ---
 ...
-box.sql.execute('pragma sql_default_engine=\''..engine..'\'')
+box.execute('pragma sql_default_engine=\''..engine..'\'')
 ---
+- row_count: 0
 ...
-box.sql.execute('create table test (id int primary key, a float, b text)')
+box.execute('create table test (id int primary key, a float, b text)')
 ---
+- row_count: 1
 ...
 space = box.space.TEST
 ---
@@ -28,9 +30,17 @@ space:replace{7, 8.5, '9'}
 ---
 - [7, 8.5, '9']
 ...
-box.sql.execute('select * from test')
+box.execute('select * from test')
 ---
-- - [1, 2, '3']
+- metadata:
+  - name: ID
+    type: integer
+  - name: A
+    type: number
+  - name: B
+    type: string
+  rows:
+  - [1, 2, '3']
   - [4, 5, '6']
   - [7, 8.5, '9']
 ...
@@ -58,11 +68,11 @@ ret
 ---
 - metadata:
   - name: ID
-    type: INTEGER
+    type: integer
   - name: A
-    type: NUMERIC
+    type: number
   - name: B
-    type: TEXT
+    type: string
   rows:
   - [1, 2, '3']
   - [4, 5, '6']
@@ -72,44 +82,44 @@ type(ret.rows[1])
 ---
 - cdata
 ...
--- Operation with rowcount result.
+-- Operation with row_count result.
 cn:execute('insert into test values (10, 11, NULL)')
 ---
-- rowcount: 1
+- row_count: 1
 ...
 cn:execute('delete from test where a = 5')
 ---
-- rowcount: 1
+- row_count: 1
 ...
 cn:execute('insert into test values (11, 12, NULL), (12, 12, NULL), (13, 12, NULL)')
 ---
-- rowcount: 3
+- row_count: 3
 ...
 cn:execute('delete from test where a = 12')
 ---
-- rowcount: 3
+- row_count: 3
 ...
 -- SQL errors.
 cn:execute('insert into not_existing_table values ("kek")')
 ---
-- error: 'Failed to execute SQL statement: no such table: NOT_EXISTING_TABLE'
+- error: Space 'NOT_EXISTING_TABLE' does not exist
 ...
 cn:execute('insert qwerty gjsdjq  q  qwd qmq;; q;qwd;')
 ---
-- error: 'Failed to execute SQL statement: near "qwerty": syntax error'
+- error: Syntax error near 'qwerty'
 ...
 -- Empty result.
 cn:execute('select id as identifier from test where a = 5;')
 ---
 - metadata:
   - name: IDENTIFIER
-    type: INTEGER
+    type: integer
   rows: []
 ...
 -- netbox API errors.
 cn:execute(100)
 ---
-- error: 'Failed to execute SQL statement: near "100": syntax error'
+- error: Syntax error near '100'
 ...
 cn:execute('select 1', nil, {dry_run = true})
 ---
@@ -118,11 +128,11 @@ cn:execute('select 1', nil, {dry_run = true})
 -- Empty request.
 cn:execute('')
 ---
-- error: 'Failed to execute SQL statement: syntax error: empty request'
+- error: Failed to execute an empty SQL statement
 ...
 cn:execute('   ;')
 ---
-- error: 'Failed to execute SQL statement: syntax error: empty request'
+- error: Failed to execute an empty SQL statement
 ...
 --
 -- gh-3467: allow only positive integers under limit clause.
@@ -131,11 +141,11 @@ cn:execute('select * from test where id = ?', {1})
 ---
 - metadata:
   - name: ID
-    type: INTEGER
+    type: integer
   - name: A
-    type: NUMERIC
+    type: number
   - name: B
-    type: TEXT
+    type: string
   rows:
   - [1, 2, '3']
 ...
@@ -143,56 +153,50 @@ cn:execute('select * from test limit ?', {2})
 ---
 - metadata:
   - name: ID
-    type: INTEGER
+    type: integer
   - name: A
-    type: NUMERIC
+    type: number
   - name: B
-    type: TEXT
+    type: string
   rows:
   - [1, 2, '3']
   - [7, 8.5, '9']
 ...
 cn:execute('select * from test limit ?', {-2})
 ---
-- error: 'Failed to execute SQL statement: Only positive integers are allowed in the
-    LIMIT clause'
+- error: Only positive integers are allowed in the LIMIT clause
 ...
 cn:execute('select * from test limit ?', {2.7})
 ---
-- error: 'Failed to execute SQL statement: Only positive integers are allowed in the
-    LIMIT clause'
+- error: Only positive integers are allowed in the LIMIT clause
 ...
 cn:execute('select * from test limit ?', {'Hello'})
 ---
-- error: 'Failed to execute SQL statement: Only positive integers are allowed in the
-    LIMIT clause'
+- error: Only positive integers are allowed in the LIMIT clause
 ...
 cn:execute('select * from test limit 1 offset ?', {2})
 ---
 - metadata:
   - name: ID
-    type: INTEGER
+    type: integer
   - name: A
-    type: NUMERIC
+    type: number
   - name: B
-    type: TEXT
+    type: string
   rows:
   - [10, 11, null]
 ...
 cn:execute('select * from test limit 1 offset ?', {-2})
 ---
-- error: 'Failed to execute SQL statement: Only positive integers are allowed in the
-    OFFSET clause'
+- error: Only positive integers are allowed in the OFFSET clause
 ...
 cn:execute('select * from test limit 1 offset ?', {2.7})
 ---
-- error: 'Failed to execute SQL statement: Only positive integers are allowed in the
-    OFFSET clause'
+- error: Only positive integers are allowed in the OFFSET clause
 ...
 cn:execute('select * from test limit 1 offset ?', {'Hello'})
 ---
-- error: 'Failed to execute SQL statement: Only positive integers are allowed in the
-    OFFSET clause'
+- error: Only positive integers are allowed in the OFFSET clause
 ...
 --
 -- Parameters binding.
@@ -210,11 +214,11 @@ cn:execute('select * from test where id = :value', parameters)
 ---
 - metadata:
   - name: ID
-    type: INTEGER
+    type: integer
   - name: A
-    type: NUMERIC
+    type: number
   - name: B
-    type: TEXT
+    type: string
   rows:
   - [1, 2, '3']
 ...
@@ -306,7 +310,7 @@ cn:execute('select :value3, ?, :value1, ?, ?, @value2, ?, :value3', parameters)
   - name: '@value2'
     type: INTEGER
   - name: '?'
-    type: BOOLEAN
+    type: boolean
   - name: :value3
     type: INTEGER
   rows:
@@ -363,7 +367,7 @@ sql = 'select '..string.rep('?, ', box.schema.SQL_BIND_PARAMETER_MAX)..'?'
 ...
 cn:execute(sql)
 ---
-- error: 'Failed to execute SQL statement: too many SQL variables'
+- error: 'SQL bind parameter limit reached: 65000'
 ...
 -- Try too many parameter values.
 sql = 'select ?'
@@ -422,7 +426,7 @@ cn:execute('select :value', parameters)
 -- gh-2608 SQL iproto DDL
 cn:execute('create table test2(id int primary key, a int, b int, c int)')
 ---
-- rowcount: 1
+- row_count: 1
 ...
 box.space.TEST2.name
 ---
@@ -430,25 +434,25 @@ box.space.TEST2.name
 ...
 cn:execute('insert into test2 values (1, 1, 1, 1)')
 ---
-- rowcount: 1
+- row_count: 1
 ...
 cn:execute('select * from test2')
 ---
 - metadata:
   - name: ID
-    type: INTEGER
+    type: integer
   - name: A
-    type: INTEGER
+    type: integer
   - name: B
-    type: INTEGER
+    type: integer
   - name: C
-    type: INTEGER
+    type: integer
   rows:
   - [1, 1, 1, 1]
 ...
 cn:execute('create index test2_a_b_index on test2(a, b)')
 ---
-- rowcount: 1
+- row_count: 1
 ...
 #box.space.TEST2.index
 ---
@@ -456,7 +460,7 @@ cn:execute('create index test2_a_b_index on test2(a, b)')
 ...
 cn:execute('drop table test2')
 ---
-- rowcount: 1
+- row_count: 1
 ...
 box.space.TEST2
 ---
@@ -466,100 +470,100 @@ box.space.TEST2
 -- Test CREATE [IF NOT EXISTS] TABLE.
 cn:execute('create table test3(id int primary key, a int, b int)')
 ---
-- rowcount: 1
+- row_count: 1
 ...
 -- Rowcount = 1, although two tuples were created:
 -- for _space and for _index.
 cn:execute('insert into test3 values (1, 1, 1), (2, 2, 2), (3, 3, 3)')
 ---
-- rowcount: 3
+- row_count: 3
 ...
 cn:execute('create table if not exists test3(id int primary key)')
 ---
-- rowcount: 0
+- row_count: 0
 ...
 -- Test CREATE VIEW [IF NOT EXISTS] and
 --      DROP   VIEW [IF EXISTS].
 cn:execute('create view test3_view(id) as select id from test3')
 ---
-- rowcount: 1
+- row_count: 1
 ...
 cn:execute('create view if not exists test3_view(id) as select id from test3')
 ---
-- rowcount: 0
+- row_count: 0
 ...
 cn:execute('drop view test3_view')
 ---
-- rowcount: 1
+- row_count: 1
 ...
 cn:execute('drop view if exists test3_view')
 ---
-- rowcount: 0
+- row_count: 0
 ...
 -- Test CREATE INDEX [IF NOT EXISTS] and
 --      DROP   INDEX [IF EXISTS].
 cn:execute('create index test3_sec on test3(a, b)')
 ---
-- rowcount: 1
+- row_count: 1
 ...
 cn:execute('create index if not exists test3_sec on test3(a, b)')
 ---
-- rowcount: 0
+- row_count: 0
 ...
 cn:execute('drop index test3_sec on test3')
 ---
-- rowcount: 1
+- row_count: 1
 ...
 cn:execute('drop index if exists test3_sec on test3')
 ---
-- rowcount: 0
+- row_count: 0
 ...
 -- Test CREATE TRIGGER [IF NOT EXISTS] and
 --      DROP   TRIGGER [IF EXISTS].
-cn:execute('create trigger trig INSERT ON test3 BEGIN SELECT * FROM test3; END;')
+cn:execute('CREATE TRIGGER trig INSERT ON test3 FOR EACH ROW BEGIN SELECT * FROM test3; END;')
 ---
-- rowcount: 1
+- row_count: 1
 ...
-cn:execute('create trigger if not exists trig INSERT ON test3 BEGIN SELECT * FROM test3; END;')
+cn:execute('CREATE TRIGGER if not exists trig INSERT ON test3 FOR EACH ROW BEGIN SELECT * FROM test3; END;')
 ---
-- rowcount: 0
+- row_count: 0
 ...
 cn:execute('drop trigger trig')
 ---
-- rowcount: 1
+- row_count: 1
 ...
 cn:execute('drop trigger if exists trig')
 ---
-- rowcount: 0
+- row_count: 0
 ...
 -- Test DROP TABLE [IF EXISTS].
 -- Create more indexes, triggers and _truncate tuple.
 cn:execute('create index idx1 on test3(a)')
 ---
-- rowcount: 1
+- row_count: 1
 ...
 cn:execute('create index idx2 on test3(b)')
 ---
-- rowcount: 1
+- row_count: 1
 ...
 box.space.TEST3:truncate()
 ---
 ...
-cn:execute('create trigger trig INSERT ON test3 BEGIN SELECT * FROM test3; END;')
+cn:execute('CREATE TRIGGER trig INSERT ON test3 FOR EACH ROW BEGIN SELECT * FROM test3; END;')
 ---
-- rowcount: 1
+- row_count: 1
 ...
 cn:execute('insert into test3 values (1, 1, 1), (2, 2, 2), (3, 3, 3)')
 ---
-- rowcount: 3
+- row_count: 3
 ...
 cn:execute('drop table test3')
 ---
-- rowcount: 1
+- row_count: 1
 ...
 cn:execute('drop table if exists test3')
 ---
-- rowcount: 0
+- row_count: 0
 ...
 --
 -- gh-2948: sql: remove unnecessary templates for binding
@@ -567,12 +571,11 @@ cn:execute('drop table if exists test3')
 --
 cn:execute('select ?1, ?2, ?3', {1, 2, 3})
 ---
-- error: 'Failed to execute SQL statement: near "?1": syntax error'
+- error: Syntax error near '?1'
 ...
 cn:execute('select $name, $name2', {1, 2})
 ---
-- error: 'Failed to execute SQL statement: variable number must be between $1 and
-    $65000'
+- error: Index of binding slots must start from 1
 ...
 parameters = {}
 ---
@@ -602,11 +605,11 @@ cn:execute('select * from test where id = :1', {1})
 ---
 - metadata:
   - name: ID
-    type: INTEGER
+    type: integer
   - name: A
-    type: NUMERIC
+    type: number
   - name: B
-    type: TEXT
+    type: string
   rows:
   - [1, 2, '3']
 ...
@@ -620,14 +623,15 @@ res = cn:execute('select * from test')
 res.metadata
 ---
 - - name: ID
-    type: INTEGER
+    type: integer
   - name: A
-    type: NUMERIC
+    type: number
   - name: B
-    type: TEXT
+    type: string
 ...
-box.sql.execute('drop table test')
+box.execute('drop table test')
 ---
+- row_count: 1
 ...
 cn:close()
 ---
@@ -640,7 +644,7 @@ cn = remote.connect(box.cfg.listen)
 ...
 cn:execute('create table test (id integer primary key, a integer, b integer)')
 ---
-- rowcount: 1
+- row_count: 1
 ...
 future1 = cn:execute('insert into test values (1, 1, 1)', nil, nil, {is_async = true})
 ---
@@ -653,7 +657,7 @@ future3 = cn:execute('insert into test values (2, 2, 2), (3, 3, 3)', nil, nil, {
 ...
 future1:wait_result()
 ---
-- rowcount: 1
+- row_count: 1
 ...
 future2:wait_result()
 ---
@@ -663,7 +667,7 @@ future2:wait_result()
 ...
 future3:wait_result()
 ---
-- rowcount: 2
+- row_count: 2
 ...
 future4 = cn:execute('select * from test', nil, nil, {is_async = true})
 ---
@@ -672,11 +676,11 @@ future4:wait_result()
 ---
 - metadata:
   - name: ID
-    type: INTEGER
+    type: integer
   - name: A
-    type: INTEGER
+    type: integer
   - name: B
-    type: INTEGER
+    type: integer
   rows:
   - [1, 1, 1]
   - [2, 2, 2]
@@ -685,37 +689,39 @@ future4:wait_result()
 cn:close()
 ---
 ...
-box.sql.execute('drop table test')
+box.execute('drop table test')
 ---
+- row_count: 1
 ...
 -- gh-2618 Return generated columns after INSERT in IPROTO.
 -- Return all ids generated in current INSERT statement.
-box.sql.execute('create table test (id integer primary key autoincrement, a integer)')
+box.execute('create table test (id integer primary key autoincrement, a integer)')
 ---
+- row_count: 1
 ...
 cn = remote.connect(box.cfg.listen)
 ---
 ...
 cn:execute('insert into test values (1, 1)')
 ---
-- rowcount: 1
+- row_count: 1
 ...
 cn:execute('insert into test values (null, 2)')
 ---
 - autoincrement_ids:
   - 2
-  rowcount: 1
+  row_count: 1
 ...
 cn:execute('update test set a = 11 where id == 1')
 ---
-- rowcount: 1
+- row_count: 1
 ...
 cn:execute('insert into test values (100, 1), (null, 1), (120, 1), (null, 1)')
 ---
 - autoincrement_ids:
   - 101
   - 121
-  rowcount: 4
+  row_count: 4
 ...
 cn:execute('insert into test values (null, 1), (null, 1), (null, 1), (null, 1), (null, 1)')
 ---
@@ -725,15 +731,15 @@ cn:execute('insert into test values (null, 1), (null, 1), (null, 1), (null, 1), 
   - 124
   - 125
   - 126
-  rowcount: 5
+  row_count: 5
 ...
 cn:execute('select * from test')
 ---
 - metadata:
   - name: ID
-    type: INTEGER
+    type: integer
   - name: A
-    type: INTEGER
+    type: integer
   rows:
   - [1, 11]
   - [2, 2]
@@ -768,10 +774,11 @@ cn:execute('insert into test values (null, 1)')
   - 127
   - 1
   - 2
-  rowcount: 1
+  row_count: 1
 ...
-box.sql.execute('create table test3 (id int primary key autoincrement)')
+box.execute('create table test3 (id int primary key autoincrement)')
 ---
+- row_count: 1
 ...
 box.schema.sequence.alter('TEST3', {min=-10000, step=-10})
 ---
@@ -783,10 +790,11 @@ cn:execute('insert into TEST3 values (null), (null), (null), (null)')
   - -9
   - -19
   - -29
-  rowcount: 4
+  row_count: 4
 ...
-box.sql.execute('drop table test')
+box.execute('drop table test')
 ---
+- row_count: 1
 ...
 s:drop()
 ---
@@ -794,39 +802,40 @@ s:drop()
 sq:drop()
 ---
 ...
-box.sql.execute('drop table test3')
+box.execute('drop table test3')
 ---
+- row_count: 1
 ...
 --
--- Ensure that FK inside CREATE TABLE does not affect rowcount.
+-- Ensure that FK inside CREATE TABLE does not affect row_count.
 --
 cn:execute('create table test (id integer primary key, a integer)')
 ---
-- rowcount: 1
+- row_count: 1
 ...
 cn:execute('create table test2 (id integer primary key, ref integer references test(id))')
 ---
-- rowcount: 1
+- row_count: 1
 ...
 cn:execute('drop table test2')
 ---
-- rowcount: 1
+- row_count: 1
 ...
 --
--- Ensure that REPLACE is accounted twice in rowcount. As delete +
+-- Ensure that REPLACE is accounted twice in row_count. As delete +
 -- insert.
 --
 cn:execute('insert into test values(1, 1)')
 ---
-- rowcount: 1
+- row_count: 1
 ...
 cn:execute('insert or replace into test values(1, 2)')
 ---
-- rowcount: 2
+- row_count: 2
 ...
 cn:execute('drop table test')
 ---
-- rowcount: 1
+- row_count: 1
 ...
 -- SELECT returns unpacked msgpack.
 format = {{name = 'id', type = 'integer'}, {name = 'x', type = 'any'}}
@@ -850,9 +859,9 @@ cn:execute('select * from "test"')
 ---
 - metadata:
   - name: id
-    type: INTEGER
+    type: integer
   - name: x
-    type: UNKNOWN
+    type: any
   rows:
   - [1, [1, 2, 3]]
   - [2, {'a': 3}]
@@ -864,8 +873,9 @@ s:drop()
 cn = remote.connect(box.cfg.listen)
 ---
 ...
-box.sql.execute('CREATE TABLE t1(id INTEGER PRIMARY KEY AUTOINCREMENT)')
+box.execute('CREATE TABLE t1(id INTEGER PRIMARY KEY AUTOINCREMENT)')
 ---
+- row_count: 1
 ...
 for i = 0, 1000 do cn:execute("INSERT INTO t1 VALUES (null)") end
 ---
@@ -873,11 +883,155 @@ for i = 0, 1000 do cn:execute("INSERT INTO t1 VALUES (null)") end
 _ = cn:execute("INSERT INTO t1 SELECT NULL from t1")
 ---
 ...
-box.sql.execute('DROP TABLE t1')
+box.execute('DROP TABLE t1')
 ---
+- row_count: 1
 ...
 cn:close()
 ---
+...
+-- gh-3832: Some statements do not return column type
+box.execute('CREATE TABLE t1(id INTEGER PRIMARY KEY)')
+---
+- row_count: 1
+...
+cn = remote.connect(box.cfg.listen)
+---
+...
+-- PRAGMA:
+res = cn:execute("PRAGMA table_info(t1)")
+---
+...
+res.metadata
+---
+- - name: cid
+    type: INTEGER
+  - name: name
+    type: TEXT
+  - name: type
+    type: TEXT
+  - name: notnull
+    type: INTEGER
+  - name: dflt_value
+    type: TEXT
+  - name: pk
+    type: INTEGER
+...
+-- EXPLAIN
+res = cn:execute("EXPLAIN SELECT 1")
+---
+...
+res.metadata
+---
+- - name: addr
+    type: INTEGER
+  - name: opcode
+    type: TEXT
+  - name: p1
+    type: INTEGER
+  - name: p2
+    type: INTEGER
+  - name: p3
+    type: INTEGER
+  - name: p4
+    type: TEXT
+  - name: p5
+    type: TEXT
+  - name: comment
+    type: TEXT
+...
+res = cn:execute("EXPLAIN QUERY PLAN SELECT COUNT(*) FROM t1")
+---
+...
+res.metadata
+---
+- - name: selectid
+    type: INTEGER
+  - name: order
+    type: INTEGER
+  - name: from
+    type: INTEGER
+  - name: detail
+    type: TEXT
+...
+-- When pragma count_changes is on, statements INSERT, REPLACE and
+-- UPDATE returns number of changed columns. Make sure that this
+-- result has a column type.
+cn:execute("PRAGMA count_changes = 1;")
+---
+- row_count: 0
+...
+cn:execute("INSERT INTO t1 VALUES (1), (2), (3);")
+---
+- metadata:
+  - name: rows inserted
+    type: INTEGER
+  rows:
+  - [3]
+...
+cn:execute("REPLACE INTO t1 VALUES (2), (3), (4), (5);")
+---
+- metadata:
+  - name: rows replaced
+    type: INTEGER
+  rows:
+  - [4]
+...
+cn:execute("UPDATE t1 SET id = id + 100 WHERE id > 10;")
+---
+- metadata:
+  - name: rows updated
+    type: INTEGER
+  rows:
+  - [0]
+...
+-- Make sure that built-in functions have a right returning type.
+--
+cn:execute("SELECT zeroblob(1);")
+---
+- metadata:
+  - name: zeroblob(1)
+    type: scalar
+  rows:
+  - ["\0"]
+...
+-- randomblob() returns different results each time, so check only
+-- type in meta.
+--
+res = cn:execute("SELECT randomblob(1);")
+---
+...
+res.metadata
+---
+- - name: randomblob(1)
+    type: scalar
+...
+-- Type set during compilation stage, and since min/max are accept
+-- arguments of all scalar type, we can't say nothing more than
+-- SCALAR.
+--
+cn:execute("SELECT min(1, 2, 3);")
+---
+- metadata:
+  - name: min(1, 2, 3)
+    type: scalar
+  rows:
+  - [1]
+...
+cn:execute("SELECT max(1, 2, 3);")
+---
+- metadata:
+  - name: max(1, 2, 3)
+    type: scalar
+  rows:
+  - [3]
+...
+cn:close()
+---
+...
+box.execute('DROP TABLE t1')
+---
+- row_count: 1
 ...
 box.schema.user.revoke('guest', 'read,write,execute', 'universe')
 ---

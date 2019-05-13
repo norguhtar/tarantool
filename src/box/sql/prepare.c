@@ -52,9 +52,7 @@ sqlPrepare(sql * db,	/* Database handle. */
 	       const char **pzTail	/* OUT: End of parsed string */
     )
 {
-	char *zErrMsg = 0;	/* Error message */
 	int rc = SQL_OK;	/* Result code */
-	int i;			/* Loop counter */
 	Parse sParse;		/* Parsing context */
 	sql_parser_create(&sParse, db);
 	sParse.pReprepare = pReprepare;
@@ -90,47 +88,69 @@ sqlPrepare(sql * db,	/* Database handle. */
 		}
 		zSqlCopy = sqlDbStrNDup(db, zSql, nBytes);
 		if (zSqlCopy) {
-			sqlRunParser(&sParse, zSqlCopy, &zErrMsg);
+			sqlRunParser(&sParse, zSqlCopy);
 			sParse.zTail = &zSql[sParse.zTail - zSqlCopy];
 			sqlDbFree(db, zSqlCopy);
 		} else {
 			sParse.zTail = &zSql[nBytes];
 		}
 	} else {
-		sqlRunParser(&sParse, zSql, &zErrMsg);
+		sqlRunParser(&sParse, zSql);
 	}
 	assert(0 == sParse.nQueryLoop);
 
-	if (sParse.rc == SQL_DONE)
-		sParse.rc = SQL_OK;
-	if (db->mallocFailed) {
-		sParse.rc = SQL_NOMEM_BKPT;
-	}
+	if (db->mallocFailed)
+		sParse.is_aborted = true;
 	if (pzTail) {
 		*pzTail = sParse.zTail;
 	}
-	rc = sParse.rc;
+	if (sParse.is_aborted)
+		rc = SQL_TARANTOOL_ERROR;
 
 	if (rc == SQL_OK && sParse.pVdbe && sParse.explain) {
 		static const char *const azColName[] = {
-			"addr", "opcode", "p1", "p2", "p3", "p4", "p5",
-			    "comment",
-			"selectid", "order", "from", "detail"
+			/*  0 */ "addr",
+			/*  1 */ "INTEGER",
+			/*  2 */ "opcode",
+			/*  3 */ "TEXT",
+			/*  4 */ "p1",
+			/*  5 */ "INTEGER",
+			/*  6 */ "p2",
+			/*  7 */ "INTEGER",
+			/*  8 */ "p3",
+			/*  9 */ "INTEGER",
+			/* 10 */ "p4",
+			/* 11 */ "TEXT",
+			/* 12 */ "p5",
+			/* 13 */ "TEXT",
+			/* 14 */ "comment",
+			/* 15 */ "TEXT",
+			/* 16 */ "selectid",
+			/* 17 */ "INTEGER",
+			/* 18 */ "order",
+			/* 19 */ "INTEGER",
+			/* 20 */ "from",
+			/* 21 */ "INTEGER",
+			/* 22 */ "detail",
+			/* 23 */ "TEXT",
 		};
-		int iFirst, mx;
+
+		int name_first, name_count;
 		if (sParse.explain == 2) {
-			sqlVdbeSetNumCols(sParse.pVdbe, 4);
-			iFirst = 8;
-			mx = 12;
+			name_first = 16;
+			name_count = 4;
 		} else {
-			sqlVdbeSetNumCols(sParse.pVdbe, 8);
-			iFirst = 0;
-			mx = 8;
+			name_first = 0;
+			name_count = 8;
 		}
-		for (i = iFirst; i < mx; i++) {
-			sqlVdbeSetColName(sParse.pVdbe, i - iFirst,
-					      COLNAME_NAME, azColName[i],
-					      SQL_STATIC);
+		sqlVdbeSetNumCols(sParse.pVdbe, name_count);
+		for (int i = 0; i < name_count; i++) {
+			int name_index = 2 * i + name_first;
+			sqlVdbeSetColName(sParse.pVdbe, i, COLNAME_NAME,
+					  azColName[name_index], SQL_STATIC);
+			sqlVdbeSetColName(sParse.pVdbe, i, COLNAME_DECLTYPE,
+					  azColName[name_index + 1],
+					  SQL_STATIC);
 		}
 	}
 
@@ -146,11 +166,7 @@ sqlPrepare(sql * db,	/* Database handle. */
 		*ppStmt = (sql_stmt *) sParse.pVdbe;
 	}
 
-	if (zErrMsg) {
-		sqlErrorWithMsg(db, rc, "%s", zErrMsg);
-	} else {
-		sqlError(db, rc);
-	}
+	db->errCode = rc;
 
 	/* Delete any TriggerPrg structures allocated while parsing this statement. */
 	while (sParse.pTriggerPrg) {
@@ -180,11 +196,11 @@ sqlLockAndPrepare(sql * db,		/* Database handle. */
 
 #ifdef SQL_ENABLE_API_ARMOR
 	if (ppStmt == 0)
-		return SQL_MISUSE_BKPT;
+		return SQL_MISUSE;
 #endif
 	*ppStmt = 0;
 	if (!sqlSafetyCheckOk(db) || zSql == 0) {
-		return SQL_MISUSE_BKPT;
+		return SQL_MISUSE;
 	}
 	rc = sqlPrepare(db, zSql, nBytes, saveSqlFlag, pOld, ppStmt,
 			    pzTail);
@@ -273,7 +289,6 @@ sql_parser_create(struct Parse *parser, sql *db)
 {
 	memset(parser, 0, sizeof(struct Parse));
 	parser->db = db;
-	rlist_create(&parser->new_fkey);
 	rlist_create(&parser->record_list);
 	region_create(&parser->region, &cord()->slabc);
 }
@@ -286,16 +301,13 @@ sql_parser_destroy(Parse *parser)
 	sql *db = parser->db;
 	sqlDbFree(db, parser->aLabel);
 	sql_expr_list_delete(db, parser->pConstExpr);
-	struct fkey_parse *fk;
-	rlist_foreach_entry(fk, &parser->new_fkey, link)
-		sql_expr_list_delete(db, fk->selfref_cols);
+	create_table_def_destroy(&parser->create_table_def);
 	if (db != NULL) {
 		assert(db->lookaside.bDisable >=
 		       parser->disableLookaside);
 		db->lookaside.bDisable -= parser->disableLookaside;
 	}
 	parser->disableLookaside = 0;
-	sqlDbFree(db, parser->zErrMsg);
 	switch (parser->parsed_ast_type) {
 	case AST_TYPE_SELECT:
 		sql_select_delete(db, parser->parsed_ast.select);

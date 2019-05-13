@@ -38,8 +38,6 @@ num_rows = num_rows + range();
 -- fails due to error injection
 box.snapshot();
 errinj.set("ERRINJ_VY_RUN_WRITE", false);
--- fails due to scheduler timeout
-box.snapshot();
 fiber.sleep(0.06);
 num_rows = num_rows + range();
 box.snapshot();
@@ -110,10 +108,8 @@ errinj.set("ERRINJ_VY_READ_PAGE_TIMEOUT", 0.05)
 s:get(10) ~= nil
 #s:select(5, {iterator = 'LE'}) == 5
 errinj.set("ERRINJ_VY_READ_PAGE_TIMEOUT", 0);
-test_run:cmd("push filter 'lsn=[0-9]+' to 'lsn=<lsn>'")
 test_run:grep_log('default', 'get.* took too long')
 test_run:grep_log('default', 'select.* took too long')
-test_run:cmd("clear filter")
 box.cfg{too_long_threshold = too_long_threshold}
 
 s:drop()
@@ -298,12 +294,15 @@ box.snapshot()
 ret = nil
 function do_read() ret = sk:select({2}, {iterator = 'GE'}) end
 errinj.set("ERRINJ_VY_DELAY_PK_LOOKUP", true)
-f = fiber.create(do_read)
-f:status()
-ret
+_ = fiber.create(do_read)
+test_run:wait_cond(function() return sk:stat().disk.iterator.get.rows > 0 end, 60)
+pk:stat().disk.iterator.get.rows -- 0
+sk:stat().disk.iterator.get.rows -- 1
 s:replace{2, 2}
 errinj.set("ERRINJ_VY_DELAY_PK_LOOKUP", false)
-while ret == nil do fiber.sleep(0.01) end
+test_run:wait_cond(function() return pk:stat().get.rows > 0 end, 60)
+pk:stat().get.rows -- 1
+sk:stat().get.rows -- 1
 ret
 s:drop()
 
@@ -428,3 +427,33 @@ _ = fiber.create(function() box.snapshot() end)
 
 test_run:cmd("restart server default")
 box.space.test:drop()
+
+--
+-- Check that remote transactions are not aborted when an instance
+-- switches to read-only mode (gh-4016).
+--
+s = box.schema.space.create('test', {engine = 'vinyl'})
+_ = s:create_index('pk')
+s:replace{1, 1}
+box.schema.user.grant('guest', 'replication')
+test_run:cmd("create server replica with rpl_master=default, script='replication/replica.lua'")
+test_run:cmd("start server replica")
+
+test_run:cmd("switch replica")
+box.error.injection.set('ERRINJ_VY_READ_PAGE_TIMEOUT', 0.1)
+
+test_run:cmd("switch default")
+s:update({1}, {{'+', 2, 1}})
+
+test_run:cmd("switch replica")
+box.cfg{read_only = true}
+
+test_run:cmd("switch default")
+vclock = test_run:get_vclock("default")
+_ = test_run:wait_vclock("replica", vclock)
+
+test_run:cmd("stop server replica")
+test_run:cmd("cleanup server replica")
+test_run:cmd("delete server replica")
+box.schema.user.revoke('guest', 'replication')
+s:drop()

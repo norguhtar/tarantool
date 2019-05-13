@@ -62,34 +62,31 @@ sqlDeleteTriggerStep(sql * db, TriggerStep * pTriggerStep)
 }
 
 void
-sql_trigger_begin(struct Parse *parse, struct Token *name, int tr_tm,
-		  int op, struct IdList *columns, struct SrcList *table,
-		  struct Expr *when, int no_err)
+sql_trigger_begin(struct Parse *parse)
 {
 	/* The new trigger. */
 	struct sql_trigger *trigger = NULL;
 	/* The database connection. */
 	struct sql *db = parse->db;
-	/* The name of the Trigger. */
+	struct create_trigger_def *trigger_def = &parse->create_trigger_def;
+	struct create_entity_def *create_def = &trigger_def->base;
+	struct alter_entity_def *alter_def = &create_def->base;
+	assert(alter_def->entity_type == ENTITY_TYPE_TRIGGER);
+	assert(alter_def->alter_action == ALTER_ACTION_CREATE);
+
 	char *trigger_name = NULL;
-
-	/* pName->z might be NULL, but not pName itself. */
-	assert(name != NULL);
-	assert(op == TK_INSERT || op == TK_UPDATE || op == TK_DELETE);
-	assert(op > 0 && op < 0xff);
-
-	if (table == NULL || db->mallocFailed)
+	if (alter_def->entity_name == NULL || db->mallocFailed)
 		goto trigger_cleanup;
-	assert(table->nSrc == 1);
-
-	trigger_name = sqlNameFromToken(db, name);
+	assert(alter_def->entity_name->nSrc == 1);
+	assert(create_def->name.n > 0);
+	trigger_name = sql_name_from_token(db, &create_def->name);
 	if (trigger_name == NULL)
+		goto set_tarantool_error_and_cleanup;
+
+	if (sqlCheckIdentifierName(parse, trigger_name) != 0)
 		goto trigger_cleanup;
 
-	if (sqlCheckIdentifierName(parse, trigger_name) != SQL_OK)
-		goto trigger_cleanup;
-
-	const char *table_name = table->a[0].zName;
+	const char *table_name = alter_def->entity_name->a[0].zName;
 	uint32_t space_id;
 	if (schema_find_id(BOX_SPACE_ID, 2, table_name, strlen(table_name),
 			   &space_id) != 0)
@@ -112,6 +109,7 @@ sql_trigger_begin(struct Parse *parse, struct Token *name, int tr_tm,
 		int name_reg = ++parse->nMem;
 		sqlVdbeAddOp4(parse->pVdbe, OP_String8, 0, name_reg, 0,
 				  name_copy, P4_DYNAMIC);
+		bool no_err = create_def->if_not_exist;
 		if (vdbe_emit_halt_with_presence_test(parse, BOX_TRIGGER_ID, 0,
 						      name_reg, 1,
 						      ER_TRIGGER_EXISTS,
@@ -129,13 +127,14 @@ sql_trigger_begin(struct Parse *parse, struct Token *name, int tr_tm,
 	trigger->space_id = space_id;
 	trigger->zName = trigger_name;
 	trigger_name = NULL;
-
-	trigger->op = (u8) op;
-	trigger->tr_tm = tr_tm;
-	trigger->pWhen = sqlExprDup(db, when, EXPRDUP_REDUCE);
-	trigger->pColumns = sqlIdListDup(db, columns);
-	if ((when != NULL && trigger->pWhen == NULL) ||
-	    (columns != NULL && trigger->pColumns == NULL))
+	assert(trigger_def->op == TK_INSERT || trigger_def->op == TK_UPDATE ||
+	       trigger_def->op== TK_DELETE);
+	trigger->op = (u8) trigger_def->op;
+	trigger->tr_tm = trigger_def->tr_tm;
+	trigger->pWhen = sqlExprDup(db, trigger_def->when, EXPRDUP_REDUCE);
+	trigger->pColumns = sqlIdListDup(db, trigger_def->cols);
+	if ((trigger->pWhen != NULL && trigger->pWhen == NULL) ||
+	    (trigger->pColumns != NULL && trigger->pColumns == NULL))
 		goto trigger_cleanup;
 	assert(parse->parsed_ast.trigger == NULL);
 	parse->parsed_ast.trigger = trigger;
@@ -143,9 +142,9 @@ sql_trigger_begin(struct Parse *parse, struct Token *name, int tr_tm,
 
  trigger_cleanup:
 	sqlDbFree(db, trigger_name);
-	sqlSrcListDelete(db, table);
-	sqlIdListDelete(db, columns);
-	sql_expr_delete(db, when, false);
+	sqlSrcListDelete(db, alter_def->entity_name);
+	sqlIdListDelete(db, trigger_def->cols);
+	sql_expr_delete(db, trigger_def->when, false);
 	if (parse->parsed_ast.trigger == NULL)
 		sql_trigger_delete(db, trigger);
 	else
@@ -154,8 +153,7 @@ sql_trigger_begin(struct Parse *parse, struct Token *name, int tr_tm,
 	return;
 
 set_tarantool_error_and_cleanup:
-	parse->rc = SQL_TARANTOOL_ERROR;
-	parse->nErr++;
+	parse->is_aborted = true;
 	goto trigger_cleanup;
 }
 
@@ -169,7 +167,7 @@ sql_trigger_finish(struct Parse *parse, struct TriggerStep *step_list,
 	struct sql *db = parse->db;
 
 	parse->parsed_ast.trigger = NULL;
-	if (NEVER(parse->nErr) || trigger == NULL)
+	if (NEVER(parse->is_aborted) || trigger == NULL)
 		goto cleanup;
 	char *trigger_name = trigger->zName;
 	trigger->step_list = step_list;
@@ -249,142 +247,114 @@ cleanup:
 	sqlDeleteTriggerStep(db, step_list);
 }
 
-/*
- * Turn a SELECT statement (that the pSelect parameter points to) into
- * a trigger step.  Return a pointer to a TriggerStep structure.
- *
- * The parser calls this routine when it finds a SELECT statement in
- * body of a TRIGGER.
- */
-TriggerStep *
-sqlTriggerSelectStep(sql * db, Select * pSelect)
+struct TriggerStep *
+sql_trigger_select_step(struct sql *db, struct Select *select)
 {
-	TriggerStep *pTriggerStep =
-	    sqlDbMallocZero(db, sizeof(TriggerStep));
-	if (pTriggerStep == 0) {
-		sql_select_delete(db, pSelect);
-		return 0;
+	struct TriggerStep *trigger_step =
+		sqlDbMallocZero(db, sizeof(struct TriggerStep));
+	if (trigger_step == NULL) {
+		sql_select_delete(db, select);
+		diag_set(OutOfMemory, sizeof(struct TriggerStep),
+			 "sqlDbMallocZero", "trigger_step");
+		return NULL;
 	}
-	pTriggerStep->op = TK_SELECT;
-	pTriggerStep->pSelect = pSelect;
-	pTriggerStep->orconf = ON_CONFLICT_ACTION_DEFAULT;
-	return pTriggerStep;
+	trigger_step->op = TK_SELECT;
+	trigger_step->pSelect = select;
+	trigger_step->orconf = ON_CONFLICT_ACTION_DEFAULT;
+	return trigger_step;
 }
 
 /*
  * Allocate space to hold a new trigger step.  The allocated space
- * holds both the TriggerStep object and the TriggerStep.target.z string.
+ * holds both the TriggerStep object and the TriggerStep.target.z
+ * string.
  *
- * If an OOM error occurs, NULL is returned and db->mallocFailed is set.
+ * @param db The database connection.
+ * @param op Trigger opcode.
+ * @param target_name The target name token.
+ * @retval Not NULL TriggerStep object on success.
+ * @retval NULL Otherwise. The diag message is set.
  */
-static TriggerStep *
-triggerStepAllocate(sql * db,	/* Database connection */
-		    u8 op,	/* Trigger opcode */
-		    Token * pName	/* The target name */
-    )
+static struct TriggerStep *
+sql_trigger_step_new(struct sql *db, u8 op, struct Token *target_name)
 {
-	TriggerStep *pTriggerStep;
-
-	pTriggerStep =
-	    sqlDbMallocZero(db, sizeof(TriggerStep) + pName->n + 1);
-	if (pTriggerStep) {
-		char *z = (char *)&pTriggerStep[1];
-		memcpy(z, pName->z, pName->n);
-		sqlNormalizeName(z);
-		pTriggerStep->zTarget = z;
-		pTriggerStep->op = op;
+	int name_size = target_name->n + 1;
+	int size = sizeof(struct TriggerStep) + name_size;
+	struct TriggerStep *trigger_step = sqlDbMallocZero(db, size);
+	if (trigger_step == NULL) {
+		diag_set(OutOfMemory, size, "sqlDbMallocZero", "trigger_step");
+		return NULL;
 	}
-	return pTriggerStep;
+	char *z = (char *)&trigger_step[1];
+	int rc = sql_normalize_name(z, name_size, target_name->z,
+				    target_name->n);
+	if (rc > name_size) {
+		name_size = rc;
+		trigger_step = sqlDbReallocOrFree(db, trigger_step,
+						  sizeof(*trigger_step) +
+						  name_size);
+		if (trigger_step == NULL)
+			return NULL;
+		z = (char *) &trigger_step[1];
+		if (sql_normalize_name(z, name_size, target_name->z,
+				       target_name->n) > name_size)
+			unreachable();
+	}
+	trigger_step->zTarget = z;
+	trigger_step->op = op;
+	return trigger_step;
 }
 
-/*
- * Build a trigger step out of an INSERT statement.  Return a pointer
- * to the new trigger step.
- *
- * The parser calls this routine when it sees an INSERT inside the
- * body of a trigger.
- */
-TriggerStep *
-sqlTriggerInsertStep(sql * db,	/* The database connection */
-			 Token * pTableName,	/* Name of the table into which we insert */
-			 IdList * pColumn,	/* List of columns in pTableName to insert into */
-			 Select * pSelect,	/* A SELECT statement that supplies values */
-			 u8 orconf	/* The conflict algorithm
-					 * (ON_CONFLICT_ACTION_ABORT, _REPLACE,
-					 * etc.)
-					 */
-    )
+struct TriggerStep *
+sql_trigger_insert_step(struct sql *db, struct Token *table_name,
+			struct IdList *column_list, struct Select *select,
+			enum on_conflict_action orconf)
 {
-	TriggerStep *pTriggerStep;
-
-	assert(pSelect != 0 || db->mallocFailed);
-
-	pTriggerStep = triggerStepAllocate(db, TK_INSERT, pTableName);
-	if (pTriggerStep) {
-		pTriggerStep->pSelect =
-		    sqlSelectDup(db, pSelect, EXPRDUP_REDUCE);
-		pTriggerStep->pIdList = pColumn;
-		pTriggerStep->orconf = orconf;
+	assert(select != NULL || db->mallocFailed);
+	struct TriggerStep *trigger_step =
+		sql_trigger_step_new(db, TK_INSERT, table_name);
+	if (trigger_step != NULL) {
+		trigger_step->pSelect =
+			sqlSelectDup(db, select, EXPRDUP_REDUCE);
+		trigger_step->pIdList = column_list;
+		trigger_step->orconf = orconf;
 	} else {
-		sqlIdListDelete(db, pColumn);
+		sqlIdListDelete(db, column_list);
 	}
-	sql_select_delete(db, pSelect);
-
-	return pTriggerStep;
+	sql_select_delete(db, select);
+	return trigger_step;
 }
 
-/*
- * Construct a trigger step that implements an UPDATE statement and return
- * a pointer to that trigger step.  The parser calls this routine when it
- * sees an UPDATE statement inside the body of a CREATE TRIGGER.
- */
-TriggerStep *
-sqlTriggerUpdateStep(sql * db,	/* The database connection */
-			 Token * pTableName,	/* Name of the table to be updated */
-			 ExprList * pEList,	/* The SET clause: list of column and new values */
-			 Expr * pWhere,	/* The WHERE clause */
-			 u8 orconf	/* The conflict algorithm.
-					 * (ON_CONFLICT_ACTION_ABORT, _IGNORE,
-					 * etc)
-					 */
-    )
+struct TriggerStep *
+sql_trigger_update_step(struct sql *db, struct Token *table_name,
+		        struct ExprList *new_list, struct Expr *where,
+			enum on_conflict_action orconf)
 {
-	TriggerStep *pTriggerStep;
-
-	pTriggerStep = triggerStepAllocate(db, TK_UPDATE, pTableName);
-	if (pTriggerStep) {
-		pTriggerStep->pExprList =
-		    sql_expr_list_dup(db, pEList, EXPRDUP_REDUCE);
-		pTriggerStep->pWhere =
-		    sqlExprDup(db, pWhere, EXPRDUP_REDUCE);
-		pTriggerStep->orconf = orconf;
+	struct TriggerStep *trigger_step =
+		sql_trigger_step_new(db, TK_UPDATE, table_name);
+	if (trigger_step != NULL) {
+		trigger_step->pExprList =
+		    sql_expr_list_dup(db, new_list, EXPRDUP_REDUCE);
+		trigger_step->pWhere = sqlExprDup(db, where, EXPRDUP_REDUCE);
+		trigger_step->orconf = orconf;
 	}
-	sql_expr_list_delete(db, pEList);
-	sql_expr_delete(db, pWhere, false);
-	return pTriggerStep;
+	sql_expr_list_delete(db, new_list);
+	sql_expr_delete(db, where, false);
+	return trigger_step;
 }
 
-/*
- * Construct a trigger step that implements a DELETE statement and return
- * a pointer to that trigger step.  The parser calls this routine when it
- * sees a DELETE statement inside the body of a CREATE TRIGGER.
- */
-TriggerStep *
-sqlTriggerDeleteStep(sql * db,	/* Database connection */
-			 Token * pTableName,	/* The table from which rows are deleted */
-			 Expr * pWhere	/* The WHERE clause */
-    )
+struct TriggerStep *
+sql_trigger_delete_step(struct sql *db, struct Token *table_name,
+			struct Expr *where)
 {
-	TriggerStep *pTriggerStep;
-
-	pTriggerStep = triggerStepAllocate(db, TK_DELETE, pTableName);
-	if (pTriggerStep) {
-		pTriggerStep->pWhere =
-		    sqlExprDup(db, pWhere, EXPRDUP_REDUCE);
-		pTriggerStep->orconf = ON_CONFLICT_ACTION_DEFAULT;
+	struct TriggerStep *trigger_step =
+		sql_trigger_step_new(db, TK_DELETE, table_name);
+	if (trigger_step != NULL) {
+		trigger_step->pWhere = sqlExprDup(db, where, EXPRDUP_REDUCE);
+		trigger_step->orconf = ON_CONFLICT_ACTION_DEFAULT;
 	}
-	sql_expr_delete(db, pWhere, false);
-	return pTriggerStep;
+	sql_expr_delete(db, where, false);
+	return trigger_step;
 }
 
 void
@@ -424,9 +394,14 @@ vdbe_code_drop_trigger(struct Parse *parser, const char *trigger_name,
 }
 
 void
-sql_drop_trigger(struct Parse *parser, struct SrcList *name, bool no_err)
+sql_drop_trigger(struct Parse *parser)
 {
-
+	struct drop_entity_def *drop_def = &parser->drop_trigger_def.base;
+	struct alter_entity_def *alter_def = &drop_def->base;
+	assert(alter_def->entity_type == ENTITY_TYPE_TRIGGER);
+	assert(alter_def->alter_action == ALTER_ACTION_DROP);
+	struct SrcList *name = alter_def->entity_name;
+	bool no_err = drop_def->if_exist;
 	sql *db = parser->db;
 	if (db->mallocFailed)
 		goto drop_trigger_cleanup;
@@ -558,14 +533,14 @@ checkColumnOverlap(IdList * pIdList, ExprList * pEList)
 }
 
 struct sql_trigger *
-sql_triggers_exist(struct Table *table, int op, struct ExprList *changes_list,
-		   int *mask_ptr)
+sql_triggers_exist(struct space_def *space_def, int op,
+		   struct ExprList *changes_list, int *mask_ptr)
 {
 	int mask = 0;
 	struct sql_trigger *trigger_list = NULL;
 	struct session *user_session = current_session();
 	if ((user_session->sql_flags & SQL_EnableTrigger) != 0)
-		trigger_list = space_trigger_list(table->def->id);
+		trigger_list = space_trigger_list(space_def->id);
 	for (struct sql_trigger *p = trigger_list; p != NULL; p = p->next) {
 		if (p->op == op && checkColumnOverlap(p->pColumns,
 						      changes_list) != 0)
@@ -588,12 +563,13 @@ targetSrcList(Parse * pParse,	/* The parsing context */
 	sql *db = pParse->db;
 	SrcList *pSrc;		/* SrcList to be returned */
 
-	pSrc = sqlSrcListAppend(db, 0, 0);
-	if (pSrc) {
-		assert(pSrc->nSrc > 0);
-		pSrc->a[pSrc->nSrc - 1].zName =
-		    sqlDbStrDup(db, pStep->zTarget);
+	pSrc = sql_src_list_append(db, 0, 0);
+	if (pSrc == NULL) {
+		pParse->is_aborted = true;
+		return NULL;
 	}
+	assert(pSrc->nSrc > 0);
+	pSrc->a[pSrc->nSrc - 1].zName = sqlDbStrDup(db, pStep->zTarget);
 	return pSrc;
 }
 
@@ -614,7 +590,7 @@ codeTriggerProgram(Parse * pParse,	/* The parser context */
 	Vdbe *v = pParse->pVdbe;
 	sql *db = pParse->db;
 
-	assert(pParse->pTriggerTab && pParse->pToplevel);
+	assert(pParse->triggered_space != NULL && pParse->pToplevel != NULL);
 	assert(pStepList);
 	assert(v != 0);
 
@@ -622,8 +598,9 @@ codeTriggerProgram(Parse * pParse,	/* The parser context */
 	sqlSubProgramsRemaining--;
 
 	if (sqlSubProgramsRemaining == 0) {
-		sqlErrorMsg(pParse,
-				"Maximum number of chained trigger activations exceeded.");
+		diag_set(ClientError, ER_SQL_PARSER_GENERIC, "Maximum number "\
+			 "of chained trigger activations exceeded.");
+		pParse->is_aborted = true;
 	}
 
 	for (pStep = pStepList; pStep; pStep = pStep->pNext) {
@@ -722,33 +699,13 @@ onErrorText(int onError)
 }
 #endif
 
-/*
- * Parse context structure pFrom has just been used to create a sub-vdbe
- * (trigger program). If an error has occurred, transfer error information
- * from pFrom to pTo.
- */
-static void
-transferParseError(Parse * pTo, Parse * pFrom)
-{
-	assert(pFrom->zErrMsg == 0 || pFrom->nErr);
-	assert(pTo->zErrMsg == 0 || pTo->nErr);
-	if (pTo->nErr == 0) {
-		pTo->zErrMsg = pFrom->zErrMsg;
-		pTo->nErr = pFrom->nErr;
-		pTo->rc = pFrom->rc;
-	} else {
-		sqlDbFree(pFrom->db, pFrom->zErrMsg);
-	}
-	pFrom->zErrMsg = NULL;
-}
-
 /**
  * Create and populate a new TriggerPrg object with a sub-program
  * implementing trigger pTrigger with ON CONFLICT policy orconf.
  *
  * @param parser Current parse context.
  * @param trigger sql_trigger to code.
- * @param table trigger is attached to.
+ * @param space Trigger is attached to.
  * @param orconf ON CONFLICT policy to code trigger program with.
  *
  * @retval not NULL on success.
@@ -756,7 +713,7 @@ transferParseError(Parse * pTo, Parse * pFrom)
  */
 static TriggerPrg *
 sql_row_trigger_program(struct Parse *parser, struct sql_trigger *trigger,
-			struct Table *table, int orconf)
+			struct space *space, int orconf)
 {
 	Parse *pTop = sqlParseToplevel(parser);
 	/* Database handle. */
@@ -768,7 +725,7 @@ sql_row_trigger_program(struct Parse *parser, struct sql_trigger *trigger,
 	Parse *pSubParse;	/* Parse context for sub-vdbe */
 	int iEndTrigger = 0;	/* Label to jump to if WHEN is false */
 
-	assert(trigger->zName == NULL || table->def->id == trigger->space_id);
+	assert(trigger->zName == NULL || space->def->id == trigger->space_id);
 	assert(pTop->pVdbe);
 
 	/* Allocate the TriggerPrg and SubProgram objects. To ensure that they
@@ -799,7 +756,7 @@ sql_row_trigger_program(struct Parse *parser, struct sql_trigger *trigger,
 	sql_parser_create(pSubParse, db);
 	memset(&sNC, 0, sizeof(sNC));
 	sNC.pParse = pSubParse;
-	pSubParse->pTriggerTab = table;
+	pSubParse->triggered_space = space;
 	pSubParse->pToplevel = pTop;
 	pSubParse->eTriggerOp = trigger->op;
 	pSubParse->nQueryLoop = parser->nQueryLoop;
@@ -814,7 +771,7 @@ sql_row_trigger_program(struct Parse *parser, struct sql_trigger *trigger,
 			     (trigger->op == TK_UPDATE ? "UPDATE" : ""),
 			     (trigger->op == TK_INSERT ? "INSERT" : ""),
 			     (trigger->op == TK_DELETE ? "DELETE" : ""),
-			      table->def->name));
+			      space->def->name));
 #ifndef SQL_OMIT_TRACE
 		sqlVdbeChangeP4(v, -1,
 				    sqlMPrintf(db, "-- TRIGGER %s",
@@ -850,7 +807,8 @@ sql_row_trigger_program(struct Parse *parser, struct sql_trigger *trigger,
 		VdbeComment((v, "End: %s.%s", trigger->zName,
 			     onErrorText(orconf)));
 
-		transferParseError(parser, pSubParse);
+		if (!parser->is_aborted)
+			parser->is_aborted = pSubParse->is_aborted;
 		if (db->mallocFailed == 0) {
 			pProgram->aOp =
 			    sqlVdbeTakeOpArray(v, &pProgram->nOp,
@@ -864,7 +822,6 @@ sql_row_trigger_program(struct Parse *parser, struct sql_trigger *trigger,
 		sqlVdbeDelete(v);
 	}
 
-	assert(!pSubParse->pZombieTab);
 	assert(!pSubParse->pTriggerPrg && !pSubParse->nMaxArg);
 	sql_parser_destroy(pSubParse);
 	sqlStackFree(db, pSubParse);
@@ -888,12 +845,12 @@ sql_row_trigger_program(struct Parse *parser, struct sql_trigger *trigger,
  */
 static TriggerPrg *
 sql_row_trigger(struct Parse *parser, struct sql_trigger *trigger,
-		struct Table *table, int orconf)
+		struct space *space, int orconf)
 {
 	Parse *pRoot = sqlParseToplevel(parser);
 	TriggerPrg *pPrg;
 
-	assert(trigger->zName == NULL || table->def->id == trigger->space_id);
+	assert(trigger->zName == NULL || space->def->id == trigger->space_id);
 
 	/*
 	 * It may be that this trigger has already been coded (or
@@ -911,21 +868,21 @@ sql_row_trigger(struct Parse *parser, struct sql_trigger *trigger,
 	 * a new one.
 	 */
 	if (pPrg == NULL)
-		pPrg = sql_row_trigger_program(parser, trigger, table, orconf);
+		pPrg = sql_row_trigger_program(parser, trigger, space, orconf);
 
 	return pPrg;
 }
 
 void
 vdbe_code_row_trigger_direct(struct Parse *parser, struct sql_trigger *trigger,
-			     struct Table *table, int reg, int orconf,
+			     struct space *space, int reg, int orconf,
 			     int ignore_jump)
 {
 	/* Main VM. */
 	struct Vdbe *v = sqlGetVdbe(parser);
 
-	TriggerPrg *pPrg = sql_row_trigger(parser, trigger, table, orconf);
-	assert(pPrg != NULL || parser->nErr != 0 ||
+	TriggerPrg *pPrg = sql_row_trigger(parser, trigger, space, orconf);
+	assert(pPrg != NULL || parser->is_aborted ||
 	       parser->db->mallocFailed != 0);
 
 	/*
@@ -944,7 +901,7 @@ vdbe_code_row_trigger_direct(struct Parse *parser, struct sql_trigger *trigger,
 			  ++parser->nMem, (const char *)pPrg->pProgram,
 			  P4_SUBPROGRAM);
 	VdbeComment((v, "Call: %s.%s", (trigger->zName ? trigger->zName :
-					"fkey"),
+					"fk_constraint"),
 		     onErrorText(orconf)));
 
 	/*
@@ -962,7 +919,7 @@ vdbe_code_row_trigger_direct(struct Parse *parser, struct sql_trigger *trigger,
 void
 vdbe_code_row_trigger(struct Parse *parser, struct sql_trigger *trigger,
 		      int op, struct ExprList *changes_list, int tr_tm,
-		      struct Table *table, int reg, int orconf, int ignore_jump)
+		      struct space *space, int reg, int orconf, int ignore_jump)
 {
 	assert(op == TK_UPDATE || op == TK_INSERT || op == TK_DELETE);
 	assert(tr_tm == TRIGGER_BEFORE || tr_tm == TRIGGER_AFTER);
@@ -972,7 +929,7 @@ vdbe_code_row_trigger(struct Parse *parser, struct sql_trigger *trigger,
 		/* Determine whether we should code trigger. */
 		if (p->op == op && p->tr_tm == tr_tm &&
 		    checkColumnOverlap(p->pColumns, changes_list)) {
-			vdbe_code_row_trigger_direct(parser, p, table, reg,
+			vdbe_code_row_trigger_direct(parser, p, space, reg,
 						     orconf, ignore_jump);
 		}
 	}
@@ -981,7 +938,7 @@ vdbe_code_row_trigger(struct Parse *parser, struct sql_trigger *trigger,
 u32
 sql_trigger_colmask(Parse *parser, struct sql_trigger *trigger,
 		    ExprList *changes_list, int new, int tr_tm,
-		    Table *table, int orconf)
+		    struct space *space, int orconf)
 {
 	const int op = changes_list != NULL ? TK_UPDATE : TK_DELETE;
 	u32 mask = 0;
@@ -991,7 +948,7 @@ sql_trigger_colmask(Parse *parser, struct sql_trigger *trigger,
 		if (p->op == op && (tr_tm & p->tr_tm)
 		    && checkColumnOverlap(p->pColumns, changes_list)) {
 			TriggerPrg *prg =
-				sql_row_trigger(parser, p, table, orconf);
+				sql_row_trigger(parser, p, space, orconf);
 			if (prg != NULL)
 				mask |= prg->aColmask[new];
 		}

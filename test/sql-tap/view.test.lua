@@ -1,6 +1,6 @@
 #!/usr/bin/env tarantool
 test = require("sqltester")
-test:plan(74)
+test:plan(73)
 
 --!./tcltestrunner.lua
 -- 2002 February 26
@@ -69,7 +69,7 @@ if (0 > 0)
             SELECT * FROM v1 ORDER BY a;
         ]], {
             -- <view-1.2>
-            1, "no such table: v1"
+            1, "Space 'V1' does not exist"
             -- </view-1.2>
         })
 
@@ -106,7 +106,7 @@ test:do_catchsql_test(
         SELECT * FROM v1 ORDER BY a;
     ]], {
         -- <view-1.4>
-        1, "no such table: V1"
+        1, "Space 'V1' does not exist"
         -- </view-1.4>
     })
 
@@ -189,7 +189,7 @@ test:do_catchsql_test(
         INSERT INTO v2 VALUES(1,2,3,4);
     ]], {
         -- <view-2.2>
-        1, "cannot modify V2 because it is a view"
+        1, "Can't modify space 'V2': space is a view"
         -- </view-2.2>
     })
 
@@ -199,7 +199,7 @@ test:do_catchsql_test(
         UPDATE v2 SET a=10 WHERE a=5;
     ]], {
         -- <view-2.3>
-        1, "cannot modify V2 because it is a view"
+        1, "Can't modify space 'V2': space is a view"
         -- </view-2.3>
     })
 
@@ -209,7 +209,7 @@ test:do_catchsql_test(
         DELETE FROM v2;
     ]], {
         -- <view-2.4>
-        1, "cannot modify V2 because it is a view"
+        1, "Can't modify space 'V2': space is a view"
         -- </view-2.4>
     })
 
@@ -293,7 +293,7 @@ test:do_catchsql_test(
         CREATE VIEW v1err(x,y DESC,z) AS SELECT a, b+c, c-b FROM t1;
     ]], {
         -- <view-3.3.4>
-        1, [[syntax error after column name "y"]]
+        1, [[Keyword 'DESC' is reserved. Please use double quotes if 'DESC' is an identifier.]]
         -- </view-3.3.4>
     })
 
@@ -302,7 +302,7 @@ test:do_catchsql_test(
     [[
         CREATE VIEW v1err(x,y) AS SELECT a, b+c, c-b FROM t1;
         SELECT * FROM v1err;
-    ]], {1, "expected 2 columns for 'V1ERR' but got 3"})
+    ]], {1, "Failed to create space 'V1ERR': number of aliases doesn't match provided columns"})
 
 test:do_catchsql_test(
     "view-3.3.5.2",
@@ -310,7 +310,7 @@ test:do_catchsql_test(
         DROP VIEW IF EXISTS v1err;
         CREATE VIEW v1err(w,x,y,z) AS SELECT a, b+c, c-b FROM t1;
         SELECT * FROM v1err;
-    ]], {1, "expected 4 columns for 'V1ERR' but got 3"})
+    ]], {1, "Failed to create space 'V1ERR': number of aliases doesn't match provided columns"})
 
 -- #MUST_WORK_TEST no query solution
 -- # ifcapable compound {
@@ -325,22 +325,6 @@ test:do_execsql2_test(
         -- </view-3.4>
     })
 
-
-test:do_execsql2_test(
-    "view-3.5",
-    [[
-        CREATE VIEW v4 AS
-          SELECT a, b FROM t1
-          UNION
-          SELECT b AS x, a AS y FROM t1
-          ORDER BY x, y;
-        SELECT b FROM v4 ORDER BY b LIMIT 4;
-    ]], {
-        -- <view-3.5>
-        "B", 2, "B", 3, "B", 5, "B", 6
-        -- </view-3.5>
-    })
-
 -- X(237, "X!cmd", [=[["ifcapable","compound"]]=])
 test:do_catchsql_test(
     "view-4.1",
@@ -348,7 +332,7 @@ test:do_catchsql_test(
         DROP VIEW t1;
     ]], {
         -- <view-4.1>
-        1, "use DROP TABLE to delete table T1"
+        1, "Can't drop space 'T1': use DROP TABLE"
         -- </view-4.1>
     })
 
@@ -368,7 +352,7 @@ test:do_catchsql_test(
         DROP TABLE v1;
     ]], {
         -- <view-4.3>
-        1, "use DROP VIEW to delete view V1"
+        1, "Can't drop space 'V1': use DROP VIEW"
         -- </view-4.3>
     })
 
@@ -388,7 +372,7 @@ test:do_catchsql_test(
         CREATE INDEX i1v1 ON v1(xyz);
     ]], {
         -- <view-4.5>
-        1, "views can not be indexed"
+        1, "Can't create or modify index 'I1V1' in space 'V1': views can not be indexed"
         -- </view-4.5>
     })
 
@@ -858,7 +842,7 @@ test:do_catchsql_test(
         CREATE VIEW v12 AS SELECT a FROM t1 WHERE b=?
     ]], {
         -- <view-12.1>
-        1, "parameters are not allowed in views"
+        1, "Failed to create space 'V12': parameters are not allowed in views"
         -- </view-12.1>
     })
 
@@ -868,7 +852,7 @@ test:do_catchsql_test(
         CREATE VIEW v12(x) AS SELECT a FROM t1 WHERE b=?
     ]], {
         -- <view-12.2>
-        1, "parameters are not allowed in views"
+        1, "Failed to create space 'V12': parameters are not allowed in views"
         -- </view-12.2>
     })
 
@@ -967,7 +951,7 @@ test:do_catchsql_test(
         DROP VIEW nosuchview
     ]], {
         -- <view-17.1>
-        1, "no such view: NOSUCHVIEW"
+        1, "Space 'NOSUCHVIEW' does not exist"
         -- </view-17.1>
     })
 
@@ -977,7 +961,7 @@ test:do_catchsql_test(
         DROP VIEW main.nosuchview
     ]], {
         -- <view-17.2>
-        1, "near \".\": syntax error"
+        1, "Syntax error near '.'"
         -- </view-17.2>
     })
 

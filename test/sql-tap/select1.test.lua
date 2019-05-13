@@ -13,7 +13,7 @@ test:do_catchsql_test(
         SELECT * FROM test1
     ]], {
         -- <select1-1.1>
-        1, "no such table: TEST1"
+        1, "Space 'TEST1' does not exist"
         -- </select1-1.1>
     })
 
@@ -25,7 +25,7 @@ test:do_catchsql_test(
         SELECT * FROM test1, test2
     ]], {
         -- <select1-1.2>
-        1, "no such table: TEST2"
+        1, "Space 'TEST2' does not exist"
         -- </select1-1.2>
     })
 
@@ -35,7 +35,7 @@ test:do_catchsql_test(
         SELECT * FROM test2, test1
     ]], {
         -- <select1-1.3>
-        1, "no such table: TEST2"
+        1, "Space 'TEST2' does not exist"
         -- </select1-1.3>
     })
 
@@ -519,7 +519,7 @@ test:do_catchsql_test(
         SELECT XYZZY(f1) FROM test1
     ]], {
         -- <select1-2.18>
-        1, "no such function: XYZZY"
+        1, "Function 'XYZZY' does not exist"
         -- </select1-2.18>
     })
 
@@ -840,7 +840,7 @@ test:do_catchsql_test(
         SELECT * FROM t5 ORDER BY 3;
     ]], {
         -- <select1-4.10.1>
-        1, "1st ORDER BY term out of range - should be between 1 and 2"
+        1, "Error at ORDER BY in place 1: term out of range - should be between 1 and 2"
         -- </select1-4.10.1>
     })
 
@@ -850,7 +850,7 @@ test:do_catchsql_test(
         SELECT * FROM t5 ORDER BY -1;
     ]], {
         -- <select1-4.10.2>
-        1, "1st ORDER BY term out of range - should be between 1 and 2"
+        1, "Error at ORDER BY in place 1: term out of range - should be between 1 and 2"
         -- </select1-4.10.2>
     })
 
@@ -1334,7 +1334,7 @@ test:do_catchsql2_test(
             ORDER BY f2+101;
         ]], {
             -- <select1-6.11>
-            1, "1st ORDER BY term does not match any column in the result set"
+            1, "Error at ORDER BY in place 1: term does not match any column in the result set"
             -- </select1-6.11>
         })
 
@@ -1382,7 +1382,7 @@ test:do_catchsql2_test(
                 -- </select1-6.22>
             })
 
-        test:do_execsql_test(
+        test:do_catchsql_test(
             "select1-6.23",
             [[
                 SELECT a FROM t6 WHERE b IN 
@@ -1391,7 +1391,7 @@ test:do_catchsql2_test(
                 ORDER BY a;
             ]], {
                 -- <select1-6.23>
-                "b", "d"
+                1,"Can’t resolve field 'X'"
                 -- </select1-6.23>
             })
 
@@ -1406,7 +1406,7 @@ test:do_catchsql_test(
         SELECT f1 FROM test1 WHERE f2=;
     ]], {
         -- <select1-7.1>
-        1, [[near ";": syntax error]]
+        1, [[Syntax error near ';']]
         -- </select1-7.1>
     })
 
@@ -1416,7 +1416,7 @@ test:do_catchsql_test(
             SELECT f1 FROM test1 UNION SELECT WHERE;
         ]], {
             -- <select1-7.2>
-            1, [[keyword "WHERE" is reserved]]
+            1, [[Keyword 'WHERE' is reserved. Please use double quotes if 'WHERE' is an identifier.]]
             -- </select1-7.2>
         })
 
@@ -1428,7 +1428,7 @@ test:do_catchsql_test(
     [[
         SELECT f1 FROM test1 as "hi", test2 as]], {
         -- <select1-7.3>
-        1, [[keyword "as" is reserved]]
+        1, [[Keyword 'as' is reserved. Please use double quotes if 'as' is an identifier.]]
         -- </select1-7.3>
     })
 
@@ -1438,7 +1438,7 @@ test:do_catchsql_test(
         SELECT f1 FROM test1 ORDER BY;
     ]], {
         -- <select1-7.4>
-        1, [[near ";": syntax error]]
+        1, [[Syntax error near ';']]
         -- </select1-7.4>
     })
 
@@ -1448,7 +1448,7 @@ test:do_catchsql_test(
         SELECT f1 FROM test1 ORDER BY f1 desc, f2 where;
     ]], {
         -- <select1-7.5>
-        1, [[keyword "where" is reserved]]
+        1, [[Keyword 'where' is reserved. Please use double quotes if 'where' is an identifier.]]
         -- </select1-7.5>
     })
 
@@ -1458,7 +1458,7 @@ test:do_catchsql_test(
         SELECT count(f1,f2 FROM test1;
     ]], {
         -- <select1-7.6>
-        1, [[keyword "FROM" is reserved]]
+        1, [[Keyword 'FROM' is reserved. Please use double quotes if 'FROM' is an identifier.]]
         -- </select1-7.6>
     })
 
@@ -1468,7 +1468,7 @@ test:do_catchsql_test(
         SELECT count(f1,f2+) FROM test1;
     ]], {
         -- <select1-7.7>
-        1, [[near ")": syntax error]]
+        1, [[Syntax error near ')']]
         -- </select1-7.7>
     })
 
@@ -1478,7 +1478,7 @@ test:do_catchsql_test(
         SELECT f1 FROM test1 ORDER BY f2, f1+;
     ]], {
         -- <select1-7.8>
-        1, [[near ";": syntax error]]
+        1, [[Syntax error near ';']]
         -- </select1-7.8>
     })
 
@@ -1488,7 +1488,7 @@ test:do_catchsql_test(
         SELECT f1 FROM test1 LIMIT 5+3 OFFSET 11 ORDER BY f2;
     ]], {
         -- <select1-7.9>
-        1, [[keyword "ORDER" is reserved]]
+        1, [[Keyword 'ORDER' is reserved. Please use double quotes if 'ORDER' is an identifier.]]
         -- </select1-7.9>
     })
 
@@ -1567,22 +1567,20 @@ test:do_execsql_test(
 test:do_test(
     "select1-9.2",
     function()
-        local r = box.sql.execute "SELECT * FROM test1 WHERE f1<0"
-        return r[0]
+        return box.execute("SELECT * FROM test1 WHERE f1<0").metadata
     end, {
         -- <select1-9.2>
-        "F1", "F2"
+        {name = F1, type = INTEGER},{name = F2, type = INTEGER}
         -- </select1-9.2>
     })
 
 test:do_test(
         "select1-9.3",
         function()
-            local r = box.sql.execute "SELECT * FROM test1 WHERE f1<(select count(*) from test2)"
-            return r[0]
+            return box.execute("SELECT * FROM test1 WHERE f1<(select count(*) from test2)").metadata
         end, {
             -- <select1-9.3>
-            "F1", "F2"
+            {name = F1, type = INTEGER},{name = F2, type = INTEGER}
             -- </select1-9.3>
         })
 
@@ -1591,22 +1589,20 @@ test:do_test(
 test:do_test(
     "select1-9.4",
     function()
-        local r = box.sql.execute "SELECT * FROM test1 ORDER BY f1"
-        return r[0]
+        return box.execute("SELECT * FROM test1 ORDER BY f1").metadata
     end, {
         -- <select1-9.4>
-        "F1", "F2"
+        {name = F1, type = INTEGER},{name = F2, type = INTEGER}
         -- </select1-9.4>
     })
 
 test:do_test(
     "select1-9.5",
     function()
-        local r = box.sql.execute "SELECT * FROM test1 WHERE f1<0 ORDER BY f1"
-        return r[0]
+        return box.execute("SELECT * FROM test1 WHERE f1<0 ORDER BY f1").metadata
     end, {
         -- <select1-9.5>
-        "F1", "F2"
+        {name = F1, type = INTEGER},{name = F2, type = INTEGER}
         -- </select1-9.5>
     })
 
@@ -1795,7 +1791,7 @@ test:do_catchsql_test(
         SELECT t5.* FROM t3, t4;
     ]], {
         -- <select1-11.10>
-        1, "no such table: T5"
+        1, "Space 'T5' does not exist"
         -- </select1-11.10>
     })
 
@@ -1805,7 +1801,7 @@ test:do_catchsql_test(
         SELECT t3.* FROM t3 AS x, t4;
     ]], {
         -- <select1-11.11>
-        1, "no such table: T3"
+        1, "Space 'T3' does not exist"
         -- </select1-11.11>
     })
 
@@ -2075,7 +2071,7 @@ test:do_catchsql_test(
         SELECT 1 FROM (SELECT *)
     ]], {
         -- <select1-16.1>
-        1, "no tables specified"
+        1, "Failed to expand '*' in SELECT statement without FROM clause"
         -- </select1-16.1>
     })
 

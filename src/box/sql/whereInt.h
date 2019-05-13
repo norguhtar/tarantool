@@ -39,7 +39,7 @@
 /*
  * Trace output macros
  */
-#ifdef WHERETRACE_ENABLED
+#ifdef SQL_DEBUG
 /***/ extern int sqlWhereTrace;
 #define WHERETRACE(K,X)  if(sqlWhereTrace&(K)) sqlDebugPrintf X
 #else
@@ -86,10 +86,6 @@ struct WhereLevel {
 	int addrCont;		/* Jump here to continue with the next loop cycle */
 	int addrFirst;		/* First instruction of interior of the loop */
 	int addrBody;		/* Beginning of the body of this loop */
-#ifndef SQL_LIKE_DOESNT_MATCH_BLOBS
-	u32 iLikeRepCntr;	/* LIKE range processing counter register (times 2) */
-	int addrLikeRep;	/* LIKE range processing address */
-#endif
 	u8 iFrom;		/* Which entry in the FROM clause */
 	u8 op, p3, p5;		/* Opcode, P3 & P5 of the opcode that ends the loop */
 	int p1, p2;		/* Operands of the opcode used to ends the loop */
@@ -444,7 +440,7 @@ struct WhereInfo {
  * where.c:
  */
 Bitmask sqlWhereGetMask(WhereMaskSet *, int);
-#ifdef WHERETRACE_ENABLED
+#ifdef SQL_DEBUG
 void sqlWhereClausePrint(WhereClause * pWC);
 #endif
 WhereTerm *sqlWhereFindTerm(WhereClause * pWC,	/* The WHERE clause to be searched */

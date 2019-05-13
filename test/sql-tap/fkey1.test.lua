@@ -158,7 +158,7 @@ test:do_catchsql_test(
         INSERT OR REPLACE INTO t11 VALUES (2, 3);
     ]], {
         -- <fkey1-5.2>
-        1, "FOREIGN KEY constraint failed"
+        1, "Failed to execute SQL statement: FOREIGN KEY constraint failed"
         -- </fkey1-5.2>
     })
 
@@ -194,7 +194,7 @@ test:do_catchsql_test(
         INSERT OR REPLACE INTO Foo(Id, ParentId, C1) VALUES (2, 3, 'A-2-3');
     ]], {
         -- <fkey1-5.5>
-        1, "FOREIGN KEY constraint failed"
+        1, "Failed to execute SQL statement: FOREIGN KEY constraint failed"
         -- </fkey1-5.5>
     })
 
@@ -241,9 +241,9 @@ test:do_select_tests(
         {"0",
             [[
                 CREATE TABLE T12 (A INTEGER PRIMARY KEY,
-                    B CHAR(5) UNIQUE);
+                    B VARCHAR(5) UNIQUE);
                 CREATE TABLE T13 (A INTEGER PRIMARY KEY,
-                    B CHAR(5) UNIQUE,
+                    B VARCHAR(5) UNIQUE,
                     FOREIGN KEY (B) REFERENCES T12 (B) ON UPDATE SET NULL);
                 INSERT INTO T12 VALUES (1,'a');
                 INSERT INTO T13 VALUES (1,'a');

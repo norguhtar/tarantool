@@ -1,6 +1,6 @@
 #!/usr/bin/env tarantool
 test = require("sqltester")
-test:plan(70)
+test:plan(73)
 
 --!./tcltestrunner.lua
 -- 2001 September 15
@@ -97,7 +97,7 @@ test:do_test(
         return test:catchsql "CREATE INDEX index1 ON test1(f4)"
     end, {
         -- <index-2.1b>
-        1, "no such column: F4"
+        1, "Can’t resolve field 'F4'"
         -- </index-2.1b>
     })
 
@@ -112,10 +112,10 @@ test:do_test(
             end)
         v = v == true and {0} or {1}
         test:execsql("DROP TABLE test1")
-        return table.insert(v,msg) or v
+        return table.insert(v,tostring(msg)) or v
     end, {
         -- <index-2.2>
-        1, "no such column: F4"
+        1, "Can’t resolve field 'F4'"
         -- </index-2.2>
     })
 
@@ -411,7 +411,7 @@ test:do_catchsql_test(
         DROP INDEX index1 ON test1
     ]], {
         -- <index-8.1>
-        1, "no such index: TEST1.INDEX1"
+        1, "No index 'INDEX1' is defined in space 'TEST1'"
         -- </index-8.1>
     })
 
@@ -605,7 +605,7 @@ end
 test:do_execsql_test(
     "index-12.1",
     [[
-        CREATE TABLE t4(id  INT primary key, a NUM,b INT );
+        CREATE TABLE t4(id  INT primary key, a FLOAT,b INT );
         INSERT INTO t4 VALUES(1, '0.0',1);
         INSERT INTO t4 VALUES(2, '0.00',2);
         INSERT INTO t4 VALUES(4, '-1.0',4);
@@ -994,7 +994,7 @@ test:do_catchsql_test(
         CREATE INDEX temp.i21 ON t6(c);
     ]], {
         -- <index-21.1>
-        1, "near \".\": syntax error"
+        1, "Syntax error near '.'"
         -- </index-21.1>
     })
 
@@ -1016,5 +1016,31 @@ if (0 > 0)
 
 end
 
+test:do_test(
+    "index-22.1.0",
+    function()
+        format = {}
+        format[1] = { name = 'id', type = 'scalar'}
+        format[2] = { name = 'f2', type = 'scalar'}
+        s = box.schema.create_space('T', {format = format})
+    end,
+    {})
+
+test:do_catchsql_test(
+    "alter-8.1.1",
+    [[
+        CREATE UNIQUE INDEX pk ON t("id");
+    ]], {
+        1, "Can't modify space 'T': can not add a secondary key before primary"
+    })
+
+test:do_catchsql_test(
+    "alter-8.2",
+    [[
+        ALTER TABLE t ADD CONSTRAINT pk PRIMARY KEY("id");
+        CREATE UNIQUE INDEX i ON t("id");
+    ]], {
+    0
+})
 
 test:finish_test()

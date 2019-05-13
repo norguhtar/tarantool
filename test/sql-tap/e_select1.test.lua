@@ -1,6 +1,6 @@
 #!/usr/bin/env tarantool
 test = require("sqltester")
-test:plan(520)
+test:plan(516)
 
 --!./tcltestrunner.lua
 -- 2010 July 16
@@ -105,7 +105,7 @@ test:do_catchsql_test(
         SELECT count(*) FROM t1, t2 USING (a) ON (t1.a=t2.a)
     ]], {
         -- <e_select-0.1.5>
-        1, [[keyword "ON" is reserved]]
+        1, [[Keyword 'ON' is reserved. Please use double quotes if 'ON' is an identifier.]]
         -- </e_select-0.1.5>
     })
 
@@ -807,14 +807,14 @@ test:do_select_tests(
 -- FROM clause.
 --
 data = {
-    {"1.1", "SELECT a, b, c FROM z1 WHERE *",  'near \"*\": syntax error'},
-    {"1.2", "SELECT a, b, c FROM z1 GROUP BY *", 'near \"*\": syntax error'},
-    {"1.3", "SELECT 1 + * FROM z1",  'near \"*\": syntax error'},
-    {"1.4", "SELECT * + 1 FROM z1", 'near \"+\": syntax error'},
-    {"2.1", "SELECT *", 'no tables specified'},
-    {"2.2", "SELECT * WHERE 1", 'no tables specified'},
-    {"2.3", "SELECT * WHERE 0", 'no tables specified'},
-    {"2.4", "SELECT count(*), *", 'no tables specified' }
+    {"1.1", "SELECT a, b, c FROM z1 WHERE *",  "Syntax error near '*'"},
+    {"1.2", "SELECT a, b, c FROM z1 GROUP BY *", "Syntax error near '*'"},
+    {"1.3", "SELECT 1 + * FROM z1",  "Syntax error near '*'"},
+    {"1.4", "SELECT * + 1 FROM z1", "Syntax error near '+'"},
+    {"2.1", "SELECT *", "Failed to expand '*' in SELECT statement without FROM clause"},
+    {"2.2", "SELECT * WHERE 1", "Failed to expand '*' in SELECT statement without FROM clause"},
+    {"2.3", "SELECT * WHERE 0", "Failed to expand '*' in SELECT statement without FROM clause"},
+    {"2.4", "SELECT count(*), *", "Failed to expand '*' in SELECT statement without FROM clause"}
 }
 
 for _, val in ipairs(data) do
@@ -875,7 +875,7 @@ test:do_select_tests(
                 0, -22.18, -2.2, -23.18, "suiters", 1, 68, "", 67, "quartets", 0, -31.3,
                 -1.04, -32.3, "aspen", 0, 1, 63, 0, "-26"}},
 
-        {"3", "SELECT 32*32, d||e FROM z2", {1024, "", 1024, "36.06.0"}},
+        {"3", "SELECT 32*32, CAST(d AS TEXT) || CAST(e AS TEXT) FROM z2", {1024, "", 1024, "36.06.0"}},
     })
 
 -- Test cases e_select-4.5.* and e_select-4.6.* together show that:
@@ -1136,7 +1136,7 @@ test:do_select_tests(
         {"1.1", "SELECT up FROM c1 GROUP BY up HAVING count(*)>3", {"x"}},
         {"1.2", "SELECT up FROM c1 GROUP BY up HAVING sum(down)>16", {"y"}},
         {"1.3", "SELECT up FROM c1 GROUP BY up HAVING sum(down)<16", {"x"}},
-        {"1.4", "SELECT up||down FROM c1 GROUP BY (down<5) HAVING max(down)<10", {"x4"}},
+        {"1.4", "SELECT up|| CAST(down AS TEXT) FROM c1 GROUP BY (down<5) HAVING max(down)<10", {"x4"}},
 
         {"2.1", "SELECT up FROM c1 GROUP BY up HAVING down>10", {"y"}},
         {"2.2", "SELECT up FROM c1 GROUP BY up HAVING up='y'", {"y"}},
@@ -1855,13 +1855,13 @@ test:do_catchsql_test(
     "e_select-8.7.1.1",
     "SELECT x FROM d1 UNION ALL SELECT a FROM d2 ORDER BY x*z",
     {
-        1, "1st ORDER BY term does not match any column in the result set"})
+        1, "Error at ORDER BY in place 1: term does not match any column in the result set"})
 
 test:do_catchsql_test(
     "e_select-8.7.1.2",
     "SELECT x,z FROM d1 UNION ALL SELECT a,b FROM d2 ORDER BY x, x/z",
     {
-        1, "2nd ORDER BY term does not match any column in the result set"})
+        1, "Error at ORDER BY in place 2: term does not match any column in the result set"})
 
 test:do_select_tests(
     "e_select-8.7.2",
@@ -2063,28 +2063,26 @@ test:do_select_tests(
     "e_select-8.13",
     {
         {"1", "SELECT a FROM d5 UNION ALL SELECT c FROM d6 UNION ALL SELECT e FROM d7 ORDER BY a", {1, 2, 3, 4, 5, 6}},
-        {"2", "SELECT a FROM d5 UNION ALL SELECT c FROM d6 UNION ALL SELECT e FROM d7 ORDER BY c", {1, 2, 3, 4, 5, 6}},
-        {"3", "SELECT a FROM d5 UNION ALL SELECT c FROM d6 UNION ALL SELECT e FROM d7 ORDER BY e", {1, 2, 3, 4, 5, 6}},
-        {"4", "SELECT a FROM d5 UNION ALL SELECT c FROM d6 UNION ALL SELECT e FROM d7 ORDER BY 1", {1, 2, 3, 4, 5, 6}},
-        {"5", "SELECT a, b FROM d5 UNION ALL SELECT b, a FROM d5 ORDER BY b ", {"f",  1,   "c", 4,   4, "c",   1, "f"}},
-        {"6", "SELECT a, b FROM d5 UNION ALL SELECT b, a FROM d5 ORDER BY 2 ", {"f",  1,   "c", 4,   4, "c",   1, "f"}},
-        {"7", "SELECT a, b FROM d5 UNION ALL SELECT b, a FROM d5 ORDER BY a ", {1, "f",   4, "c",   "c", 4,   "f", 1}},
-        {"8", "SELECT a, b FROM d5 UNION ALL SELECT b, a FROM d5 ORDER BY 1 ", {1, "f",   4, "c",   "c", 4,   "f", 1}},
-        {"9", "SELECT a, b FROM d5 UNION ALL SELECT b, a+1 FROM d5 ORDER BY a+1 ", {"f",  2,   "c", 5,   4, "c",   1, "f"}},
-        {"10", "SELECT a, b FROM d5 UNION ALL SELECT b, a+1 FROM d5 ORDER BY 2 ", {"f",  2,   "c", 5,   4, "c",   1, "f"}},
-        {"11", "SELECT a+1, b FROM d5 UNION ALL SELECT b, a+1 FROM d5 ORDER BY a+1 ", {2, "f",   5, "c",   "c", 5,   "f", 2}},
-        {"12", "SELECT a+1, b FROM d5 UNION ALL SELECT b, a+1 FROM d5 ORDER BY 1 ", {2, "f",   5, "c",   "c", 5,   "f", 2}},
+        {"2", "SELECT a FROM d5 UNION ALL SELECT c FROM d6 UNION ALL SELECT e FROM d7 ORDER BY 1", {1, 2, 3, 4, 5, 6}},
+        {"3", "SELECT a, b FROM d5 UNION ALL SELECT b, a FROM d5 ORDER BY b ", {"f",  1,   "c", 4,   4, "c",   1, "f"}},
+        {"4", "SELECT a, b FROM d5 UNION ALL SELECT b, a FROM d5 ORDER BY 2 ", {"f",  1,   "c", 4,   4, "c",   1, "f"}},
+        {"5", "SELECT a, b FROM d5 UNION ALL SELECT b, a FROM d5 ORDER BY a ", {1, "f",   4, "c",   "c", 4,   "f", 1}},
+        {"6", "SELECT a, b FROM d5 UNION ALL SELECT b, a FROM d5 ORDER BY 1 ", {1, "f",   4, "c",   "c", 4,   "f", 1}},
+        {"7", "SELECT a, b FROM d5 UNION ALL SELECT b, a+1 FROM d5 ORDER BY a+1 ", {"f",  2,   "c", 5,   4, "c",   1, "f"}},
+        {"8", "SELECT a, b FROM d5 UNION ALL SELECT b, a+1 FROM d5 ORDER BY 2 ", {"f",  2,   "c", 5,   4, "c",   1, "f"}},
+        {"9", "SELECT a+1, b FROM d5 UNION ALL SELECT b, a+1 FROM d5 ORDER BY a+1 ", {2, "f",   5, "c",   "c", 5,   "f", 2}},
+        {"10", "SELECT a+1, b FROM d5 UNION ALL SELECT b, a+1 FROM d5 ORDER BY 1 ", {2, "f",   5, "c",   "c", 5,   "f", 2}},
     })
 
 -- EVIDENCE-OF: R-39265-04070 If no matching expression can be found in
 -- the result columns of any constituent SELECT, it is an error.
 --
-for _, val in ipairs({{1, "SELECT a FROM d5 UNION SELECT c FROM d6 ORDER BY a+1", "1st"},
-    {2, "SELECT a FROM d5 UNION SELECT c FROM d6 ORDER BY a, a+1", "2nd"},
-    {3, "SELECT * FROM d5 INTERSECT SELECT * FROM d6 ORDER BY \"hello\"", "1st"},
-    {4, "SELECT * FROM d5 INTERSECT SELECT * FROM d6 ORDER BY blah", "1st"},
-    {5, "SELECT * FROM d5 INTERSECT SELECT * FROM d6 ORDER BY c,d,c+d", "3rd"},
-    {6, "SELECT * FROM d5 EXCEPT SELECT * FROM d7 ORDER BY 1,2,b,a/b", "4th"}}) do
+for _, val in ipairs({{1, "SELECT a FROM d5 UNION SELECT c FROM d6 ORDER BY a+1", "1"},
+    {2, "SELECT a FROM d5 UNION SELECT c FROM d6 ORDER BY a, a+1", "2"},
+    {3, "SELECT * FROM d5 INTERSECT SELECT * FROM d6 ORDER BY \"hello\"", "1"},
+    {4, "SELECT * FROM d5 INTERSECT SELECT * FROM d6 ORDER BY blah", "1"},
+    {5, "SELECT * FROM d5 INTERSECT SELECT * FROM d6 ORDER BY c,d,c+d", "3"},
+    {6, "SELECT * FROM d5 EXCEPT SELECT * FROM d7 ORDER BY 1,2,b,a/b", "4"}}) do
     local tn = val[1]
     local select = val[2]
     local err_param = val[3]
@@ -2092,7 +2090,7 @@ for _, val in ipairs({{1, "SELECT a FROM d5 UNION SELECT c FROM d6 ORDER BY a+1"
         "e_select-8.14."..tn,
         select,
         {
-            1, string.format("%s ORDER BY term does not match any column in the result set", err_param)})
+            1, string.format("Error at ORDER BY in place %s: term does not match any column in the result set", err_param)})
 end
 -- EVIDENCE-OF: R-03407-11483 Each term of the ORDER BY clause is
 -- processed separately and may be matched against result columns from
@@ -2101,9 +2099,7 @@ end
 test:do_select_tests(
     "e_select-8.15",
     {
-        {"1", "SELECT a, b FROM d5 UNION ALL SELECT c-1, d FROM d6 ORDER BY a, d ", {1, "e",   1, "f",   4, "b",   4, "c"}},
-        {"2", "SELECT a, b FROM d5 UNION ALL SELECT c-1, d FROM d6 ORDER BY c-1, b ", {1, "e",   1, "f",   4, "b",   4, "c"}},
-        {"3", "SELECT a, b FROM d5 UNION ALL SELECT c-1, d FROM d6 ORDER BY 1, 2 ", {1, "e",   1, "f",   4, "b",   4, "c"}},
+        {"1", "SELECT a, b FROM d5 UNION ALL SELECT c-1, d FROM d6 ORDER BY 1, 2 ", {1, "e",   1, "f",   4, "b",   4, "c"}},
     })
 
 ---------------------------------------------------------------------------

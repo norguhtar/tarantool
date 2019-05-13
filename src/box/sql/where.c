@@ -37,7 +37,7 @@
  * so is applicable.  Because this module is responsible for selecting
  * indices, you might also think of this module as the "query optimizer".
  */
-#include "coll.h"
+#include "coll/coll.h"
 #include "sqlInt.h"
 #include "tarantoolInt.h"
 #include "vdbeInt.h"
@@ -50,7 +50,7 @@
 static int whereLoopResize(sql *, WhereLoop *, int);
 
 /* Test variable that can be set to enable WHERE tracing */
-#ifdef WHERETRACE_ENABLED
+#ifdef SQL_DEBUG
 /***/ int sqlWhereTrace = 0; /* -1; */
 #endif
 
@@ -145,7 +145,7 @@ sqlWhereOkOnePass(WhereInfo * pWInfo, int *aiCur)
 	if (pWInfo->eOnePass == ONEPASS_MULTI) {
 		pWInfo->eOnePass = ONEPASS_OFF;
 	}
-#ifdef WHERETRACE_ENABLED
+#ifdef SQL_DEBUG
 	if (sqlWhereTrace && pWInfo->eOnePass != ONEPASS_OFF) {
 		sqlDebugPrintf("%s cursors: %d %d\n",
 				   pWInfo->eOnePass ==
@@ -306,11 +306,15 @@ whereScanNext(WhereScan * pScan)
 								Parse *pParse =
 									pWC->pWInfo->pParse;
 								assert(pX->pLeft);
-								uint32_t unused;
+								uint32_t id;
+								if (sql_binary_compare_coll_seq(
+									pParse, pX->pLeft,
+									pX->pRight, &id) != 0)
+									break;
 								struct coll *coll =
-									sql_binary_compare_coll_seq(
-										pParse, pX->pLeft,
-										pX->pRight, &unused);
+									id != COLL_NONE ?
+									coll_by_id(id)->coll :
+									NULL;
 								if (coll != pScan->coll)
 									continue;
 							}
@@ -556,10 +560,11 @@ findIndexCol(Parse * pParse,	/* Parse context */
 		    p->iColumn == (int) part_to_match->fieldno) {
 			bool is_found;
 			uint32_t id;
-			struct coll *coll = sql_expr_coll(pParse,
-							  pList->a[i].pExpr,
-							  &is_found, &id);
-			if (coll == part_to_match->coll)
+			struct coll *unused;
+			if (sql_expr_coll(pParse, pList->a[i].pExpr,
+					  &is_found, &id, &unused) != 0)
+				return -1;
+			if (id == part_to_match->coll_id)
 				return i;
 		}
 	}
@@ -580,7 +585,6 @@ isDistinctRedundant(Parse * pParse,		/* Parsing context */
 		    WhereClause * pWC,		/* The WHERE clause */
 		    ExprList * pDistinct)	/* The result set that needs to be DISTINCT */
 {
-	Table *pTab;
 	int iBase;
 
 	/* If there is more than one table or sub-select in the FROM clause of
@@ -590,7 +594,7 @@ isDistinctRedundant(Parse * pParse,		/* Parsing context */
 	if (pTabList->nSrc != 1)
 		return 0;
 	iBase = pTabList->a[0].iCursor;
-	pTab = pTabList->a[0].pTab;
+	struct space *space = pTabList->a[0].space;
 
 	/* If any of the expressions is an IPK column on table iBase, then return
 	 * true. Note: The (p->iTable==iBase) part of this test may be false if the
@@ -601,7 +605,7 @@ isDistinctRedundant(Parse * pParse,		/* Parsing context */
 		if (p->op == TK_COLUMN && p->iTable == iBase && p->iColumn < 0)
 			return 1;
 	}
-	if (pTab->space == NULL)
+	if (space == NULL)
 		return 0;
 	/* Loop through all indices on the table, checking each to see if it makes
 	 * the DISTINCT qualifier redundant. It does so if:
@@ -616,8 +620,8 @@ isDistinctRedundant(Parse * pParse,		/* Parsing context */
 	 *   3. All of those index columns for which the WHERE clause does not
 	 *      contain a "col=X" term are subject to a NOT NULL constraint.
 	 */
-	for (uint32_t j = 0; j < pTab->space->index_count; ++j) {
-		struct index_def *def = pTab->space->index[j]->def;
+	for (uint32_t j = 0; j < space->index_count; ++j) {
+		struct index_def *def = space->index[j]->def;
 		if (!def->opts.is_unique)
 			continue;
 		uint32_t col_count = def->key_def->part_count;
@@ -629,7 +633,7 @@ isDistinctRedundant(Parse * pParse,		/* Parsing context */
 						 i) < 0)
 					break;
 				uint32_t x = def->key_def->parts[i].fieldno;
-				if (pTab->def->fields[x].is_nullable)
+				if (space->def->fields[x].is_nullable)
 					break;
 			}
 		}
@@ -1492,7 +1496,7 @@ whereRangeScanEst(Parse * pParse,	/* Parsing & code generating context */
 		nNew = 10;
 	if (nNew < nOut)
 		nOut = nNew;
-#if defined(WHERETRACE_ENABLED)
+#if defined(SQL_DEBUG)
 	if (pLoop->nOut > nOut) {
 		WHERETRACE(0x10, ("Range scan lowers nOut from %d to %d\n",
 				  pLoop->nOut, nOut));
@@ -1606,7 +1610,7 @@ whereInScanEst(Parse * pParse,	/* Parsing & code generating context */
 	return rc;
 }
 
-#ifdef WHERETRACE_ENABLED
+#ifdef SQL_DEBUG
 /*
  * Print the content of a WhereTerm object
  */
@@ -1650,9 +1654,7 @@ whereTermPrint(WhereTerm * pTerm, int iTerm)
 		sqlTreeViewExpr(0, pTerm->pExpr, 0);
 	}
 }
-#endif
 
-#ifdef WHERETRACE_ENABLED
 /*
  * Show the complete content of a WhereClause
  */
@@ -1664,9 +1666,7 @@ sqlWhereClausePrint(WhereClause * pWC)
 		whereTermPrint(&pWC->a[i], i);
 	}
 }
-#endif
 
-#ifdef WHERETRACE_ENABLED
 /*
  * Print a WhereLoop object for debugging purposes
  */
@@ -1676,14 +1676,12 @@ whereLoopPrint(WhereLoop * p, WhereClause * pWC)
 	WhereInfo *pWInfo = pWC->pWInfo;
 	int nb = 1 + (pWInfo->pTabList->nSrc + 3) / 4;
 	struct SrcList_item *pItem = pWInfo->pTabList->a + p->iTab;
-	Table *pTab = pItem->pTab;
+	struct space_def *space_def = pItem->space->def;
 	Bitmask mAll = (((Bitmask) 1) << (nb * 4)) - 1;
-#ifdef SQL_DEBUG
 	sqlDebugPrintf("%c%2d.%0*llx.%0*llx", p->cId,
 			   p->iTab, nb, p->maskSelf, nb, p->prereq & mAll);
 	sqlDebugPrintf(" %12s",
-			   pItem->zAlias ? pItem->zAlias : pTab->def->name);
-#endif
+			   pItem->zAlias ? pItem->zAlias : space_def->name);
 	const char *zName;
 	if (p->index_def != NULL && (zName = p->index_def->name) != NULL) {
 		if (strncmp(zName, "sql_autoindex_", 17) == 0) {
@@ -1762,7 +1760,7 @@ whereLoopResize(sql * db, WhereLoop * p, int n)
 	n = (n + 7) & ~7;
 	paNew = sqlDbMallocRawNN(db, sizeof(p->aLTerm[0]) * n);
 	if (paNew == 0)
-		return SQL_NOMEM_BKPT;
+		return SQL_NOMEM;
 	memcpy(paNew, p->aLTerm, sizeof(p->aLTerm[0]) * p->nLSlot);
 	if (p->aLTerm != p->aLTermSpace)
 		sqlDbFree(db, p->aLTerm);
@@ -1783,7 +1781,7 @@ whereLoopXfer(sql * db, WhereLoop * pTo, WhereLoop * pFrom)
 		pTo->nBtm = 0;
 		pTo->nTop = 0;
 		pTo->index_def = NULL;
-		return SQL_NOMEM_BKPT;
+		return SQL_NOMEM;
 	}
 	memcpy(pTo, pFrom, WHERE_LOOP_XFER_SZ);
 	memcpy(pTo->aLTerm, pFrom->aLTerm,
@@ -2044,14 +2042,14 @@ whereLoopInsert(WhereLoopBuilder * pBuilder, WhereLoop * pTemplate)
 	 */
 	if (pBuilder->pOrSet != 0) {
 		if (pTemplate->nLTerm) {
-#ifdef WHERETRACE_ENABLED
+#ifdef SQL_DEBUG
 			u16 n = pBuilder->pOrSet->n;
 			int x =
 #endif
 			    whereOrInsert(pBuilder->pOrSet, pTemplate->prereq,
 					  pTemplate->rRun,
 					  pTemplate->nOut);
-#ifdef WHERETRACE_ENABLED		/* 0x8 */
+#ifdef SQL_DEBUG		/* 0x8 */
 			if (sqlWhereTrace & 0x8) {
 				sqlDebugPrintf(x ? "   or-%d:  " :
 						   "   or-X:  ", n);
@@ -2071,7 +2069,7 @@ whereLoopInsert(WhereLoopBuilder * pBuilder, WhereLoop * pTemplate)
 		/* There already exists a WhereLoop on the list that is better
 		 * than pTemplate, so just ignore pTemplate
 		 */
-#ifdef WHERETRACE_ENABLED		/* 0x8 */
+#ifdef SQL_DEBUG		/* 0x8 */
 		if (sqlWhereTrace & 0x8) {
 			sqlDebugPrintf("   skip: ");
 			whereLoopPrint(pTemplate, pBuilder->pWC);
@@ -2086,7 +2084,7 @@ whereLoopInsert(WhereLoopBuilder * pBuilder, WhereLoop * pTemplate)
 	 * with pTemplate[] if p[] exists, or if p==NULL then allocate a new
 	 * WhereLoop and insert it.
 	 */
-#ifdef WHERETRACE_ENABLED		/* 0x8 */
+#ifdef SQL_DEBUG		/* 0x8 */
 	if (sqlWhereTrace & 0x8) {
 		if (p != 0) {
 			sqlDebugPrintf("replace: ");
@@ -2100,7 +2098,7 @@ whereLoopInsert(WhereLoopBuilder * pBuilder, WhereLoop * pTemplate)
 		/* Allocate a new WhereLoop to add to the end of the list */
 		*ppPrev = p = sqlDbMallocRawNN(db, sizeof(WhereLoop));
 		if (p == 0)
-			return SQL_NOMEM_BKPT;
+			return SQL_NOMEM;
 		whereLoopInit(p);
 		p->pNextLoop = 0;
 	} else {
@@ -2118,7 +2116,7 @@ whereLoopInsert(WhereLoopBuilder * pBuilder, WhereLoop * pTemplate)
 			if (pToDel == 0)
 				break;
 			*ppTail = pToDel->pNextLoop;
-#ifdef WHERETRACE_ENABLED		/* 0x8 */
+#ifdef SQL_DEBUG		/* 0x8 */
 			if (sqlWhereTrace & 0x8) {
 				sqlDebugPrintf(" delete: ");
 				whereLoopPrint(pToDel, pBuilder->pWC);
@@ -2252,7 +2250,6 @@ whereRangeVectorLen(Parse * pParse,	/* Parsing context */
 		/* Test if comparison i of pTerm is compatible with column (i+nEq)
 		 * of the index. If not, exit the loop.
 		 */
-		struct coll *pColl;	/* Comparison collation sequence */
 		Expr *pLhs = pTerm->pExpr->pLeft->x.pList->a[i].pExpr;
 		Expr *pRhs = pTerm->pExpr->pRight;
 		if (pRhs->flags & EP_xIsSelect) {
@@ -2278,11 +2275,12 @@ whereRangeVectorLen(Parse * pParse,	/* Parsing context */
 			space->def->fields[pLhs->iColumn].type : FIELD_TYPE_INTEGER;
 		if (type != idx_type)
 			break;
-		uint32_t unused;
-		pColl = sql_binary_compare_coll_seq(pParse, pLhs, pRhs, &unused);
-		if (pColl == 0)
+		uint32_t id;
+		if (sql_binary_compare_coll_seq(pParse, pLhs, pRhs, &id) != 0)
 			break;
-		if (idx_def->key_def->parts[i + nEq].coll != pColl)
+		if (id == COLL_NONE)
+			break;
+		if (idx_def->key_def->parts[i + nEq].coll_id != id)
 			break;
 	}
 	return i;
@@ -2329,7 +2327,7 @@ whereLoopAddBtreeIndex(WhereLoopBuilder * pBuilder,	/* The WhereLoop factory */
 
 	pNew = pBuilder->pNew;
 	if (db->mallocFailed)
-		return SQL_NOMEM_BKPT;
+		return SQL_NOMEM;
 	WHERETRACE(0x800, ("BEGIN addBtreeIdx(%s), nEq=%d\n",
 			   probe->name, pNew->nEq));
 
@@ -2768,20 +2766,19 @@ whereLoopAddBtree(WhereLoopBuilder * pBuilder,	/* WHERE clause information */
 	int b;			/* A boolean value */
 	LogEst rSize;		/* number of rows in the table */
 	WhereClause *pWC;	/* The parsed WHERE clause */
-	Table *pTab;		/* Table being queried */
 
 	pNew = pBuilder->pNew;
 	pWInfo = pBuilder->pWInfo;
 	pTabList = pWInfo->pTabList;
 	pSrc = pTabList->a + pNew->iTab;
-	pTab = pSrc->pTab;
 	pWC = pBuilder->pWC;
 
+	struct space *space = pSrc->space;
 	if (pSrc->pIBIndex) {
 		/* An INDEXED BY clause specifies a particular index to use */
 		probe = pSrc->pIBIndex;
-	} else if (pTab->space->index_count != 0) {
-		probe = pTab->space->index[0]->def;
+	} else if (space->index_count != 0) {
+		probe = space->index[0]->def;
 	} else {
 		/* There is no INDEXED BY clause.  Create a fake Index object in local
 		 * variable fake_index to represent the primary key index.  Make this
@@ -2792,7 +2789,7 @@ whereLoopAddBtree(WhereLoopBuilder * pBuilder,	/* WHERE clause information */
 
 		struct key_part_def part;
 		part.fieldno = 0;
-		part.type = pTab->def->fields[0].type;
+		part.type = space->def->fields[0].type;
 		part.nullable_action = ON_CONFLICT_ACTION_ABORT;
 		part.is_nullable = false;
 		part.sort_order = SORT_ORDER_ASC;
@@ -2802,14 +2799,13 @@ whereLoopAddBtree(WhereLoopBuilder * pBuilder,	/* WHERE clause information */
 		struct key_def *key_def = key_def_new(&part, 1);
 		if (key_def == NULL) {
 tnt_error:
-			pWInfo->pParse->nErr++;
-			pWInfo->pParse->rc = SQL_TARANTOOL_ERROR;
+			pWInfo->pParse->is_aborted = true;
 			return SQL_TARANTOOL_ERROR;
 		}
 
 		struct index_opts opts;
 		index_opts_create(&opts);
-		fake_index = index_def_new(pTab->def->id, 0,"fake_autoindex",
+		fake_index = index_def_new(space->def->id, 0,"fake_autoindex",
 					   sizeof("fake_autoindex") - 1,
 					   TREE, &opts, key_def, NULL);
 		key_def_delete(key_def);
@@ -2825,7 +2821,7 @@ tnt_error:
 			goto tnt_error;
 		}
 		stat->tuple_log_est = (log_est_t *) ((char *) (stat + 1));
-		stat->tuple_log_est[0] = sql_space_tuple_log_count(pTab);
+		stat->tuple_log_est[0] = sql_space_tuple_log_count(pSrc->space);
 		stat->tuple_log_est[1] = 0;
 		fake_index->opts.stat = stat;
 
@@ -2892,10 +2888,10 @@ tnt_error:
 	 * index is considered.
 	 */
 	uint32_t idx_count = fake_index == NULL || pSrc->pIBIndex != NULL ?
-			     pTab->space->index_count : 1;
+			     space->index_count : 1;
 	for (uint32_t i = 0; i < idx_count; iSortIdx++, i++) {
 		if (i > 0)
-			probe = pTab->space->index[i]->def;
+			probe = space->index[i]->def;
 		rSize = index_field_tuple_est(probe, 0);
 		pNew->nEq = 0;
 		pNew->nBtm = 0;
@@ -3006,7 +3002,7 @@ whereLoopAddOr(WhereLoopBuilder * pBuilder, Bitmask mPrereq, Bitmask mUnusable)
 					continue;
 				}
 				sCur.n = 0;
-#ifdef WHERETRACE_ENABLED
+#ifdef SQL_DEBUG
 				WHERETRACE(0x200,
 					   ("OR-term %d of %p has %d subterms:\n",
 					    (int)(pOrTerm - pOrWC->a), pTerm,
@@ -3260,16 +3256,19 @@ wherePathSatisfiesOrderBy(WhereInfo * pWInfo,	/* The WHERE clause */
 			}
 			if ((pTerm->eOperator & WO_EQ) != 0
 			    && pOBExpr->iColumn >= 0) {
-				struct coll *coll1, *coll2;
 				bool unused;
-				uint32_t id;
-				coll1 = sql_expr_coll(pWInfo->pParse,
-						      pOrderBy->a[i].pExpr,
-						      &unused, &id);
-				coll2 = sql_expr_coll(pWInfo->pParse,
-						      pTerm->pExpr,
-						      &unused, &id);
-				if (coll1 != coll2)
+				uint32_t lhs_id;
+				uint32_t rhs_id;
+				struct coll *unused_coll;
+				if (sql_expr_coll(pWInfo->pParse,
+						  pOrderBy->a[i].pExpr, &unused,
+						  &lhs_id, &unused_coll) != 0)
+					return 0;
+				if (sql_expr_coll(pWInfo->pParse,
+						  pTerm->pExpr, &unused,
+						  &rhs_id, &unused_coll) != 0)
+					return 0;
+				if (lhs_id != rhs_id)
 					continue;
 			}
 			obSat |= MASKBIT(i);
@@ -3392,13 +3391,12 @@ wherePathSatisfiesOrderBy(WhereInfo * pWInfo,	/* The WHERE clause */
 					if (iColumn >= 0) {
 						bool is_found;
 						uint32_t id;
-						struct coll *coll =
-							sql_expr_coll(pWInfo->pParse,
-								      pOrderBy->a[i].pExpr,
-								      &is_found, &id);
-						struct coll *idx_coll =
-							idx_def->key_def->parts[j].coll;
-						if (coll != idx_coll)
+						struct coll *unused;
+						if (sql_expr_coll(pWInfo->pParse,
+								  pOrderBy->a[i].pExpr,
+								  &is_found, &id, &unused) != 0)
+							return 0;
+						if (idx_def->key_def->parts[j].coll_id != id)
 							continue;
 					}
 					isMatch = 1;
@@ -3504,7 +3502,7 @@ sqlWhereIsSorted(WhereInfo * pWInfo)
 	return pWInfo->sorted;
 }
 
-#ifdef WHERETRACE_ENABLED
+#ifdef SQL_DEBUG
 /* For debugging use only: */
 static const char *
 wherePathName(WherePath * pPath, int nLoop, WhereLoop * pLast)
@@ -3624,7 +3622,7 @@ wherePathSolver(WhereInfo * pWInfo, LogEst nRowEst)
 	nSpace += sizeof(LogEst) * nOrderBy;
 	pSpace = sqlDbMallocRawNN(db, nSpace);
 	if (pSpace == 0)
-		return SQL_NOMEM_BKPT;
+		return SQL_NOMEM;
 	aTo = (WherePath *) pSpace;
 	aFrom = aTo + mxChoice;
 	memset(aFrom, 0, sizeof(aFrom[0]));
@@ -3772,7 +3770,7 @@ wherePathSolver(WhereInfo * pWInfo, LogEst nRowEst)
 						 * paths currently in the best-so-far buffer.  So discard
 						 * this candidate as not viable.
 						 */
-#ifdef WHERETRACE_ENABLED	/* 0x4 */
+#ifdef SQL_DEBUG	/* 0x4 */
 						if (sqlWhereTrace & 0x4) {
 							sqlDebugPrintf("Skip   %s cost=%-3d,%3d order=%c\n",
 									   wherePathName(pFrom, iLoop,
@@ -3795,7 +3793,7 @@ wherePathSolver(WhereInfo * pWInfo, LogEst nRowEst)
 						jj = mxI;
 					}
 					pTo = &aTo[jj];
-#ifdef WHERETRACE_ENABLED	/* 0x4 */
+#ifdef SQL_DEBUG	/* 0x4 */
 					if (sqlWhereTrace & 0x4) {
 						sqlDebugPrintf
 						    ("New    %s cost=%-3d,%3d order=%c\n",
@@ -3815,7 +3813,7 @@ wherePathSolver(WhereInfo * pWInfo, LogEst nRowEst)
 					if (pTo->rCost < rCost
 					    || (pTo->rCost == rCost
 						&& pTo->nRow <= nOut)) {
-#ifdef WHERETRACE_ENABLED	/* 0x4 */
+#ifdef SQL_DEBUG	/* 0x4 */
 						if (sqlWhereTrace & 0x4) {
 							sqlDebugPrintf("Skip   %s cost=%-3d,%3d order=%c",
 									   wherePathName(pFrom, iLoop,
@@ -3840,7 +3838,7 @@ wherePathSolver(WhereInfo * pWInfo, LogEst nRowEst)
 					/* Control reaches here if the candidate path is better than the
 					 * pTo path.  Replace pTo with the candidate.
 					 */
-#ifdef WHERETRACE_ENABLED	/* 0x4 */
+#ifdef SQL_DEBUG	/* 0x4 */
 					if (sqlWhereTrace & 0x4) {
 						sqlDebugPrintf("Update %s cost=%-3d,%3d order=%c",
 								   wherePathName(pFrom, iLoop,
@@ -3889,7 +3887,7 @@ wherePathSolver(WhereInfo * pWInfo, LogEst nRowEst)
 			}
 		}
 
-#ifdef WHERETRACE_ENABLED	/* >=2 */
+#ifdef SQL_DEBUG	/* >=2 */
 		if (sqlWhereTrace & 0x02) {
 			sqlDebugPrintf("---- after round %d ----\n", iLoop);
 			for (ii = 0, pTo = aTo; ii < nTo; ii++, pTo++) {
@@ -3915,11 +3913,7 @@ wherePathSolver(WhereInfo * pWInfo, LogEst nRowEst)
 		nFrom = nTo;
 	}
 
-	if (nFrom == 0) {
-		sqlErrorMsg(pParse, "no query solution");
-		sqlDbFree(db, pSpace);
-		return SQL_ERROR;
-	}
+	assert(nFrom != 0);
 
 	/* Find the lowest cost path.  pFrom will be left pointing to that path */
 	pFrom = aFrom;
@@ -4074,7 +4068,7 @@ where_loop_builder_shortcut(struct WhereLoopBuilder *builder)
 		return 0;
 	assert(where_info->pTabList->nSrc >= 1);
 	struct SrcList_item *item = where_info->pTabList->a;
-	struct space_def *space_def = item->pTab->def;
+	struct space_def *space_def = item->space->def;
 	assert(space_def != NULL);
 	if (item->fg.isIndexedBy)
 		return 0;
@@ -4096,7 +4090,7 @@ where_loop_builder_shortcut(struct WhereLoopBuilder *builder)
 		loop->rRun = 33;
 	} else {
 		assert(loop->aLTermSpace == loop->aLTerm);
-		struct space *space = space_by_id(space_def->id);
+		struct space *space = item->space;
 		if (space != NULL) {
 			for (uint32_t i = 0; i < space->index_count; ++i) {
 				struct index_def *idx_def =
@@ -4249,7 +4243,7 @@ sqlWhereBegin(Parse * pParse,	/* The parser context */
 	u8 bFordelete = 0;	/* OPFLAG_FORDELETE or zero, as appropriate */
 	struct session *user_session = current_session();
 
-#ifdef WHERETRACE_ENABLED
+#ifdef SQL_DEBUG
 	if (user_session->sql_flags & SQL_WhereTrace)
 		sqlWhereTrace = 0xfff;
 	else
@@ -4288,7 +4282,9 @@ sqlWhereBegin(Parse * pParse,	/* The parser context */
 	 */
 	testcase(pTabList->nSrc == BMS);
 	if (pTabList->nSrc > BMS) {
-		sqlErrorMsg(pParse, "at most %d tables in a join", BMS);
+		diag_set(ClientError, ER_SQL_PARSER_LIMIT, "The number of "\
+			 "tables in a join", pTabList->nSrc, BMS);
+		pParse->is_aborted = true;
 		return 0;
 	}
 
@@ -4412,7 +4408,7 @@ sqlWhereBegin(Parse * pParse,	/* The parser context */
 	}
 
 	/* Construct the WhereLoop objects */
-#if defined(WHERETRACE_ENABLED)
+#if defined(SQL_DEBUG)
 	if (sqlWhereTrace & 0xffff) {
 		sqlDebugPrintf("*** Optimizer Start *** (wctrlFlags: 0x%x",
 				   wctrlFlags);
@@ -4431,7 +4427,7 @@ sqlWhereBegin(Parse * pParse,	/* The parser context */
 		if (rc)
 			goto whereBeginError;
 
-#ifdef WHERETRACE_ENABLED
+#ifdef SQL_DEBUG
 		if (sqlWhereTrace) {	/* Display all of the WhereLoop objects */
 			WhereLoop *p;
 			int i;
@@ -4459,10 +4455,10 @@ sqlWhereBegin(Parse * pParse,	/* The parser context */
 	    (user_session->sql_flags & SQL_ReverseOrder) != 0) {
 		pWInfo->revMask = ALLBITS;
 	}
-	if (pParse->nErr || NEVER(db->mallocFailed)) {
+	if (pParse->is_aborted || NEVER(db->mallocFailed)) {
 		goto whereBeginError;
 	}
-#ifdef WHERETRACE_ENABLED
+#ifdef SQL_DEBUG
 	if (sqlWhereTrace) {
 		sqlDebugPrintf("---- Solution nRow=%d", pWInfo->nRowOut);
 		if (pWInfo->nOBSat > 0) {
@@ -4550,10 +4546,10 @@ sqlWhereBegin(Parse * pParse,	/* The parser context */
 	 */
 	for (ii = 0, pLevel = pWInfo->a; ii < nTabList; ii++, pLevel++) {
 		struct SrcList_item *pTabItem = &pTabList->a[pLevel->iFrom];
-		Table *pTab = pTabItem->pTab;
+		struct space_def *space_def = pTabItem->space->def;
 		pLoop = pLevel->pWLoop;
-		struct space *space = space_cache_find(pTabItem->pTab->def->id);
-		if (pTab->def->id == 0 || pTab->def->opts.is_view) {
+		struct space *space = space_cache_find(space_def->id);
+		if (space_def->id == 0 || space_def->opts.is_view) {
 			/* Do nothing */
 		} else if ((pLoop->wsFlags & WHERE_IDX_ONLY) == 0 &&
 			   (wctrlFlags & WHERE_OR_SUBCLAUSE) == 0) {
@@ -4564,10 +4560,6 @@ sqlWhereBegin(Parse * pParse,	/* The parser context */
 					      space);
 			VdbeComment((v, "%s", space->def->name));
 			assert(pTabItem->iCursor == pLevel->iTabCur);
-			testcase(pWInfo->eOnePass == ONEPASS_OFF
-				 && pTab->nCol == BMS - 1);
-			testcase(pWInfo->eOnePass == ONEPASS_OFF
-				 && pTab->nCol == BMS);
 			sqlVdbeChangeP5(v, bFordelete);
 #ifdef SQL_ENABLE_COLUMN_USED_MASK
 			sqlVdbeAddOp4Dup8(v, OP_ColumnsUsed,
@@ -4603,15 +4595,16 @@ sqlWhereBegin(Parse * pParse,	/* The parser context */
 				op = 0;
 			} else if (pWInfo->eOnePass != ONEPASS_OFF) {
 				iIndexCur = iAuxArg;
-				if (pTabItem->pTab->space->index_count != 0) {
+				if (pTabItem->space->index_count != 0) {
 					uint32_t iid = 0;
-					struct index *pJ = pTabItem->pTab->space->index[iid];
+					struct index *pJ =
+						pTabItem->space->index[iid];
 					assert(wctrlFlags &
 					       WHERE_ONEPASS_DESIRED);
 					while (pJ->def->iid != idx_def->iid) {
 						iIndexCur++;
 						iid++;
-						pJ = pTabItem->pTab->space->index[iid];
+						pJ = pTabItem->space->index[iid];
 					}
 				} else {
 					for(uint32_t i = 0;
@@ -4782,14 +4775,6 @@ sqlWhereEnd(WhereInfo * pWInfo)
 			sqlVdbeJumpHere(v, pLevel->addrSkip);
 			sqlVdbeJumpHere(v, pLevel->addrSkip - 2);
 		}
-#ifndef SQL_LIKE_DOESNT_MATCH_BLOBS
-		if (pLevel->addrLikeRep) {
-			sqlVdbeAddOp2(v, OP_DecrJumpZero,
-					  (int)(pLevel->iLikeRepCntr >> 1),
-					  pLevel->addrLikeRep);
-			VdbeCoverage(v);
-		}
-#endif
 		if (pLevel->iLeftJoin) {
 			int ws = pLoop->wsFlags;
 			addr =
@@ -4816,7 +4801,7 @@ sqlWhereEnd(WhereInfo * pWInfo)
 			sqlVdbeJumpHere(v, addr);
 		}
 		VdbeModuleComment((v, "End WHERE-loop%d: %s", i,
-				   pWInfo->pTabList->a[pLevel->iFrom].pTab->
+				   pWInfo->pTabList->a[pLevel->iFrom].space->
 				   def->name));
 	}
 
@@ -4830,8 +4815,7 @@ sqlWhereEnd(WhereInfo * pWInfo)
 		int k, last;
 		VdbeOp *pOp;
 		struct SrcList_item *pTabItem = &pTabList->a[pLevel->iFrom];
-		Table *pTab MAYBE_UNUSED = pTabItem->pTab;
-		assert(pTab != 0);
+		assert(pTabItem->space != NULL);
 		pLoop = pLevel->pWLoop;
 
 		/* For a co-routine, change all OP_Column references to the table of
@@ -4871,7 +4855,8 @@ sqlWhereEnd(WhereInfo * pWInfo)
 				if (pOp->opcode == OP_Column) {
 					int x = pOp->p2;
 					assert(def == NULL ||
-					       def->space_id == pTab->def->id);
+					       def->space_id ==
+					       pTabItem->space->def->id);
 					if (x >= 0) {
 						pOp->p2 = x;
 						pOp->p1 = pLevel->iIdxCur;

@@ -179,7 +179,7 @@ test:do_catchsql_test(
     "select7-6.2",
     sql, {
         -- <select7-6.2>
-        1, "Too many UNION or EXCEPT or INTERSECT operations (limit 30 is set)"
+        1, "The number of UNION or EXCEPT or INTERSECT operations 33 exceeds the limit (30)"
         -- </select7-6.2>
     })
 
@@ -236,7 +236,7 @@ test:do_execsql_test(
         SELECT a=0, typeof(a) FROM t4 
     ]], {
         -- <select7-7.5>
-        0, "real", 0, "real"
+        0, "number", 0, "number"
         -- </select7-7.5>
     })
 
@@ -246,7 +246,7 @@ test:do_execsql_test(
         SELECT a=0, typeof(a) FROM t4 GROUP BY a 
     ]], {
         -- <select7-7.6>
-        0, "real", 0, "real"
+        0, "number", 0, "number"
         -- </select7-7.6>
     })
 
@@ -259,7 +259,7 @@ test:do_execsql_test(
         SELECT typeof(a), a FROM t5 GROUP BY a HAVING a<b;
     ]], {
         -- <select7-7.7>
-        "text", "123"
+        "string", "123"
         -- </select7-7.7>
     })
 

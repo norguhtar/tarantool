@@ -30,6 +30,7 @@
  */
 #include <assert.h>
 #include "field_def.h"
+#include "cfg.h"
 #include "sql.h"
 #include "sql/sqlInt.h"
 #include "sql/tarantoolInt.h"
@@ -37,7 +38,7 @@
 #include "mpstream.h"
 
 #include "index.h"
-#include <info.h>
+#include "info/info.h"
 #include "schema.h"
 #include "box.h"
 #include "txn.h"
@@ -51,7 +52,7 @@
 #include "session.h"
 #include "xrow.h"
 #include "iproto_constants.h"
-#include "fkey.h"
+#include "fk_constraint.h"
 #include "mpstream.h"
 
 static sql *db = NULL;
@@ -80,13 +81,7 @@ void
 sql_load_schema()
 {
 	assert(db->init.busy == 0);
-	/*
-	 * This function is called before version upgrade.
-	 * Old versions (< 2.0) lack system spaces containing
-	 * statistics (_sql_stat1 and _sql_stat4). Thus, we can
-	 * skip statistics loading.
-	 */
-	struct space *stat = space_by_id(BOX_SQL_STAT1_ID);
+	struct space *stat = space_by_name("_sql_stat1");
 	assert(stat != NULL);
 	if (stat->def->field_count == 0)
 		return;
@@ -970,7 +965,7 @@ cursor_advance(BtCursor *pCur, int *pRes)
  */
 
 char *
-sql_encode_table(struct region *region, struct Table *table, uint32_t *size)
+sql_encode_table(struct region *region, struct space_def *def, uint32_t *size)
 {
 	size_t used = region_used(region);
 	struct mpstream stream;
@@ -978,7 +973,6 @@ sql_encode_table(struct region *region, struct Table *table, uint32_t *size)
 	mpstream_init(&stream, region, region_reserve_cb, region_alloc_cb,
 		      set_encode_error, &is_error);
 
-	const struct space_def *def = table->def;
 	assert(def != NULL);
 	uint32_t field_count = def->field_count;
 	mpstream_encode_array(&stream, field_count);
@@ -1029,8 +1023,8 @@ sql_encode_table(struct region *region, struct Table *table, uint32_t *size)
 }
 
 char *
-sql_encode_table_opts(struct region *region, struct Table *table,
-		      const char *sql, uint32_t *size)
+sql_encode_table_opts(struct region *region, struct space_def *def,
+		      uint32_t *size)
 {
 	size_t used = region_used(region);
 	struct mpstream stream;
@@ -1039,18 +1033,18 @@ sql_encode_table_opts(struct region *region, struct Table *table,
 		      set_encode_error, &is_error);
 	int checks_cnt = 0;
 	struct ExprList_item *a;
-	bool is_view = table->def->opts.is_view;
-	struct ExprList *checks = table->def->opts.checks;
+	bool is_view = def->opts.is_view;
+	struct ExprList *checks = def->opts.checks;
 	if (checks != NULL) {
 		checks_cnt = checks->nExpr;
 		a = checks->a;
 	}
-	assert(is_view || sql == NULL);
 	mpstream_encode_map(&stream, 2 * is_view + (checks_cnt > 0));
 
 	if (is_view) {
+		assert(def->opts.sql != NULL);
 		mpstream_encode_str(&stream, "sql");
-		mpstream_encode_str(&stream, sql);
+		mpstream_encode_str(&stream, def->opts.sql);
 		mpstream_encode_str(&stream, "view");
 		mpstream_encode_bool(&stream, true);
 	}
@@ -1085,8 +1079,8 @@ sql_encode_table_opts(struct region *region, struct Table *table,
 }
 
 char *
-fkey_encode_links(struct region *region, const struct fkey_def *def, int type,
-		  uint32_t *size)
+fk_constraint_encode_links(struct region *region, const struct fk_constraint_def *def,
+			   int type, uint32_t *size)
 {
 	size_t used = region_used(region);
 	struct mpstream stream;
@@ -1168,18 +1162,44 @@ char *
 sql_encode_index_opts(struct region *region, const struct index_opts *opts,
 		      uint32_t *size)
 {
-	int unique_len = strlen("unique");
-	*size = mp_sizeof_map(1) + mp_sizeof_str(unique_len) +
-		mp_sizeof_bool(opts->is_unique);
-	char *mem = (char *) region_alloc(region, *size);
-	if (mem == NULL) {
-		diag_set(OutOfMemory, *size, "region_alloc", "mem");
+	size_t used = region_used(region);
+	struct mpstream stream;
+	bool is_error = false;
+	mpstream_init(&stream, region, region_reserve_cb, region_alloc_cb,
+		      set_encode_error, &is_error);
+	/*
+	 * In case of vinyl engine we must inherit global
+	 * (i.e. set via box.cfg) params such as bloom_fpr,
+	 * page_size etc.
+	 */
+	uint8_t current_engine = current_session()->sql_default_engine;
+	uint32_t map_sz = current_engine == SQL_STORAGE_ENGINE_VINYL ? 6 : 1;
+	mpstream_encode_map(&stream, map_sz);
+	mpstream_encode_str(&stream, "unique");
+	mpstream_encode_bool(&stream, opts->is_unique);
+	if (current_engine == SQL_STORAGE_ENGINE_VINYL) {
+		mpstream_encode_str(&stream, "range_size");
+		mpstream_encode_uint(&stream, cfg_geti64("vinyl_range_size"));
+		mpstream_encode_str(&stream, "page_size");
+		mpstream_encode_uint(&stream, cfg_geti64("vinyl_page_size"));
+		mpstream_encode_str(&stream, "run_count_per_level");
+		mpstream_encode_uint(&stream, cfg_geti("vinyl_run_count_per_level"));
+		mpstream_encode_str(&stream, "run_size_ratio");
+		mpstream_encode_double(&stream, cfg_getd("vinyl_run_size_ratio"));
+		mpstream_encode_str(&stream, "bloom_fpr");
+		mpstream_encode_double(&stream, cfg_getd("vinyl_bloom_fpr"));
+	}
+	mpstream_flush(&stream);
+	if (is_error) {
+		diag_set(OutOfMemory, stream.pos - stream.buf,
+			 "mpstream_flush", "stream");
 		return NULL;
 	}
-	char *pos = mp_encode_map(mem, 1);
-	pos = mp_encode_str(pos, "unique", unique_len);
-	pos = mp_encode_bool(pos, opts->is_unique);
-	return mem;
+	*size = region_used(region) - used;
+	char *raw = region_join(region, *size);
+	if (raw == NULL)
+		diag_set(OutOfMemory, *size, "region_join", "raw");
+	return raw;
 }
 
 void
@@ -1230,7 +1250,14 @@ space_column_default_expr(uint32_t space_id, uint32_t fieldno)
 	return space->def->fields[fieldno].default_value_expr;
 }
 
-struct space_def *
+/**
+ * Create and initialize a new ephemeral space_def object.
+ * @param parser SQL Parser object.
+ * @param name Name of space to be created.
+ * @retval NULL on memory allocation error, Parser state changed.
+ * @retval not NULL on success.
+ */
+static struct space_def *
 sql_ephemeral_space_def_new(struct Parse *parser, const char *name)
 {
 	struct space_def *def = NULL;
@@ -1242,8 +1269,7 @@ sql_ephemeral_space_def_new(struct Parse *parser, const char *name)
 	if (def == NULL) {
 		diag_set(OutOfMemory, size, "region_alloc",
 			 "sql_ephemeral_space_def_new");
-		parser->rc = SQL_TARANTOOL_ERROR;
-		parser->nErr++;
+		parser->is_aborted = true;
 		return NULL;
 	}
 
@@ -1254,49 +1280,23 @@ sql_ephemeral_space_def_new(struct Parse *parser, const char *name)
 	return def;
 }
 
-Table *
-sql_ephemeral_table_new(Parse *parser, const char *name)
+struct space *
+sql_ephemeral_space_new(Parse *parser, const char *name)
 {
-	sql *db = parser->db;
-	struct space_def *def = NULL;
-	Table *table = sqlDbMallocZero(db, sizeof(Table));
-	if (table != NULL)
-		def = sql_ephemeral_space_def_new(parser, name);
-	if (def == NULL) {
-		sqlDbFree(db, table);
+	size_t sz = sizeof(struct space);
+	struct space *space = (struct space *) region_alloc(&parser->region, sz);
+	if (space == NULL) {
+		diag_set(OutOfMemory, sz, "region", "space");
+		parser->is_aborted = true;
 		return NULL;
 	}
-	table->space = (struct space *) region_alloc(&parser->region,
-						     sizeof(struct space));
-	if (table->space == NULL) {
-		diag_set(OutOfMemory, sizeof(struct space), "region", "space");
-		parser->rc = SQL_TARANTOOL_ERROR;
-		parser->nErr++;
-		sqlDbFree(db, table);
-		return NULL;
-	}
-	memset(table->space, 0, sizeof(struct space));
-	table->def = def;
-	return table;
-}
 
-int
-sql_table_def_rebuild(struct sql *db, struct Table *pTable)
-{
-	struct space_def *old_def = pTable->def;
-	struct space_def *new_def = NULL;
-	new_def = space_def_new(old_def->id, old_def->uid,
-				old_def->field_count, old_def->name,
-				strlen(old_def->name), old_def->engine_name,
-				strlen(old_def->engine_name), &old_def->opts,
-				old_def->fields, old_def->field_count);
-	if (new_def == NULL) {
-		sqlOomFault(db);
-		return -1;
-	}
-	pTable->def = new_def;
-	pTable->def->opts.is_temporary = false;
-	return 0;
+	memset(space, 0, sz);
+	space->def = sql_ephemeral_space_def_new(parser, name);
+	if (space->def == NULL)
+		return NULL;
+
+	return space;
 }
 
 int
@@ -1353,19 +1353,8 @@ sql_checks_resolve_space_def_reference(ExprList *expr_list,
 	sql_parser_create(&parser, sql_get());
 	parser.parse_only = true;
 
-	Table dummy_table;
-	memset(&dummy_table, 0, sizeof(dummy_table));
-	dummy_table.def = def;
-
-	sql_resolve_self_reference(&parser, &dummy_table, NC_IsCheck, NULL,
-				   expr_list);
-	int rc = 0;
-	if (parser.rc != SQL_OK) {
-		/* Tarantool error may be already set with diag. */
-		if (parser.rc != SQL_TARANTOOL_ERROR)
-			diag_set(ClientError, ER_SQL, parser.zErrMsg);
-		rc = -1;
-	}
+	sql_resolve_self_reference(&parser, def, NC_IsCheck, NULL, expr_list);
+	int rc = parser.is_aborted ? -1 : 0;
 	sql_parser_destroy(&parser);
 	return rc;
 }

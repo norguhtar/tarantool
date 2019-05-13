@@ -67,6 +67,8 @@
 
 #include <stdbool.h>
 
+#include "box/column_mask.h"
+#include "parse_def.h"
 #include "box/field_def.h"
 #include "box/sql.h"
 #include "box/txn.h"
@@ -291,8 +293,6 @@ void sqlCoverage(int);
  */
 #define IS_BIG_INT(X)  (((X)&~(i64)0xffffffff)!=0)
 
-#define SQL_LIKE_DOESNT_MATCH_BLOBS
-
 #include "hash.h"
 #include "parse.h"
 #include <stdio.h>
@@ -329,7 +329,6 @@ struct sql_vfs {
 		      int flags, int *pOutFlags);
 	int (*xDelete) (sql_vfs *, const char *zName, int syncDir);
 	int (*xRandomness) (sql_vfs *, int nByte, char *zOut);
-	int (*xSleep) (sql_vfs *, int microseconds);
 	int (*xCurrentTime) (sql_vfs *, double *);
 	int (*xGetLastError) (sql_vfs *, int, char *);
 	/*
@@ -825,7 +824,6 @@ struct sql_io_methods {
 #define SQL_FCNTL_VFSNAME                11
 #define SQL_FCNTL_POWERSAFE_OVERWRITE    12
 #define SQL_FCNTL_PRAGMA                 13
-#define SQL_FCNTL_BUSYHANDLER            14
 #define SQL_FCNTL_TEMPFILENAME           15
 #define SQL_FCNTL_MMAP_SIZE              16
 #define SQL_FCNTL_TRACE                  17
@@ -834,9 +832,6 @@ struct sql_io_methods {
 
 int
 sql_os_init(void);
-
-int
-sql_busy_timeout(sql *, int ms);
 
 sql_int64
 sql_soft_heap_limit64(sql_int64 N);
@@ -882,9 +877,6 @@ sql_sql(sql_stmt * pStmt);
 
 int
 sql_vfs_register(sql_vfs *, int makeDflt);
-
-void
-sql_free_table(char **result);
 
 #define SQL_STMTSTATUS_FULLSCAN_STEP     1
 #define SQL_STMTSTATUS_SORT              2
@@ -1295,38 +1287,6 @@ extern const int sqlone;
 #endif
 
 /*
- * SELECTTRACE_ENABLED will be either 1 or 0 depending on whether or not
- * the Select query generator tracing logic is turned on.
- */
-#if defined(SQL_DEBUG) || defined(SQL_ENABLE_SELECTTRACE)
-#define SELECTTRACE_ENABLED
-#else
-#undef SELECTTRACE_ENABLED
-#endif
-
-#if defined(SQL_DEBUG) || defined(SQL_ENABLE_WHERETRACE)
-#define WHERETRACE_ENABLED
-#else
-#undef WHERETRACE_ENABLED
-#endif
-
-/*
- * An instance of the following structure is used to store the busy-handler
- * callback for a given sql handle.
- *
- * The sql.busyHandler member of the sql struct contains the busy
- * callback for the database handle. Each pager opened via the sql
- * handle is passed a pointer to sql.busyHandler. The busy-handler
- * callback is currently invoked only from within pager.c.
- */
-typedef struct BusyHandler BusyHandler;
-struct BusyHandler {
-	int (*xFunc) (void *, int);	/* The busy callback */
-	void *pArg;		/* First arg to busy callback */
-	int nBusy;		/* Incremented with each busy call */
-};
-
-/*
  * A convenience macro that returns the number of elements in
  * an array.
  */
@@ -1418,7 +1378,6 @@ typedef struct sqlThread sqlThread;
 typedef struct SelectDest SelectDest;
 typedef struct SrcList SrcList;
 typedef struct StrAccum StrAccum;
-typedef struct Table Table;
 typedef struct Token Token;
 typedef struct TreeView TreeView;
 typedef struct TriggerPrg TriggerPrg;
@@ -1515,7 +1474,6 @@ struct sql {
 	u8 mallocFailed;	/* True if we have seen a malloc failure */
 	u8 bBenignMalloc;	/* Do not require OOMs if true */
 	u8 dfltLockMode;	/* Default locking-mode for attached dbs */
-	u8 suppressErr;		/* Do not issue error messages if true */
 	u8 mTrace;		/* zero or more sql_TRACE flags */
 	u32 magic;		/* Magic number for detect library misuse */
 	/** Value returned by sql_row_count(). */
@@ -1554,8 +1512,6 @@ struct sql {
 	unsigned nProgressOps;	/* Number of opcodes for progress callback */
 #endif
 	Hash aFunc;		/* Hash table of connection functions */
-	BusyHandler busyHandler;	/* Busy callback */
-	int busyTimeout;	/* Busy handler timeout, in msec */
 	int *pnBytesFreed;	/* If not NULL, increment this in DbFree() */
 };
 
@@ -1563,7 +1519,11 @@ struct sql {
  * Possible values for the sql.flags.
  */
 #define SQL_VdbeTrace      0x00000001	/* True to trace VDBE execution */
+/* Debug print info about SQL query as it parsed */
+#define PARSER_TRACE_FLAG  0x00000002
 #define SQL_FullColNames   0x00000004	/* Show full column names on SELECT */
+/* True if LIKE is case sensitive. */
+#define LIKE_CASE_SENS_FLAG 0x00000008
 #define SQL_ShortColNames  0x00000040	/* Show short columns names */
 #define SQL_CountRows      0x00000080	/* Count rows changed by INSERT, */
 					  /*   DELETE, or UPDATE and return */
@@ -1575,16 +1535,13 @@ struct sql {
 #define SQL_WhereTrace     0x00008000       /* Debug info about optimizer's work */
 #define SQL_VdbeListing    0x00000400	/* Debug listings of VDBE programs */
 #define SQL_VdbeAddopTrace 0x00001000	/* Trace sqlVdbeAddOp() calls */
-#define SQL_ReadUncommitted 0x0004000	/* For shared-cache mode */
 #define SQL_ReverseOrder   0x00020000	/* Reverse unordered SELECTs */
 #define SQL_RecTriggers    0x00040000	/* Enable recursive triggers */
 #define SQL_AutoIndex      0x00100000	/* Enable automatic indexes */
 #define SQL_PreferBuiltin  0x00200000	/* Preference to built-in funcs */
 #define SQL_EnableTrigger  0x01000000	/* True to enable triggers */
 #define SQL_DeferFKs       0x02000000	/* Defer all FK constraints */
-#define SQL_QueryOnly      0x04000000	/* Disable database changes */
 #define SQL_VdbeEQP        0x08000000	/* Debug EXPLAIN QUERY PLAN */
-#define SQL_NoCkptOnClose  0x80000000	/* No checkpoint on close()/DETACH */
 
 /*
  * Bits of the sql.dbOptFlags field that are used by the
@@ -1661,6 +1618,13 @@ struct FuncDef {
 	} u;
 	/* Return type. */
 	enum field_type ret_type;
+	/**
+	 * If function returns string, it may require collation
+	 * to be applied on its result. For instance, result of
+	 * substr() built-in function must have the same collation
+	 * as its first argument.
+	 */
+	bool is_coll_derived;
 };
 
 /*
@@ -1698,7 +1662,13 @@ struct FuncDestructor {
 #define SQL_FUNC_LIKE     0x0004	/* Candidate for the LIKE optimization */
 #define SQL_FUNC_CASE     0x0008	/* Case-sensitive LIKE-type function */
 #define SQL_FUNC_EPHEM    0x0010	/* Ephemeral.  Delete with VDBE */
-#define SQL_FUNC_NEEDCOLL 0x0020	/* sqlGetFuncCollSeq() might be called */
+#define SQL_FUNC_NEEDCOLL 0x0020	/* sqlGetFuncCollSeq() might be called.
+					 * The flag is set when the collation
+					 * of function arguments should be
+					 * determined, using rules in
+					 * collations_check_compatibility()
+					 * function.
+					 */
 #define SQL_FUNC_LENGTH   0x0040	/* Built-in length() function */
 #define SQL_FUNC_TYPEOF   0x0080	/* Built-in typeof() function */
 #define SQL_FUNC_COUNT    0x0100	/* Built-in count(*) aggregate */
@@ -1720,6 +1690,11 @@ struct FuncDestructor {
  *     value passed as iArg is cast to a (void*) and made available
  *     as the user-data (sql_user_data()) for the function. If
  *     argument bNC is true, then the sql_FUNC_NEEDCOLL flag is set.
+ *
+ *   FUNCTION_COLL
+ *     Like FUNCTION except it assumes that function returns
+ *     STRING which collation should be derived from first
+ *     argument (trim, substr etc).
  *
  *   VFUNCTION(zName, nArg, iArg, bNC, xFunc)
  *     Like FUNCTION except it omits the sql_FUNC_CONSTANT flag.
@@ -1745,28 +1720,31 @@ struct FuncDestructor {
  */
 #define FUNCTION(zName, nArg, iArg, bNC, xFunc, type) \
   {nArg, SQL_FUNC_CONSTANT|(bNC*SQL_FUNC_NEEDCOLL), \
-   SQL_INT_TO_PTR(iArg), 0, xFunc, 0, #zName, {0}, type }
+   SQL_INT_TO_PTR(iArg), 0, xFunc, 0, #zName, {0}, type, false}
+#define FUNCTION_COLL(zName, nArg, iArg, bNC, xFunc) \
+  {nArg, SQL_FUNC_CONSTANT|(bNC*SQL_FUNC_NEEDCOLL), \
+   SQL_INT_TO_PTR(iArg), 0, xFunc, 0, #zName, {0}, FIELD_TYPE_STRING, true}
 #define VFUNCTION(zName, nArg, iArg, bNC, xFunc, type) \
   {nArg, (bNC*SQL_FUNC_NEEDCOLL), \
-   SQL_INT_TO_PTR(iArg), 0, xFunc, 0, #zName, {0}, type }
+   SQL_INT_TO_PTR(iArg), 0, xFunc, 0, #zName, {0}, type, false }
 #define DFUNCTION(zName, nArg, iArg, bNC, xFunc, type) \
   {nArg, SQL_FUNC_SLOCHNG|(bNC*SQL_FUNC_NEEDCOLL), \
-   SQL_INT_TO_PTR(iArg), 0, xFunc, 0, #zName, {0}, type }
+   SQL_INT_TO_PTR(iArg), 0, xFunc, 0, #zName, {0}, type, false }
 #define FUNCTION2(zName, nArg, iArg, bNC, xFunc, extraFlags, type) \
   {nArg,SQL_FUNC_CONSTANT|(bNC*SQL_FUNC_NEEDCOLL)|extraFlags,\
-   SQL_INT_TO_PTR(iArg), 0, xFunc, 0, #zName, {0}, type }
+   SQL_INT_TO_PTR(iArg), 0, xFunc, 0, #zName, {0}, type, false }
 #define STR_FUNCTION(zName, nArg, pArg, bNC, xFunc) \
   {nArg, SQL_FUNC_SLOCHNG|(bNC*SQL_FUNC_NEEDCOLL), \
-   pArg, 0, xFunc, 0, #zName, {SQL_AFF_STRING, {0}}}
+   pArg, 0, xFunc, 0, #zName, {SQL_AFF_STRING, {0}}, false}
 #define LIKEFUNC(zName, nArg, arg, flags, type) \
   {nArg, SQL_FUNC_CONSTANT|flags, \
-   (void *)(SQL_INT_TO_PTR(arg)), 0, likeFunc, 0, #zName, {0}, type }
+   (void *)(SQL_INT_TO_PTR(arg)), 0, likeFunc, 0, #zName, {0}, type, false }
 #define AGGREGATE(zName, nArg, arg, nc, xStep, xFinal, type) \
   {nArg, (nc*SQL_FUNC_NEEDCOLL), \
-   SQL_INT_TO_PTR(arg), 0, xStep,xFinal,#zName, {0}, type}
+   SQL_INT_TO_PTR(arg), 0, xStep,xFinal,#zName, {0}, type, false}
 #define AGGREGATE2(zName, nArg, arg, nc, xStep, xFinal, extraFlags, type) \
   {nArg, (nc*SQL_FUNC_NEEDCOLL)|extraFlags, \
-   SQL_INT_TO_PTR(arg), 0, xStep,xFinal,#zName, {0}, type}
+   SQL_INT_TO_PTR(arg), 0, xStep,xFinal,#zName, {0}, type, false}
 
 /*
  * All current savepoints are stored in a linked list starting at
@@ -1807,35 +1785,15 @@ struct Savepoint {
 #define SQL_NULLEQ       0x80	/* NULL=NULL */
 #define SQL_NOTNULL      0x90	/* Assert that operands are never NULL */
 
-/*
- * The schema for each SQL table and view is represented in memory
- * by an instance of the following structure.
- */
-struct Table {
-	u32 nTabRef;		/* Number of pointers to this Table */
-	/**
-	 * Estimated number of entries in table.
-	 * Used only when table represents temporary objects,
-	 * such as nested SELECTs or VIEWs. Otherwise, this stat
-	 * can be fetched from space struct.
-	 */
-	LogEst tuple_log_count;
-	Table *pNextZombie;	/* Next on the Parse.pZombieTab list */
-	/** Space definition with Tarantool metadata. */
-	struct space_def *def;
-	/** Surrogate space containing array of indexes. */
-	struct space *space;
-};
-
 /**
  * Return logarithm of tuple count in space.
  *
- * @param tab Table containing id of space to be examined.
+ * @param space Space to be examined.
  * @retval Logarithm of tuple count in space, or default values,
  *         if there is no corresponding space for given table.
  */
 LogEst
-sql_space_tuple_log_count(struct Table *tab);
+sql_space_tuple_log_count(struct space *space);
 
 /*
  * Each foreign key constraint is an instance of the following structure.
@@ -1911,19 +1869,6 @@ struct UnpackedRecord {
 				 */
 };
 
-/*
- * Possible SQL index types. Note that PK and UNIQUE constraints
- * are implemented as indexes and have their own types:
- * SQL_INDEX_TYPE_CONSTRAINT_PK and
- * SQL_INDEX_TYPE_CONSTRAINT_UNIQUE.
- */
-enum sql_index_type {
-    SQL_INDEX_TYPE_NON_UNIQUE = 0,
-    SQL_INDEX_TYPE_UNIQUE,
-    SQL_INDEX_TYPE_CONSTRAINT_UNIQUE,
-    SQL_INDEX_TYPE_CONSTRAINT_PK,
-};
-
 /**
  * Fetch statistics concerning tuples to be selected:
  * logarithm of number of tuples which has the same key as for
@@ -1952,20 +1897,6 @@ index_field_tuple_est(const struct index_def *idx, uint32_t field);
 #define DEFAULT_TUPLE_COUNT 1048576
 /** [10*log_{2}(1048576)] == 200 */
 #define DEFAULT_TUPLE_LOG_COUNT 200
-
-/*
- * Each token coming out of the lexer is an instance of
- * this structure.  Tokens are also used as part of an expression.
- *
- * Note if Token.z==0 then Token.dyn and Token.n are undefined and
- * may contain random values.  Do not make any assumptions about Token.dyn
- * and Token.n when Token.z==0.
- */
-struct Token {
-	const char *z;		/* Text of the token.  Not NULL-terminated! */
-	unsigned int n;		/* Number of characters in this token */
-	bool isReserved;         /* If reserved keyword or not */
-};
 
 /*
  * An instance of this structure contains information needed to generate
@@ -2066,7 +1997,7 @@ typedef int ynVar;
  * then iTable is the address of a subroutine that computes the subquery.
  *
  * If the Expr is of type OP_Column, and the table it is selecting from
- * is a disk table or the "old.*" pseudo-table, then pTab points to the
+ * is a disk table or the "old.*" pseudo-table, then space_def points to the
  * corresponding table definition.
  *
  * ALLOCATION NOTES:
@@ -2330,7 +2261,8 @@ struct SrcList {
 	struct SrcList_item {
 		char *zName;	/* Name of the table */
 		char *zAlias;	/* The "B" part of a "A AS B" phrase.  zName is the "A" */
-		Table *pTab;	/* An SQL table corresponding to zName */
+		/** A space corresponding to zName */
+		struct space *space;
 		Select *pSelect;	/* A SELECT statement used in place of a table name */
 		int addrFillSub;	/* Address of subroutine to manifest a subquery */
 		int regReturn;	/* Register holding return address of addrFillSub */
@@ -2348,7 +2280,7 @@ struct SrcList {
 		int iCursor;	/* The VDBE cursor number used to access this table */
 		Expr *pOn;	/* The ON clause of a join */
 		IdList *pUsing;	/* The USING clause of a join */
-		Bitmask colUsed;	/* Bit N (1<<N) set if column N of pTab is used */
+		Bitmask colUsed;	/* Bit N (1<<N) set if column N of space is used */
 		union {
 			char *zIndexedBy;	/* Identifier from "INDEXED BY <zIndex>" clause */
 			ExprList *pFuncArg;	/* Arguments to table-valued-function */
@@ -2661,33 +2593,6 @@ enum ast_type {
 	ast_type_MAX
 };
 
-/**
- * Structure representing foreign keys constraints appeared
- * within CREATE TABLE statement. Used only during parsing.
- */
-struct fkey_parse {
-	/**
-	 * Foreign keys constraint declared in <CREATE TABLE ...>
-	 * statement. They must be coded after space creation.
-	 */
-	struct fkey_def *fkey;
-	/**
-	 * If inside CREATE TABLE statement we want to declare
-	 * self-referenced FK constraint, we must delay their
-	 * resolution until the end of parsing of all columns.
-	 * E.g.: CREATE TABLE t1(id REFERENCES t1(b), b);
-	 */
-	struct ExprList *selfref_cols;
-	/**
-	 * Still, self-referenced columns might be NULL, if
-	 * we declare FK constraints referencing PK:
-	 * CREATE TABLE t1(id REFERENCES t1) - it is a valid case.
-	 */
-	bool is_self_referenced;
-	/** Organize these structs into linked list. */
-	struct rlist link;
-};
-
 /*
  * An SQL parser context.  A copy of this structure is passed through
  * the parser and down into all the parser action routine in order to
@@ -2700,9 +2605,7 @@ struct fkey_parse {
  */
 struct Parse {
 	sql *db;		/* The main database structure */
-	char *zErrMsg;		/* An error message */
 	Vdbe *pVdbe;		/* An engine for executing database bytecode */
-	int rc;			/* Return code from execution */
 	u8 colNamesSet;		/* TRUE after OP_ColumnName has been issued to pVdbe */
 	u8 nTempReg;		/* Number of temporary registers in aTempReg[] */
 	u8 isMultiWrite;	/* True if statement may modify/insert multiple rows */
@@ -2713,7 +2616,6 @@ struct Parse {
 	u8 nColCache;		/* Number of entries in aColCache[] */
 	int nRangeReg;		/* Size of the temporary register block */
 	int iRangeReg;		/* First register in temporary register block */
-	int nErr;		/* Number of errors seen */
 	int nTab;		/* Number of previously allocated VDBE cursors */
 	int nMem;		/* Number of memory cells used so far */
 	int nOpAlloc;		/* Number of slots allocated for Vdbe.aOp[] */
@@ -2725,12 +2627,10 @@ struct Parse {
 	int nLabel;		/* Number of labels used */
 	int *aLabel;		/* Space to hold the labels */
 	ExprList *pConstExpr;	/* Constant expressions */
-	Token constraintName;	/* Name of the constraint currently being parsed */
 	int nMaxArg;		/* Max args passed to user function by sub-program */
 	int nSelect;		/* Number of SELECT statements seen */
 	int nSelectIndent;	/* How far to indent SELECTTRACE() output */
 	Parse *pToplevel;	/* Parse structure for main program (or NULL) */
-	Table *pTriggerTab;	/* Table triggers are being coded for */
 	u32 nQueryLoop;		/* Est number of iterations of a query (10*log2(N)) */
 	u32 oldmask;		/* Mask of old.* columns referenced */
 	u32 newmask;		/* Mask of new.* columns referenced */
@@ -2738,6 +2638,8 @@ struct Parse {
 	u8 eOrconf;		/* Default ON CONFLICT policy for trigger steps */
 	/** Region to make SQL temp allocations. */
 	struct region region;
+	/** True, if error should be raised after parsing. */
+	bool is_aborted;
 
   /**************************************************************************
   * Fields above must be initialized to zero.  The fields that follow,
@@ -2755,7 +2657,6 @@ struct Parse {
 		int lru;	/* Least recently used entry has the smallest value */
 	} aColCache[SQL_N_COLCACHE];	/* One for each column cache entry */
 	int aTempReg[8];	/* Holding area for temporary registers */
-	Token sNameToken;	/* Token with unqualified schema object name */
 
   /************************************************************************
   * Above is constant between recursions.  Below is reset before and after
@@ -2773,28 +2674,42 @@ struct Parse {
 	VList *pVList;		/* Mapping between variable names and numbers */
 	Vdbe *pReprepare;	/* VM being reprepared (sqlReprepare()) */
 	const char *zTail;	/* All SQL text past the last semicolon parsed */
-	Table *pNewTable;	/* A table being constructed by CREATE TABLE */
-	Table *pZombieTab;	/* List of Table objects to delete after code gen */
 	TriggerPrg *pTriggerPrg;	/* Linked list of coded triggers */
 	With *pWith;		/* Current WITH clause, or NULL */
 	With *pWithToFree;	/* Free this WITH object at the end of the parse */
+	/** Space triggers are being coded for. */
+	struct space *triggered_space;
 	/**
-	 * Number of FK constraints declared within
-	 * CREATE TABLE statement.
+	 * One of parse_def structures which are used to
+	 * assemble and carry arguments of DDL routines
+	 * from parse.y
 	 */
-	uint32_t fkey_count;
+	union {
+		struct create_ck_def create_ck_def;
+		struct create_fk_def create_fk_def;
+		struct create_index_def create_index_def;
+		struct create_trigger_def create_trigger_def;
+		struct create_view_def create_view_def;
+		struct rename_entity_def rename_entity_def;
+		struct drop_fk_def drop_fk_def;
+		struct drop_index_def drop_index_def;
+		struct drop_table_def drop_table_def;
+		struct drop_trigger_def drop_trigger_def;
+		struct drop_view_def drop_view_def;
+	};
 	/**
-	 * Foreign key constraint appeared in CREATE TABLE stmt.
+	 * Table def is not part of union since information
+	 * being held must survive till the end of parsing of
+	 * whole CREATE TABLE statement (to pass it to
+	 * sqlEndTable() function).
 	 */
-	struct rlist new_fkey;
+	struct create_table_def create_table_def;
 	/**
 	 * List of all records that were inserted in system spaces
 	 * in current statement.
 	 */
 	struct rlist record_list;
 	bool initiateTTrans;	/* Initiate Tarantool transaction */
-	/** True, if table to be created has AUTOINCREMENT PK. */
-	bool is_new_table_autoinc;
 	/** If set - do not emit byte code at all, just parse.  */
 	bool parse_only;
 	/** Type of parsed_ast member. */
@@ -3128,27 +3043,6 @@ struct TreeView {
 }
 
 /*
- * The sql_*_BKPT macros are substitutes for the error codes with
- * the same name but without the _BKPT suffix.  These macros invoke
- * routines that report the line-number on which the error originated
- * using sql_log().  The routines also provide a convenient place
- * to set a debugger breakpoint.
- */
-int sqlMisuseError(int);
-int sqlCantopenError(int);
-#define SQL_MISUSE_BKPT sqlMisuseError(__LINE__)
-#define SQL_CANTOPEN_BKPT sqlCantopenError(__LINE__)
-#ifdef SQL_DEBUG
-int sqlNomemError(int);
-int sqlIoerrnomemError(int);
-#define SQL_NOMEM_BKPT sqlNomemError(__LINE__)
-#define SQL_IOERR_NOMEM_BKPT sqlIoerrnomemError(__LINE__)
-#else
-#define SQL_NOMEM_BKPT SQL_NOMEM
-#define SQL_IOERR_NOMEM_BKPT SQL_IOERR_NOMEM
-#endif
-
-/*
  * FTS4 is really an extension for FTS3.  It is enabled using the
  * sql_ENABLE_FTS3 macro.  But to avoid confusion we also call
  * the sql_ENABLE_FTS4 macro to serve as an alias for sql_ENABLE_FTS3.
@@ -3262,12 +3156,55 @@ void sqlTreeViewWith(TreeView *, const With *);
 #endif
 
 void sqlSetString(char **, sql *, const char *);
-void sqlErrorMsg(Parse *, const char *, ...);
 void sqlDequote(char *);
-void sqlNormalizeName(char *z);
-void sqlTokenInit(Token *, char *);
+
+/**
+ * Perform SQL name normalization: cast name to the upper-case
+ * (via Unicode Character Folding). Casing is locale-independent
+ * and context-sensitive. The result may be longer or shorter
+ * than the original. The source string and the destination buffer
+ * must not overlap.
+ * For example, ß is converted to SS.
+ * The result is similar to SQL UPPER function.
+ *
+ * @param dst A buffer for the result string. The result will be
+ *        0-terminated if the buffer is large enough. The contents
+ *        is undefined in case of failure.
+ * @param dst_size The size of the buffer (number of bytes).
+ * @param src The original string.
+ * @param src_len The length of the original string.
+ * @retval The count of bytes written (or need to be written).
+ */
+int
+sql_normalize_name(char *dst, int dst_size, const char *src, int src_len);
+
+/**
+ * Duplicate a normalized version of @a name onto an sqlMalloc.
+ * For normalization rules @sa sql_normalize_name().
+ * @param db SQL context.
+ * @param name Source string.
+ * @param len Length of @a name.
+ * @retval Not NULL Success. A normalized string is returned.
+ * @retval NULL Error. A diag message is set.
+ */
+char *
+sql_normalized_name_db_new(struct sql *db, const char *name, int len);
+
+/**
+ * Duplicate a normalized version of @a name onto a region @a r.
+ * For normalization rules @sa sql_normalize_name().
+ * @param r Region allocator.
+ * @param name Source string.
+ * @param len Length of @a name.
+ * @retval Not NULL Success. A normalized string is returned.
+ * @retval NULL Error. A diag message is set. Region is not
+ *         truncated back.
+ */
+char *
+sql_normalized_name_region_new(struct region *r, const char *name, int len);
+
 int sqlKeywordCode(const unsigned char *, int);
-int sqlRunParser(Parse *, const char *, char **);
+int sqlRunParser(Parse *, const char *);
 
 /**
  * This routine is called after a single SQL statement has been
@@ -3292,13 +3229,80 @@ void sqlClearTempRegCache(Parse *);
 #ifdef SQL_DEBUG
 int sqlNoTempsInRange(Parse *, int, int);
 #endif
-Expr *sqlExprAlloc(sql *, int, const Token *, int);
-Expr *sqlExpr(sql *, int, const char *);
-Expr *sqlExprInteger(sql *, int);
+
+/**
+ * Construct a new expression. Memory for this node and for the
+ * token argument is a single allocation obtained from
+ * sqlDbMalloc(). The calling function is responsible for making
+ * sure the node eventually gets freed.
+ *
+ * Special case: If op==TK_INTEGER and token points to a string
+ * that can be translated into a 32-bit integer, then the token is
+ * not stored in u.zToken. Instead, the integer values is written
+ * into u.iValue and the EP_IntValue flag is set. No extra storage
+ * is allocated to hold the integer text.
+ *
+ * @param db The database connection.
+ * @param op Expression opcode (TK_*).
+ * @param token Source token. Might be NULL.
+ * @retval Not NULL New expression object on success.
+ * @retval NULL Otherwise. The diag message is set.
+ */
+struct Expr *
+sql_expr_new(struct sql *db, int op, const struct Token *token);
+
+/**
+ * The same as @sa sql_expr_new, but normalizes name, stored in
+ * @a token. Quotes are removed if they are presented.
+ */
+struct Expr *
+sql_expr_new_dequoted(struct sql *db, int op, const struct Token *token);
+
+/**
+ * The same as @a sql_expr_new, but takes const char instead of
+ * Token. Just sugar to do not touch tokens in many places.
+ */
+static inline struct Expr *
+sql_expr_new_named(struct sql *db, int op, const char *name)
+{
+	struct Token name_token;
+	sqlTokenInit(&name_token, (char *)name);
+	return sql_expr_new(db, op, &name_token);
+}
+
+/**
+ * The same as @a sql_expr_new, but a result expression has no
+ * name.
+ */
+static inline struct Expr *
+sql_expr_new_anon(struct sql *db, int op)
+{
+	return sql_expr_new_named(db, op, NULL);
+}
+
 void sqlExprAttachSubtrees(sql *, Expr *, Expr *, Expr *);
 Expr *sqlPExpr(Parse *, int, Expr *, Expr *);
 void sqlPExprAddSelect(Parse *, Expr *, Select *);
-Expr *sqlExprAnd(sql *, Expr *, Expr *);
+
+/**
+ * Join two expressions using an AND operator. If either
+ * expression is NULL, then just return the other expression.
+ *
+ * If one side or the other of the AND is known to be false, then
+ * instead of returning an AND expression, just return a constant
+ * expression with a value of false.
+ *
+ * @param db The database connection.
+ * @param left_expr The left-branch expresion to join.
+ * @param right_expr The right-branch expression to join.
+ * @retval Not NULL New expression root node pointer on success.
+ * @retval NULL Error. A diag message is set.
+ * @retval NULL Not an error. Both arguments were NULL.
+ */
+struct Expr *
+sql_and_expr_new(struct sql *db, struct Expr *left_expr,
+		 struct Expr *right_expr);
+
 Expr *sqlExprFunction(Parse *, ExprList *, Token *);
 void sqlExprAssignVarNumber(Parse *, Expr *, u32);
 ExprList *sqlExprListAppendVector(Parse *, ExprList *, IdList *, Expr *);
@@ -3311,13 +3315,30 @@ ExprList *sqlExprListAppendVector(Parse *, ExprList *, IdList *, Expr *);
  */
 void sqlExprListSetSortOrder(ExprList *, enum sort_order sort_order);
 
+/**
+ * Check if sorting orders are the same in ORDER BY and raise an
+ * error if they are not.
+ *
+ * This check is needed only for ORDER BY + LIMIT, because
+ * currently ORDER BY + LIMIT + ASC + DESC produces incorrectly
+ * sorted results and thus forbidden. In future, we will
+ * support different sorting orders in
+ * ORDER BY + LIMIT (e.g. ORDER BY col1 ASC, col2 DESC LIMIT ...)
+ * and remove this check.
+ * @param parse Parsing context.
+ * @param expr_list Expression list with  ORDER BY clause
+ * at the end.
+ */
+void
+sql_expr_check_sort_orders(struct Parse *parse,
+			   const struct ExprList *expr_list);
+
 void sqlExprListSetName(Parse *, ExprList *, Token *, int);
 void sqlExprListSetSpan(Parse *, ExprList *, ExprSpan *);
 u32 sqlExprListFlags(const ExprList *);
 int sqlInit(sql *);
 
 void sqlPragma(Parse *, Token *, Token *, Token *, int);
-void sqlDeleteColumnNames(sql *, Table *);
 
 /**
  * Return true if given column is part of primary key.
@@ -3340,22 +3361,19 @@ sql_space_column_is_in_pk(struct space *space, uint32_t);
  *
  * @param parse Parsing context.
  * @param expr_list  Expr list from which to derive column names.
- * @param table Destination table.
+ * @param space_def Destination space definition.
  * @retval sql_OK on success.
  * @retval error codef on error.
  */
-int sqlColumnsFromExprList(Parse *parse, ExprList *expr_list, Table *table);
+int sqlColumnsFromExprList(Parse *parse, ExprList *expr_list,
+			   struct space_def *space_def);
 
-void sqlSelectAddColumnTypeAndCollation(Parse *, Table *, Select *);
-Table *sqlResultSetOfSelect(Parse *, Select *);
+void
+sqlSelectAddColumnTypeAndCollation(Parse *, struct space_def *, Select *);
+struct space *sqlResultSetOfSelect(Parse *, Select *);
 
-/**
- * Return the PRIMARY KEY index of a table.
- */
-struct index *
-sql_table_primary_key(const struct Table *tab);
-
-void sqlStartTable(Parse *, Token *, int);
+struct space *
+sqlStartTable(Parse *, Token *, int);
 void sqlAddColumn(Parse *, Token *, struct type_def *);
 
 /**
@@ -3373,16 +3391,16 @@ void
 sql_column_add_nullable_action(struct Parse *parser,
 			       enum on_conflict_action nullable_action);
 
-void sqlAddPrimaryKey(Parse *, ExprList *, int, enum sort_order);
+void
+sqlAddPrimaryKey(struct Parse *parse);
 
 /**
  * Add a new CHECK constraint to the table currently under
  * construction.
  * @param parser Parsing context.
- * @param span Expression span object.
  */
 void
-sql_add_check_constraint(Parse *parser, ExprSpan *span);
+sql_add_check_constraint(Parse *parser);
 
 void sqlAddDefaultValue(Parse *, ExprSpan *);
 void sqlAddCollateType(Parse *, Token *);
@@ -3398,7 +3416,8 @@ void sqlAddCollateType(Parse *, Token *);
 struct coll *
 sql_column_collation(struct space_def *def, uint32_t column, uint32_t *coll_id);
 
-void sqlEndTable(Parse *, Token *, Select *);
+void
+sqlEndTable(struct Parse *parse);
 
 /**
  * Create cursor which will be positioned to the space/index.
@@ -3429,16 +3448,9 @@ int sqlFaultSim(int);
  * The parser calls this routine in order to create a new VIEW.
  *
  * @param parse_context Current parsing context.
- * @param begin The CREATE token that begins the statement.
- * @param name The token that holds the name of the view.
- * @param aliases Optional list of view column names.
- * @param select A SELECT statement that will become the new view.
- * @param if_exists Suppress error messages if VIEW already exists.
  */
 void
-sql_create_view(struct Parse *parse_context, struct Token *begin,
-		struct Token *name, struct ExprList *aliases,
-		struct Select *select, bool if_exists);
+sql_create_view(struct Parse *parse_context);
 
 /**
  * Compile view, i.e. create struct Select from
@@ -3463,17 +3475,79 @@ void
 sql_store_select(struct Parse *parse_context, struct Select *select);
 
 void
-sql_drop_table(struct Parse *, struct SrcList *, bool, bool);
-void sqlDeleteTable(sql *, Table *);
+sql_drop_table(struct Parse *);
 void sqlInsert(Parse *, SrcList *, Select *, IdList *,
-		   enum on_conflict_action);
+	       enum on_conflict_action);
 void *sqlArrayAllocate(sql *, void *, int, int *, int *);
-IdList *sqlIdListAppend(sql *, IdList *, Token *);
+
+/**
+ * Append a new element to the given IdList. Create a new IdList
+ * if need be.
+ *
+ * @param db The database connection.
+ * @param list The pointer to existent Id list if exists.
+ * @param name_token The token containing name.
+ * @retval Not NULL A new list or updated @a list.
+ * @retval NULL Error. Diag message is set.
+ */
+struct IdList *
+sql_id_list_append(struct sql *db, struct IdList *list,
+		   struct Token *name_token);
+
 int sqlIdListIndex(IdList *, const char *);
-SrcList *sqlSrcListEnlarge(sql *, SrcList *, int, int);
-SrcList *
-sql_alloc_src_list(sql *db);
-SrcList *sqlSrcListAppend(sql *, SrcList *, Token *);
+
+/**
+ * Expand the space allocated for the given SrcList object by
+ * creating new_slots new slots beginning at start_idx.
+ * The start_idx is zero based. New slots are zeroed.
+ *
+ * For example, suppose a SrcList initially contains two entries:
+ * A,B.
+ * To append 3 new entries onto the end, do this:
+ *    sql_src_list_enlarge(db, src_list, 3, 2);
+ *
+ * After the call above it would contain:  A, B, nil, nil, nil.
+ * If the start_idx argument had been 1 instead of 2, then the
+ * result would have been: A, nil, nil, nil, B.  To prepend the
+ * new slots, the start_idx value would be 0. The result then
+ * would be: nil, nil, nil, A, B.
+ *
+ * @param db The database connection.
+ * @param src_list The SrcList to be enlarged.
+ * @param new_slots Number of new slots to add to src_list->a[].
+ * @param start_idx Index in src_list->a[] of first new slot.
+ * @retval Not NULL SrcList pointer on success.
+ * @retval NULL Otherwise. The diag message is set.
+ */
+struct SrcList *
+sql_src_list_enlarge(struct sql *db, struct SrcList *src_list, int new_slots,
+		     int start_idx);
+
+/**
+ * Allocate a new empty SrcList object.
+ *
+ * @param db The database connection.
+ * @retval Not NULL List pointer on success.
+ * @retval NULL Otherwise. The diag message is set.
+ */
+struct SrcList *
+sql_src_list_new(struct sql *db);
+
+/**
+ * Append a new table name to the given list. Create a new
+ * SrcList if need be. A new entry is created in the list even
+ * if name_token is NULL.
+ *
+ * @param db The database connection.
+ * @param list Append to this SrcList. NULL creates a new SrcList.
+ * @param name_token Token representing table name.
+ * @retval Not NULL A new SrcList or updated @a list.
+ * @retval NULL Error. A diag message is set. @A list is deleted.
+ */
+struct SrcList *
+sql_src_list_append(struct sql *db, struct SrcList *list,
+		    struct Token *name_token);
+
 SrcList *sqlSrcListAppendFromTerm(Parse *, SrcList *, Token *,
 				      Token *, Select *, Expr *, IdList *);
 void sqlSrcListIndexedBy(Parse *, SrcList *, Token *);
@@ -3488,66 +3562,49 @@ void sqlIdListDelete(sql *, IdList *);
  * index and tbl_name is the name of the table that is to be
  * indexed.  Both will be NULL for a primary key or an index that
  * is created to satisfy a UNIQUE constraint.  If tbl_name and
- * name are NULL, use parse->pNewTable as the table to be indexed.
- * parse->pNewTable is a table that is currently being
- * constructed by a CREATE TABLE statement.
- *
- * col_list is a list of columns to be indexed.  col_list will be
- * NULL if this is a primary key or unique-constraint on the most
- * recent column added to the table currently under construction.
+ * name are NULL, use parse->new_space as the table to be indexed.
+ * parse->create_tale_def->new_space is a space that is currently
+ * being constructed by a CREATE TABLE statement.
  *
  * @param parse All information about this parse.
- * @param token Index name. May be NULL.
- * @param tbl_name Table to index. Use pParse->pNewTable ifNULL.
- * @param col_list A list of columns to be indexed.
- * @param start The CREATE token that begins this statement.
- * @param sort_order Sort order of primary key when pList==NULL.
- * @param if_not_exist Omit error if index already exists.
- * @param idx_type The index type.
  */
 void
-sql_create_index(struct Parse *parse, struct Token *token,
-		 struct SrcList *tbl_name, struct ExprList *col_list,
-		 struct Token *start, enum sort_order sort_order,
-		 bool if_not_exist, enum sql_index_type idx_type);
+sql_create_index(struct Parse *parse);
 
 /**
  * This routine will drop an existing named index.  This routine
  * implements the DROP INDEX statement.
  *
  * @param parse_context Current parsing context.
- * @param index_name_list List containing index name.
- * @param table_token Token representing table name.
- * @param if_exists True, if statement contains 'IF EXISTS' clause.
  */
 void
-sql_drop_index(struct Parse *, struct SrcList *, struct Token *, bool);
+sql_drop_index(struct Parse *parse_context);
 
 int sqlSelect(Parse *, Select *, SelectDest *);
 Select *sqlSelectNew(Parse *, ExprList *, SrcList *, Expr *, ExprList *,
 			 Expr *, ExprList *, u32, Expr *, Expr *);
 
 /**
- * While a SrcList can in general represent multiple tables and
+ * While a SrcList can in general represent multiple spaces and
  * subqueries (as in the FROM clause of a SELECT statement) in
  * this case it contains the name of a single table, as one might
  * find in an INSERT, DELETE, or UPDATE statement. Look up that
- * space in the cache and create Table wrapper around it.
+ * space in the cache.
  * Set an error message and return NULL if the table name is not
  * found or if space doesn't have format.
  *
  * The following fields are initialized appropriate in src_list:
  *
- *    src_list->a[0].pTab       Pointer to the Table object.
+ *    src_list->a[0].space      Pointer to the space object.
  *    src_list->a[0].pIndex     Pointer to the INDEXED BY index,
  *                              if there is one.
  *
  * @param parse Parsing context.
- * @param tbl_name Table element.
- * @retval Table object if found, NULL otherwise.
+ * @param space_name Space element.
+ * @retval Space object if found, NULL otherwise.
  */
-struct Table *
-sql_lookup_table(struct Parse *parse, struct SrcList_item *tbl_name);
+struct space *
+sql_lookup_space(struct Parse *parse, struct SrcList_item *space_name);
 
 /**
  * Generate code for a DELETE FROM statement.
@@ -3612,8 +3669,8 @@ sqlExprCodeGetColumn(Parse *, struct space_def *, int, int, int, u8);
 
 /**
  * Generate code that will extract the iColumn-th column from
- * table pTab and store the column value in a register, copy the
- * result.
+ * table defined by space_def and store the column value in
+ * a register, copy the result.
  * @param pParse Parsing and code generating context.
  * @param space_def Space definition.
  * @param iColumn Index of the table column.
@@ -3656,7 +3713,30 @@ int sqlExprCodeExprList(Parse *, ExprList *, int, int, u8);
 void sqlExprIfTrue(Parse *, Expr *, int, int);
 void sqlExprIfFalse(Parse *, Expr *, int, int);
 
-char *sqlNameFromToken(sql *, Token *);
+/**
+ * Given a token, return a string that consists of the text of
+ * that token. Space to hold the returned string is obtained
+ * from sqlMalloc() and must be freed by the calling function.
+ *
+ * Any quotation marks (ex:  "name", 'name', [name], or `name`)
+ * that surround the body of the token are removed.
+ *
+ * Tokens are often just pointers into the original SQL text and
+ * so are not \000 terminated and are not persistent. The returned
+ * string is \000 terminated and is persistent.
+ *
+ * @param db The database connection.
+ * @param t The source token with text.
+ * @retval Not NULL Formatted name on new memory.
+ * @retval NULL Error. Diag message is set.
+ */
+static inline char *
+sql_name_from_token(struct sql *db, struct Token *t)
+{
+	assert(t != NULL && t->z != NULL);
+	return sql_normalized_name_db_new(db, t->z, t->n);
+}
+
 int sqlExprCompare(Expr *, Expr *, int);
 int sqlExprListCompare(ExprList *, ExprList *, int);
 int sqlExprImpliesExpr(Expr *, Expr *, int);
@@ -3751,7 +3831,7 @@ sql_expr_needs_no_type_change(const struct Expr *expr, enum field_type type);
  *   of cursor should be preserved instead.
  *
  * @param parse Parsing context.
- * @param table Table containing the row to be deleted.
+ * @param space Space containing the row to be deleted.
  * @param trigger_list List of triggers to (potentially) fire.
  * @param cursor Cursor from which column data is extracted/
  * @param reg_pk First memory cell containing the PRIMARY KEY.
@@ -3765,7 +3845,7 @@ sql_expr_needs_no_type_change(const struct Expr *expr, enum field_type type);
  *        to the index entry to be deleted.
  */
 void
-sql_generate_row_delete(struct Parse *parse, struct Table *table,
+sql_generate_row_delete(struct Parse *parse, struct space *space,
 			struct sql_trigger *trigger_list, int cursor,
 			int reg_pk, short npk, bool need_update_count,
 			enum on_conflict_action onconf, u8 mode,
@@ -3856,7 +3936,7 @@ sql_generate_index_key(struct Parse *parse, struct index *index, int cursor,
  *  CHECK       REPLACE    Illegal. Results in an exception.
  *
  * @param parse_context Current parsing context.
- * @param tab The table being inserted or updated.
+ * @param space The space being inserted or updated.
  * @param new_tuple_reg First register in a range holding values
  *                      to insert.
  * @param on_conflict On conflict error action of INSERT or
@@ -3867,7 +3947,7 @@ sql_generate_index_key(struct Parse *parse, struct index *index, int cursor,
  */
 void
 vdbe_emit_constraint_checks(struct Parse *parse_context,
-			    struct Table *tab, int new_tuple_reg,
+			    struct space *space, int new_tuple_reg,
 			    enum on_conflict_action on_conflict,
 			    int ignore_label, int *upd_cols);
 
@@ -3899,7 +3979,7 @@ Expr *sqlExprDup(sql *, Expr *, int);
 SrcList *sqlSrcListDup(sql *, SrcList *, int);
 IdList *sqlIdListDup(sql *, IdList *);
 Select *sqlSelectDup(sql *, Select *, int);
-#ifdef SELECTTRACE_ENABLED
+#ifdef SQL_DEBUG
 void sqlSelectSetName(Select *, const char *);
 #else
 #define sqlSelectSetName(A,B)
@@ -3935,20 +4015,9 @@ sql_materialize_view(struct Parse *parse, const char *name, struct Expr *where,
  * After the trigger actions have been parsed, the
  * sql_trigger_finish() function is called to complete the trigger
  * construction process.
- *
- * @param parse The parse context of the CREATE TRIGGER statement.
- * @param name The name of the trigger.
- * @param tr_tm One of TK_BEFORE, TK_AFTER, TK_INSTEAD.
- * @param op One of TK_INSERT, TK_UPDATE, TK_DELETE.
- * @param columns column list if this is an UPDATE OF trigger.
- * @param table The name of the table/view the trigger applies to.
- * @param when  WHEN clause.
- * @param no_err Suppress errors if the trigger already exists.
  */
 void
-sql_trigger_begin(struct Parse *parse, struct Token *name, int tr_tm,
-		  int op, struct IdList *columns, struct SrcList *table,
-		  struct Expr *when, int no_err);
+sql_trigger_begin(struct Parse *parse);
 
 /**
  * This routine is called after all of the trigger actions have
@@ -3968,11 +4037,9 @@ sql_trigger_finish(struct Parse *parse, struct TriggerStep *step_list,
  * VDBE code.
  *
  * @param parser Parser context.
- * @param name The name of trigger to drop.
- * @param no_err Suppress errors if the trigger already exists.
  */
 void
-sql_drop_trigger(struct Parse *parser, struct SrcList *name, bool no_err);
+sql_drop_trigger(struct Parse *parser);
 
 /**
  * Drop a trigger given a pointer to that trigger.
@@ -3987,20 +4054,21 @@ vdbe_code_drop_trigger(struct Parse *parser, const char *trigger_name,
 		       bool account_changes);
 
 /**
- * Return a list of all triggers on table pTab if there exists at
- * least one trigger that must be fired when an operation of type
- * 'op' is performed on the table, and, if that operation is an
- * UPDATE, if at least one of the columns in changes_list is being
- * modified.
+ * Return a list of all triggers on space (represented with
+ * space_def) if there exists at least one trigger that must be
+ * fired when an operation of type 'op' is performed on the
+ * table, and, if that operation is an UPDATE, if at least one
+ * of the columns in changes_list is being modified.
  *
- * @param table The table the contains the triggers.
+ * @param space_def The definition of the space that contains
+ *        the triggers.
  * @param op operation one of TK_DELETE, TK_INSERT, TK_UPDATE.
  * @param changes_list Columns that change in an UPDATE statement.
  * @param[out] pMask Mask of TRIGGER_BEFORE|TRIGGER_AFTER
  */
 struct sql_trigger *
-sql_triggers_exist(struct Table *table, int op, struct ExprList *changes_list,
-		   int *mask_ptr);
+sql_triggers_exist(struct space_def *space_def, int op,
+		   struct ExprList *changes_list, int *mask_ptr);
 
 /**
  * This is called to code the required FOR EACH ROW triggers for
@@ -4022,13 +4090,13 @@ sql_triggers_exist(struct Table *table, int op, struct ExprList *changes_list,
  *   Register       Contains
  *   ------------------------------------------------------
  *   reg+0          OLD.PK
- *   reg+1          OLD.* value of left-most column of pTab
+ *   reg+1          OLD.* value of left-most column of space
  *   ...            ...
- *   reg+N          OLD.* value of right-most column of pTab
+ *   reg+N          OLD.* value of right-most column of space
  *   reg+N+1        NEW.PK
- *   reg+N+2        OLD.* value of left-most column of pTab
+ *   reg+N+2        OLD.* value of left-most column of space
  *   ...            ...
- *   reg+N+N+1      NEW.* value of right-most column of pTab
+ *   reg+N+N+1      NEW.* value of right-most column of space
  *
  * For ON DELETE triggers, the registers containing the NEW.*
  * values will never be accessed by the trigger program, so they
@@ -4050,7 +4118,7 @@ sql_triggers_exist(struct Table *table, int op, struct ExprList *changes_list,
  * @param op operation, one of TK_UPDATE, TK_INSERT, TK_DELETE.
  * @param changes_list Changes list for any UPDATE OF triggers.
  * @param tr_tm One of TRIGGER_BEFORE, TRIGGER_AFTER.
- * @param table The table to code triggers from.
+ * @param space The space to code triggers from.
  * @param reg The first in an array of registers.
  * @param orconf ON CONFLICT policy.
  * @param ignore_jump Instruction to jump to for RAISE(IGNORE).
@@ -4058,7 +4126,7 @@ sql_triggers_exist(struct Table *table, int op, struct ExprList *changes_list,
 void
 vdbe_code_row_trigger(struct Parse *parser, struct sql_trigger *trigger,
 		      int op, struct ExprList *changes_list, int tr_tm,
-		      struct Table *table, int reg, int orconf, int ignore_jump);
+		      struct space *space, int reg, int orconf, int ignore_jump);
 
 /**
  * Generate code for the trigger program associated with trigger
@@ -4068,23 +4136,86 @@ vdbe_code_row_trigger(struct Parse *parser, struct sql_trigger *trigger,
  *
  * @param parser Parse context.
  * @param trigger Trigger to code.
- * @param table The table to code triggers from.
+ * @param space The space to code triggers from.
  * @param reg Reg array containing OLD.* and NEW.* values.
  * @param orconf ON CONFLICT policy.
  * @param ignore_jump Instruction to jump to for RAISE(IGNORE).
  */
 void
 vdbe_code_row_trigger_direct(struct Parse *parser, struct sql_trigger *trigger,
-			     struct Table *table, int reg, int orconf,
+			     struct space *space, int reg, int orconf,
 			     int ignore_jump);
 
 void sqlDeleteTriggerStep(sql *, TriggerStep *);
-TriggerStep *sqlTriggerSelectStep(sql *, Select *);
-TriggerStep *sqlTriggerInsertStep(sql *, Token *, IdList *,
-				      Select *, u8);
-TriggerStep *sqlTriggerUpdateStep(sql *, Token *, ExprList *, Expr *,
-				      u8);
-TriggerStep *sqlTriggerDeleteStep(sql *, Token *, Expr *);
+
+/**
+ * Turn a SELECT statement (that the select parameter points to)
+ * into a trigger step.
+ * The parser calls this routine when it finds a SELECT statement
+ * in body of a TRIGGER.
+ *
+ * @param db The database connection.
+ * @param select The SELECT statement to process. Deleted on
+ *        error.
+ * @retval Not NULL TriggerStep object on success.
+ * @retval NULL Error. The diag message is set.
+ */
+struct TriggerStep *
+sql_trigger_select_step(struct sql *db, struct Select *select);
+
+/**
+ * Build a trigger step out of an INSERT statement.
+ * The parser calls this routine when it sees an INSERT inside the
+ * body of a trigger.
+ *
+ * @param db The database connection.
+ * @param table_name Name of the table into which we insert.
+ * @param column_list List of columns in table to insert into. Is
+ *        deleted on error.
+ * @param select The SELECT statement that supplies values. Is
+ *        deleted anyway.
+ * @param orconf A conflict processing algorithm.
+ * @retval Not NULL TriggerStep object on success.
+ * @retval NULL Error. The diag message is set.
+ */
+struct TriggerStep *
+sql_trigger_insert_step(struct sql *db, struct Token *table_name,
+			struct IdList *column_list, struct Select *select,
+			enum on_conflict_action orconf);
+
+/**
+ * Construct a trigger step that implements an UPDATE statemen.
+ * The parser calls this routine when it sees an UPDATE statement
+ * inside the body of a CREATE TRIGGER.
+ *
+ * @param db The database connection.
+ * @param table_name Name of the table to be updated.
+ * @param new_list The SET clause: list of column and new values.
+ *        Is deleted anyway.
+ * @param where The WHERE clause. Is deleted anyway.
+ * @param orconf A conflict processing algorithm.
+ * @retval Not NULL TriggerStep object on success.
+ * @retval NULL Error. The diag message is set.
+ */
+struct TriggerStep *
+sql_trigger_update_step(struct sql *db, struct Token *table_name,
+		        struct ExprList *new_list, struct Expr *where,
+			enum on_conflict_action orconf);
+
+/**
+ * Construct a trigger step that implements a DELETE statement.
+ * The parser calls this routine when it sees a DELETE statement
+ * inside the body of a CREATE TRIGGER.
+ *
+ * @param db The database connection.
+ * @param table_name The table from which rows are deleted.
+ * @param where The WHERE clause. Is deleted anyway.
+ * @retval Not NULL TriggerStep object on success.
+ * @retval NULL Error. The diag message is set.
+ */
+struct TriggerStep *
+sql_trigger_delete_step(struct sql *db, struct Token *table_name,
+			struct Expr *where);
 
 /**
  * Triggers may access values stored in the old.* or new.*
@@ -4121,7 +4252,7 @@ TriggerStep *sqlTriggerDeleteStep(sql *, Token *, Expr *);
  * @param changes_list Changes list for any UPDATE OF triggers.
  * @param new  1 for new.* ref mask, 0 for old.* ref mask.
  * @param tr_tm Mask of TRIGGER_BEFORE|TRIGGER_AFTER.
- * @param table The table to code triggers from.
+ * @param space The space to code triggers from.
  * @param orconf Default ON CONFLICT policy for trigger steps.
  *
  * @retval mask value.
@@ -4129,7 +4260,7 @@ TriggerStep *sqlTriggerDeleteStep(sql *, Token *, Expr *);
 u32
 sql_trigger_colmask(Parse *parser, struct sql_trigger *trigger,
 		    ExprList *changes_list, int new, int tr_tm,
-		    Table *table, int orconf);
+		    struct space *space, int orconf);
 #define sqlParseToplevel(p) ((p)->pToplevel ? (p)->pToplevel : (p))
 #define sqlIsToplevel(p) ((p)->pToplevel==0)
 
@@ -4143,7 +4274,7 @@ int sqlJoinType(Parse *, Token *, Token *, Token *);
  * @param is_deferred Change defer mode to this value.
  */
 void
-fkey_change_defer_mode(struct Parse *parse_context, bool is_deferred);
+fk_constraint_change_defer_mode(struct Parse *parse_context, bool is_deferred);
 
 /**
  * Function called from parser to handle
@@ -4152,44 +4283,99 @@ fkey_change_defer_mode(struct Parse *parse_context, bool is_deferred);
  * OR to handle <CREATE TABLE ...>
  *
  * @param parse_context Parsing context.
- * @param child Name of table to be altered. NULL on CREATE TABLE
- *              statement processing.
- * @param constraint Name of the constraint to be created. May be
- *                   NULL on CREATE TABLE statement processing.
- *                   Then, auto-generated name is used.
- * @param child_cols Columns of child table involved in FK.
- *                   May be NULL on CREATE TABLE statement processing.
- *                   If so, the last column added is used.
- * @param parent Name of referenced table.
- * @param parent_cols List of referenced columns. If NULL, columns
- *                    which make up PK of referenced table are used.
- * @param is_deferred Is FK constraint initially deferred.
- * @param actions ON DELETE, UPDATE and INSERT resolution
- *                algorithms (e.g. CASCADE, RESTRICT etc).
  */
 void
-sql_create_foreign_key(struct Parse *parse_context, struct SrcList *child,
-		       struct Token *constraint, struct ExprList *child_cols,
-		       struct Token *parent, struct ExprList *parent_cols,
-		       bool is_deferred, int actions);
+sql_create_foreign_key(struct Parse *parse_context);
 
 /**
  * Function called from parser to handle
  * <ALTER TABLE table DROP CONSTRAINT constraint> SQL statement.
  *
  * @param parse_context Parsing context.
- * @param table Table to be altered.
- * @param constraint Name of constraint to be dropped.
  */
 void
-sql_drop_foreign_key(struct Parse *parse_context, struct SrcList *table,
-		     struct Token *constraint);
+sql_drop_foreign_key(struct Parse *parse_context);
+
+/**
+ * Now our SQL implementation can't operate on spaces which
+ * lack format: it is reasonable since for instance we can't
+ * resolve column names, their types etc. In case of format
+ * absence, diag error is raised.
+ *
+ * @retval 0 in case space features format.
+ * @retval -1 if space doesn't have format.
+ */
+int
+sql_space_def_check_format(const struct space_def *space_def);
+
+/**
+ * Counts the trail bytes for a UTF-8 lead byte of a valid UTF-8
+ * sequence.
+ *
+ * Note that implementation is borrowed from ICU library.
+ * It is not directly included from icu/utf8.h owing to the
+ * fact that different versions of ICU treat incorrect byte
+ * sequences in different ways. We like this implementation
+ * but don't like that it could give different results depending
+ * on version of library. And that's why we inlined these macros.
+ *
+ * @param lead_byte The first byte of a UTF-8 sequence.
+ */
+#define SQL_UTF8_COUNT_TRAIL_BYTES(lead_byte) \
+	(((uint8_t)(lead_byte) >= 0xc2) + ((uint8_t)(lead_byte) >= 0xe0) + \
+	((uint8_t)(lead_byte) >= 0xf0))
+
+/**
+ * Advance the string offset from one code point boundary to the
+ * next. (Post-incrementing iteration.)
+ *
+ * After the whole string is traversed, (str + i) points to the
+ * position right after the last element of the string (*).
+ *
+ * If resulting offset > byte_size then resulting offset is set
+ * to byte_size. This is to provide (*) in cases where it might
+ * be violated.
+ *
+ * SQL_UTF8_FWD_1 sometimes is used to get the size of utf-8
+ * character sub-sequence and we don't want to get summary size
+ * which exceeds total string size (in bytes). Consider example:
+ *
+ * '0xE0' - this is invalid utf-8 string because it consists only
+ * of first byte of 3 byte sequence. After traverse, the
+ * offset == 2 and we set it to 1, to keep (*).
+ *
+ * @param s const uint8_t * string.
+ * @param i string offset.
+ * @param byte_size byte size of the string.
+ */
+#define SQL_UTF8_FWD_1(str, i, byte_size) \
+	(i) += 1 + SQL_UTF8_COUNT_TRAIL_BYTES((str)[i]); \
+	(i) = (i) <= (byte_size) ? (i) : (byte_size);
 
 void sqlDetach(Parse *, Expr *);
 int sqlAtoF(const char *z, double *, int);
 int sqlGetInt32(const char *, int *);
 int sqlAtoi(const char *);
-int sqlUtf8CharLen(const char *pData, int nByte);
+
+/**
+ * Return number of symbols in the given string.
+ *
+ * Number of symbols != byte size of string because some symbols
+ * are encoded with more than one byte. Also note that all
+ * symbols from 'str' to 'str + byte_len' would be counted,
+ * even if there is a '\0' somewhere between them.
+ *
+ * This function is implemented to be fast and indifferent to
+ * correctness of string being processed. If input string has
+ * even one invalid utf-8 sequence, then the resulting length
+ * could be arbitary in these boundaries (0 < len < byte_len).
+ * @param str String to be counted.
+ * @param byte_len Byte length of given string.
+ * @return number of symbols in the given string.
+ */
+int
+sql_utf8_char_count(const unsigned char *str, int byte_len);
+
 u32 sqlUtf8Read(const u8 **);
 LogEst sqlLogEst(u64);
 LogEst sqlLogEstAdd(LogEst, LogEst);
@@ -4344,12 +4530,14 @@ const char *sqlErrStr(int);
  * @param[out] is_explicit_coll Flag set if explicit COLLATE
  *             clause is used.
  * @param[out] coll_id Collation identifier.
+ * @param[out] coll Collation object.
  *
- * @retval Pointer to collation.
+ * @retval 0 on success.
+ * @retval -1 in case of error.
  */
-struct coll *
-sql_expr_coll(Parse * pParse, Expr * pExpr, bool *is_explicit_coll,
-	      uint32_t *coll_id);
+int
+sql_expr_coll(Parse *parse, Expr *p, bool *is_explicit_coll, uint32_t *coll_id,
+	      struct coll **coll);
 
 Expr *sqlExprAddCollateToken(Parse * pParse, Expr *, const Token *, int);
 Expr *sqlExprAddCollateString(Parse *, Expr *, const char *);
@@ -4395,12 +4583,9 @@ extern int sqlPendingByte;
  * command.
  *
  * @param parse Current parsing context.
- * @param src_tab The table to rename.
- * @param new_name_tk Token containing new name of the table.
  */
 void
-sql_alter_table_rename(struct Parse *parse, struct SrcList *src_tab,
-		       struct Token *new_name_tk);
+sql_alter_table_rename(struct Parse *parse);
 
 /**
  * Return the length (in bytes) of the token that begins at z[0].
@@ -4418,14 +4603,13 @@ int sqlCodeSubselect(Parse *, Expr *, int);
 void sqlSelectPrep(Parse *, Select *, NameContext *);
 
 /**
- * Error message for when two or more terms of a compound select
- * have different size result sets.
+ * Returns name of the connection operator.
  *
- * @param parse Parsing context.
- * @param p Select struct to analyze.
+ * @param id ID of the connection operator.
+ * @retval Name of the connection operator.
  */
-void
-sqlSelectWrongNumTermsError(struct Parse *parse, struct Select *p);
+const char *
+sql_select_op_name(int id);
 
 int sqlMatchSpanName(const char *, const char *, const char *);
 int sqlResolveExprNames(NameContext *, Expr *);
@@ -4436,8 +4620,8 @@ int sqlResolveOrderGroupBy(Parse *, Select *, ExprList *, const char *);
 /**
  * Generate code for default value.
  * The most recently coded instruction was an OP_Column to retrieve the
- * i-th column of table pTab. This routine sets the P4 parameter of the
- * OP_Column to the default value, if any.
+ * i-th column of table defined by space_def. This routine sets
+ * the P4 parameter of the OP_Column to the default value, if any.
  *
  * The default value of a column is specified by a DEFAULT clause in the
  * column definition. This was either supplied by the user when the table
@@ -4482,7 +4666,6 @@ char* rename_trigger(sql *, char const *, char const *, bool *);
  */
 struct coll *
 sql_get_coll_seq(Parse *parser, const char *name, uint32_t *coll_id);
-void sqlAnalyze(Parse *, Token *);
 
 /**
  * This function returns average size of tuple in given index.
@@ -4593,7 +4776,21 @@ void sqlAppendChar(StrAccum *, int, char);
 char *sqlStrAccumFinish(StrAccum *);
 void sqlStrAccumReset(StrAccum *);
 void sqlSelectDestInit(SelectDest *, int, int, int);
-Expr *sqlCreateColumnExpr(sql *, SrcList *, int, int);
+
+/*
+ * Create an expression to load @a column from datasource
+ * @a src_idx in @a src_list.
+ *
+ * @param db The database connection.
+ * @param src_list The source list described with FROM clause.
+ * @param src_idx The resource index to use in src_list.
+ * @param column The column index.
+ * @retval Not NULL Success. An expression to load @a column.
+ * @retval NULL Error. A diag message is set.
+ */
+struct Expr *
+sql_expr_new_column(struct sql *db, struct SrcList *src_list, int src_idx,
+		    int column);
 
 int sqlExprCheckIN(Parse *, Expr *);
 
@@ -4634,16 +4831,11 @@ void sqlParser(void *, int, Token, Parse *);
 int sqlParserStackPeak(void *);
 #endif
 
-#ifdef SQL_TEST
-int sqlUtf8To8(unsigned char *);
-#endif
-
 void sqlInvalidFunction(sql_context *, int, sql_value **);
 sql_int64 sqlStmtCurrentTime(sql_context *);
 int sqlVdbeParameterIndex(Vdbe *, const char *, int);
 int sqlTransferBindings(sql_stmt *, sql_stmt *);
 int sqlReprepare(Vdbe *);
-void sqlExprListCheckLength(Parse *, ExprList *, const char *);
 
 /**
  * This function verifies that two collations (to be more precise
@@ -4681,13 +4873,14 @@ collations_check_compatibility(uint32_t lhs_id, bool is_lhs_forced,
  * @param parser Parser.
  * @param left Left expression.
  * @param right Right expression. Can be NULL.
- * @param[out] coll_id Collation identifier.
+ * @param[out] id Id of resulting collation.
  *
- * @retval Collation object.
+ * @retval 0 on success.
+ * @retval -1 in case of error (e.g. no collation found).
  */
-struct coll *
+int
 sql_binary_compare_coll_seq(Parse *parser, Expr *left, Expr *right,
-			    uint32_t *coll_id);
+			    uint32_t *id);
 int sqlTempInMemory(const sql *);
 #ifndef SQL_OMIT_CTE
 With *sqlWithAdd(Parse *, With *, Token *, ExprList *, Select *);
@@ -4722,25 +4915,25 @@ void sqlWithPush(Parse *, With *, u8);
  * inserted using the INSERT convention.
  *
  * @param parser SQL parser.
- * @param tab Table from which the row is deleted.
+ * @param space Space from which the row is deleted.
  * @param reg_old Register with deleted row.
  * @param reg_new Register with inserted row.
  * @param changed_cols Array of updated columns. Can be NULL.
  */
 void
-fkey_emit_check(struct Parse *parser, struct Table *tab, int reg_old,
+fk_constraint_emit_check(struct Parse *parser, struct space *space, int reg_old,
 		int reg_new, const int *changed_cols);
 
 /**
  * Emit VDBE code to do CASCADE, SET NULL or SET DEFAULT actions
  * when deleting or updating a row.
  * @param parser SQL parser.
- * @param tab Table being updated or deleted from.
+ * @param space Space being updated or deleted from.
  * @param reg_old Register of the old record.
  * param changes Array of numbers of changed columns.
  */
 void
-fkey_emit_actions(struct Parse *parser, struct Table *tab, int reg_old,
+fk_constraint_emit_actions(struct Parse *parser, struct space *space, int reg_old,
 		  const int *changes);
 
 /**
@@ -4753,12 +4946,12 @@ fkey_emit_actions(struct Parse *parser, struct Table *tab, int reg_old,
  * changes[] array is set to -1. If the column is modified,
  * the value is 0 or greater.
  *
- * @param space_id Id of space to be modified.
+ * @param space Space to be modified.
  * @param changes Array of modified fields for UPDATE.
  * @retval True, if any foreign key processing will be required.
  */
 bool
-fkey_is_required(uint32_t space_id, const int *changes);
+fk_constraint_is_required(struct space *space, const int *changes);
 
 /*
  * Available fault injectors.  Should be numbered beginning with 0.
@@ -4879,7 +5072,6 @@ int sqlExprVectorSize(Expr * pExpr);
 int sqlExprIsVector(Expr * pExpr);
 Expr *sqlVectorFieldSubexpr(Expr *, int);
 Expr *sqlExprForVectorField(Parse *, Expr *, int);
-void sqlVectorErrorMsg(Parse *, Expr *);
 
 /* Tarantool: right now query compilation is invoked on top of
  * fiber's stack. Need to limit number of nested programs under

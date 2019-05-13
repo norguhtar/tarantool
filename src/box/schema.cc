@@ -69,6 +69,7 @@ uint32_t schema_version = 0;
  */
 uint32_t space_cache_version = 0;
 
+struct rlist on_schema_init = RLIST_HEAD_INITIALIZER(on_schema_init);
 struct rlist on_alter_space = RLIST_HEAD_INITIALIZER(on_alter_space);
 struct rlist on_alter_sequence = RLIST_HEAD_INITIALIZER(on_alter_sequence);
 
@@ -250,6 +251,9 @@ space_cache_replace(struct space *old_space, struct space *new_space)
 		mh_strnptr_del(spaces_by_name, k, NULL);
 	}
 	space_cache_version++;
+
+	if (old_space != NULL)
+		space_invalidate(old_space);
 }
 
 /** A wrapper around space_new() for data dictionary spaces. */
@@ -444,22 +448,6 @@ schema_init()
 	sc_space_new(BOX_INDEX_ID, "_index", key_parts, 2,
 		     &alter_space_on_replace_index, &on_stmt_begin_index);
 
-	/* _sql_stat1 - a simpler statistics on space, seen in SQL. */
-	key_parts[0].fieldno = 0; /* space name */
-	key_parts[0].type = FIELD_TYPE_STRING;
-	key_parts[1].fieldno = 1; /* index name */
-	key_parts[1].type = FIELD_TYPE_STRING;
-	sc_space_new(BOX_SQL_STAT1_ID, "_sql_stat1", key_parts, 2, NULL, NULL);
-
-	/* _sql_stat4 - extensive statistics on space, seen in SQL. */
-	key_parts[0].fieldno = 0; /* space name */
-	key_parts[0].type = FIELD_TYPE_STRING;
-	key_parts[1].fieldno = 1; /* index name */
-	key_parts[1].type = FIELD_TYPE_STRING;
-	key_parts[2].fieldno = 5; /* sample */
-	key_parts[2].type = FIELD_TYPE_SCALAR;
-	sc_space_new(BOX_SQL_STAT4_ID, "_sql_stat4", key_parts, 3, NULL, NULL);
-
 	/* _fk_сonstraint - foreign keys constraints. */
 	key_parts[0].fieldno = 0; /* constraint name */
 	key_parts[0].type = FIELD_TYPE_STRING;
@@ -500,6 +488,12 @@ schema_init()
 		init_system_space(space);
 		trigger_run_xc(&on_alter_space, space);
 	}
+
+	/*
+	 * Run the triggers right after creating all the system
+	 * space stubs.
+	 */
+	trigger_run(&on_schema_init, NULL);
 }
 
 void

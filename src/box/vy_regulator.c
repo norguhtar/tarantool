@@ -113,6 +113,15 @@ vy_regulator_trigger_dump(struct vy_regulator *regulator)
 	max_write_rate = MIN(max_write_rate, regulator->dump_bandwidth);
 	vy_quota_set_rate_limit(quota, VY_QUOTA_RESOURCE_MEMORY,
 				max_write_rate);
+
+	say_info("dumping %zu bytes, expected rate %.1f MB/s, "
+		 "ETA %.1f s, write rate (avg/max) %.1f/%.1f MB/s",
+		 quota->used, (double)regulator->dump_bandwidth / 1024 / 1024,
+		 (double)quota->used / (regulator->dump_bandwidth + 1),
+		 (double)regulator->write_rate / 1024 / 1024,
+		 (double)regulator->write_rate_max / 1024 / 1024);
+
+	regulator->write_rate_max = regulator->write_rate;
 }
 
 static void
@@ -140,6 +149,8 @@ vy_regulator_update_write_rate(struct vy_regulator *regulator)
 	rate_avg = (1 - weight) * rate_avg + weight * rate_curr;
 
 	regulator->write_rate = rate_avg;
+	if (regulator->write_rate_max < rate_curr)
+		regulator->write_rate_max = rate_curr;
 	regulator->quota_used_last = used_curr;
 }
 
@@ -158,10 +169,24 @@ vy_regulator_update_dump_watermark(struct vy_regulator *regulator)
 	 *   limit - watermark      watermark
 	 *   ----------------- = --------------
 	 *       write_rate      dump_bandwidth
+	 *
+	 * Be pessimistic when predicting the write rate - use the
+	 * max observed write rate multiplied by 1.5 - because it's
+	 * better to start memory dump early than delay it as long
+	 * as possible at the risk of experiencing unpredictably
+	 * long stalls.
 	 */
+	size_t write_rate = regulator->write_rate_max * 3 / 2;
 	regulator->dump_watermark =
 			(double)quota->limit * regulator->dump_bandwidth /
-			(regulator->dump_bandwidth + regulator->write_rate + 1);
+			(regulator->dump_bandwidth + write_rate + 1);
+	/*
+	 * It doesn't make sense to set the watermark below 50%
+	 * of the memory limit because the write rate can exceed
+	 * the dump bandwidth under no circumstances.
+	 */
+	regulator->dump_watermark = MAX(regulator->dump_watermark,
+					quota->limit / 2);
 }
 
 static void
@@ -265,6 +290,17 @@ vy_regulator_dump_complete(struct vy_regulator *regulator,
 	 */
 	vy_quota_set_rate_limit(regulator->quota, VY_QUOTA_RESOURCE_MEMORY,
 				regulator->dump_bandwidth);
+
+	say_info("dumped %zu bytes in %.1f s, rate %.1f MB/s",
+		 mem_dumped, dump_duration,
+		 mem_dumped / dump_duration / 1024 / 1024);
+}
+
+void
+vy_regulator_set_memory_limit(struct vy_regulator *regulator, size_t limit)
+{
+	vy_quota_set_limit(regulator->quota, limit);
+	vy_regulator_update_dump_watermark(regulator);
 }
 
 void

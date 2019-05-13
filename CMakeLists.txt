@@ -76,6 +76,7 @@ set(CMAKE_REQUIRED_DEFINITIONS "-D_GNU_SOURCE")
 
 check_symbol_exists(MAP_ANON sys/mman.h HAVE_MAP_ANON)
 check_symbol_exists(MAP_ANONYMOUS sys/mman.h HAVE_MAP_ANONYMOUS)
+check_symbol_exists(MADV_DONTNEED sys/mman.h HAVE_MADV_DONTNEED)
 check_include_file(sys/time.h HAVE_SYS_TIME_H)
 check_include_file(cpuid.h HAVE_CPUID_H)
 check_include_file(sys/prctl.h HAVE_PRCTL_H)
@@ -137,7 +138,10 @@ check_function_exists(getprogname HAVE_GETPROGNAME)
 #
 # Enable 'make tags' target.
 #
-add_custom_target(tags COMMAND ${CTAGS} -R -f tags
+list(APPEND tagsExclude "--exclude=.git/*")
+list(APPEND tagsExclude "--exclude=.pc/*")
+list(APPEND tagsExclude "--exclude=patches/*")
+add_custom_target(tags COMMAND ${CTAGS} -R ${tagsExclude} -f tags
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 add_custom_target(ctags DEPENDS tags)
 
@@ -207,6 +211,7 @@ include_directories(${PROJECT_BINARY_DIR}/src)
 include_directories(${PROJECT_SOURCE_DIR}/src/lib)
 include_directories(${PROJECT_SOURCE_DIR}/src/lib/small)
 include_directories(${PROJECT_SOURCE_DIR}/src/lib/small/third_party)
+include_directories(${PROJECT_SOURCE_DIR}/src/lib/core)
 include_directories(${PROJECT_SOURCE_DIR})
 
 #

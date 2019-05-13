@@ -37,7 +37,6 @@
 #include "fiber_cond.h"
 #include "coio.h"
 #include "coio_buf.h"
-#include "xstream.h"
 #include "wal.h"
 #include "xrow.h"
 #include "replication.h"
@@ -48,6 +47,9 @@
 #include "error.h"
 #include "session.h"
 #include "cfg.h"
+#include "schema.h"
+#include "txn.h"
+#include "box.h"
 
 STRS(applier_state, applier_STATE);
 
@@ -167,6 +169,50 @@ applier_writer_f(va_list ap)
 	return 0;
 }
 
+static int
+apply_initial_join_row(struct xrow_header *row)
+{
+	struct request request;
+	xrow_decode_dml(row, &request, dml_request_key_map(row->type));
+	struct space *space = space_cache_find_xc(request.space_id);
+	/* no access checks here - applier always works with admin privs */
+	return space_apply_initial_join_row(space, &request);
+}
+
+/**
+ * Process a no-op request.
+ *
+ * A no-op request does not affect any space, but it
+ * promotes vclock and is written to WAL.
+ */
+static int
+process_nop(struct request *request)
+{
+	assert(request->type == IPROTO_NOP);
+	struct txn *txn = txn_begin_stmt(NULL);
+	if (txn == NULL)
+		return -1;
+	return txn_commit_stmt(txn, request);
+}
+
+static int
+apply_row(struct xrow_header *row)
+{
+	struct request request;
+	if (xrow_decode_dml(row, &request, dml_request_key_map(row->type)) != 0)
+		return -1;
+	if (request.type == IPROTO_NOP)
+		return process_nop(&request);
+	struct space *space = space_cache_find(request.space_id);
+	if (space == NULL)
+		return -1;
+	if (box_process_rw(&request, space, NULL) != 0) {
+		say_error("error applying row: %s", request_str(&request));
+		return -1;
+	}
+	return 0;
+}
+
 /**
  * Connect to a remote host and authenticate the client.
  */
@@ -207,11 +253,12 @@ applier_connect(struct applier *applier)
 	}
 
 	if (applier->version_id != greeting.version_id) {
-		say_info("remote master is %u.%u.%u at %s",
+		say_info("remote master %s at %s running Tarantool %u.%u.%u",
+			 tt_uuid_str(&greeting.uuid),
+			 sio_strfaddr(&applier->addr, applier->addr_len),
 			 version_id_major(greeting.version_id),
 			 version_id_minor(greeting.version_id),
-			 version_id_patch(greeting.version_id),
-			 sio_strfaddr(&applier->addr, applier->addr_len));
+			 version_id_patch(greeting.version_id));
 	}
 
 	/* Save the remote instance version and UUID on connect. */
@@ -308,13 +355,13 @@ applier_join(struct applier *applier)
 	/*
 	 * Receive initial data.
 	 */
-	assert(applier->join_stream != NULL);
 	uint64_t row_count = 0;
 	while (true) {
 		coio_read_xrow(coio, ibuf, &row);
 		applier->last_row_time = ev_monotonic_now(loop());
 		if (iproto_type_is_dml(row.type)) {
-			xstream_write_xc(applier->join_stream, &row);
+			if (apply_initial_join_row(&row) != 0)
+				diag_raise();
 			if (++row_count % 100000 == 0)
 				say_info("%.1fM rows received", row_count / 1e6);
 		} else if (row.type == IPROTO_OK) {
@@ -356,7 +403,8 @@ applier_join(struct applier *applier)
 		applier->last_row_time = ev_monotonic_now(loop());
 		if (iproto_type_is_dml(row.type)) {
 			vclock_follow_xrow(&replicaset.vclock, &row);
-			xstream_write_xc(applier->subscribe_stream, &row);
+			if (apply_row(&row) != 0)
+				diag_raise();
 			if (++row_count % 100000 == 0)
 				say_info("%.1fM rows received", row_count / 1e6);
 		} else if (row.type == IPROTO_OK) {
@@ -384,8 +432,6 @@ applier_join(struct applier *applier)
 static void
 applier_subscribe(struct applier *applier)
 {
-	assert(applier->subscribe_stream != NULL);
-
 	/* Send SUBSCRIBE request */
 	struct ev_io *coio = &applier->io;
 	struct ibuf *ibuf = &applier->ibuf;
@@ -393,8 +439,11 @@ applier_subscribe(struct applier *applier)
 	struct vclock remote_vclock_at_subscribe;
 	struct tt_uuid cluster_id = uuid_nil;
 
+	struct vclock vclock;
+	vclock_create(&vclock);
+	vclock_copy(&vclock, &replicaset.vclock);
 	xrow_encode_subscribe_xc(&row, &REPLICASET_UUID, &INSTANCE_UUID,
-				 &replicaset.vclock);
+				 &vclock);
 	coio_write_xrow(coio, &row);
 
 	/* Read SUBSCRIBE response */
@@ -429,6 +478,11 @@ applier_subscribe(struct applier *applier)
 				  tt_uuid_str(&cluster_id),
 				  tt_uuid_str(&REPLICASET_UUID));
 		}
+
+		say_info("subscribed");
+		say_info("remote vclock %s local vclock %s",
+			 vclock_to_string(&remote_vclock_at_subscribe),
+			 vclock_to_string(&vclock));
 	}
 	/*
 	 * Tarantool < 1.6.7:
@@ -541,7 +595,7 @@ applier_subscribe(struct applier *applier)
 		 */
 		latch_lock(latch);
 		if (vclock_get(&replicaset.vclock, row.replica_id) < row.lsn) {
-			int res = xstream_write(applier->subscribe_stream, &row);
+			int res = apply_row(&row);
 			if (res != 0) {
 				struct error *e = diag_last_error(diag_get());
 				/*
@@ -560,7 +614,7 @@ applier_subscribe(struct applier *applier)
 					nop.bodycnt = 0;
 					nop.replica_id = row.replica_id;
 					nop.lsn = row.lsn;
-					res = xstream_write(applier->subscribe_stream, &nop);
+					res = apply_row(&nop);
 				}
 			}
 			if (res != 0) {
@@ -722,8 +776,7 @@ applier_stop(struct applier *applier)
 }
 
 struct applier *
-applier_new(const char *uri, struct xstream *join_stream,
-	    struct xstream *subscribe_stream)
+applier_new(const char *uri)
 {
 	struct applier *applier = (struct applier *)
 		calloc(1, sizeof(struct applier));
@@ -742,8 +795,6 @@ applier_new(const char *uri, struct xstream *join_stream,
 	assert(rc == 0 && applier->uri.service != NULL);
 	(void) rc;
 
-	applier->join_stream = join_stream;
-	applier->subscribe_stream = subscribe_stream;
 	applier->last_row_time = ev_monotonic_now(loop());
 	rlist_create(&applier->on_state);
 	fiber_cond_create(&applier->resume_cond);

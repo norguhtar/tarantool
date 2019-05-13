@@ -114,3 +114,71 @@ s:drop()
 test_run:cmd('switch default')
 test_run:cmd('stop server test')
 test_run:cmd('cleanup server test')
+
+--
+-- gh-4016: local rw transactions are aborted when the instance
+-- switches to read-only mode.
+--
+-- gh-4070: an aborted transaction must fail any DML/DQL request.
+--
+s = box.schema.space.create('test', {engine = 'vinyl'})
+_ = s:create_index('pk')
+s:replace({1, 1})
+test_run:cmd("setopt delimiter ';'")
+-- Start rw transaction.
+ch1 = fiber.channel(1);
+_ = fiber.create(function()
+    box.begin()
+    s:replace{1, 2}
+    ch1:get()
+    local status, err = pcall(s.replace, s, {3, 4})
+    ch1:put(status or err)
+    local status, err = pcall(s.select, s)
+    ch1:put(status or err)
+    local status, err = pcall(box.commit)
+    ch1:put(status or err)
+end);
+-- Start ro transaction.
+ch2 = fiber.channel(1);
+_ = fiber.create(function()
+    box.begin()
+    s:select()
+    ch2:get()
+    local status, err = pcall(s.select, s)
+    ch2:put(status or err)
+    local status, err = pcall(box.commit)
+    ch2:put(status or err)
+end);
+test_run:cmd("setopt delimiter ''");
+-- Switch to ro mode.
+box.cfg{read_only = true}
+-- Resume the transactions.
+ch1:put(true)
+ch2:put(true)
+ch1:get()
+ch1:get()
+ch1:get()
+ch2:get()
+ch2:get()
+-- Cleanup.
+box.cfg{read_only = false}
+s:select()
+s:drop()
+
+--
+-- gh-2389: L1 runs are not compressed.
+--
+s = box.schema.space.create('test', {engine = 'vinyl'})
+i = s:create_index('pk', {page_size = 100 * 1000, range_size = 1000 * 1000})
+pad = string.rep('x', 1000)
+for k = 1, 10 do s:replace{k, pad} end
+box.snapshot()
+stat = i:stat().disk
+stat.bytes_compressed >= stat.bytes
+for k = 1, 10 do s:replace{k, pad} end
+box.snapshot()
+i:compact()
+test_run:wait_cond(function() return i:stat().disk.compaction.count > 0 end)
+stat = i:stat().disk
+stat.bytes_compressed < stat.bytes / 10
+s:drop()

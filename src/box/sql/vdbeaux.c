@@ -34,7 +34,7 @@
  * a VDBE (or an "sql_stmt" as it is known to the outside world.)
  */
 #include "fiber.h"
-#include "coll.h"
+#include "coll/coll.h"
 #include "box/session.h"
 #include "box/schema.h"
 #include "box/tuple_format.h"
@@ -110,6 +110,7 @@ sql_vdbe_prepare(struct Vdbe *vdbe)
 			if (txn->psql_txn == NULL)
 				return -1;
 		}
+		txn->psql_txn->vdbe = vdbe;
 	}
 	return 0;
 }
@@ -208,7 +209,7 @@ growOpArray(Vdbe * v, int nOp)
 		p->nOpAlloc = p->szOpAlloc / sizeof(Op);
 		v->aOp = pNew;
 	}
-	return (pNew ? SQL_OK : SQL_NOMEM_BKPT);
+	return (pNew ? SQL_OK : SQL_NOMEM);
 }
 
 #ifdef SQL_DEBUG
@@ -1284,6 +1285,15 @@ displayComment(const Op * pOp,	/* The opcode to be commented */
 static char *
 displayP4(Op * pOp, char *zTemp, int nTemp)
 {
+	/*
+	 * Msgpack is subtype, not type of P4, so lets consider
+	 * it as special case. We should decode msgpack to display
+	 * it in a readable form.
+	 */
+	if (pOp->opcode == OP_Blob && pOp->p3 == SQL_SUBTYPE_MSGPACK) {
+		mp_snprint(zTemp, nTemp, pOp->p4.z);
+		return zTemp;
+	}
 	char *zP4 = zTemp;
 	StrAccum x;
 	assert(nTemp >= 20);
@@ -1416,8 +1426,8 @@ void
 sqlVdbePrintOp(FILE * pOut, int pc, Op * pOp)
 {
 	char *zP4;
-	char zPtr[50];
-	char zCom[100];
+	char zPtr[256];
+	char zCom[256];
 	static const char *zFormat1 =
 	    "%4d> %4d %-13s %4d %4d %4d %-13s %.2X %s\n";
 	if (pOut == 0)
@@ -1561,7 +1571,7 @@ sqlVdbeList(Vdbe * p)
 	releaseMemArray(pMem, 8);
 	p->pResultSet = 0;
 
-	if (p->rc == SQL_NOMEM_BKPT) {
+	if (p->rc == SQL_NOMEM) {
 		/* This happens if a malloc() inside a call to sql_column_text() or
 		 * sql_column_text16() failed.
 		 */
@@ -1674,12 +1684,13 @@ sqlVdbeList(Vdbe * p)
 		pMem->u.i = pOp->p3;	/* P3 */
 		pMem++;
 
-		if (sqlVdbeMemClearAndResize(pMem, 100)) {	/* P4 */
+		if (sqlVdbeMemClearAndResize(pMem, 256)) {
 			assert(p->db->mallocFailed);
 			return SQL_ERROR;
 		}
 		pMem->flags = MEM_Str | MEM_Term;
 		zP4 = displayP4(pOp, pMem->z, pMem->szMalloc);
+
 		if (zP4 != pMem->z) {
 			pMem->n = 0;
 			sqlVdbeMemSetStr(pMem, zP4, -1, 1, 0);
@@ -2165,7 +2176,7 @@ sqlVdbeSetColName(Vdbe * p,			/* Vdbe being configured */
 	assert(var < COLNAME_N);
 	if (p->db->mallocFailed) {
 		assert(!zName || xDel != SQL_DYNAMIC);
-		return SQL_NOMEM_BKPT;
+		return SQL_NOMEM;
 	}
 	assert(p->aColName != 0);
 	assert(var == COLNAME_NAME || var == COLNAME_DECLTYPE);
@@ -2332,7 +2343,7 @@ sqlVdbeHalt(Vdbe * p)
 	 */
 
 	if (db->mallocFailed) {
-		p->rc = SQL_NOMEM_BKPT;
+		p->rc = SQL_NOMEM;
 	}
 	closeTopFrameCursors(p);
 	if (p->magic != VDBE_MAGIC_RUN) {
@@ -2496,7 +2507,7 @@ sqlVdbeHalt(Vdbe * p)
 	p->magic = VDBE_MAGIC_HALT;
 	checkActiveVdbeCnt(db);
 	if (db->mallocFailed) {
-		p->rc = SQL_NOMEM_BKPT;
+		p->rc = SQL_NOMEM;
 	}
 
 	assert(db->nVdbeActive > 0 || box_txn() ||
@@ -3688,79 +3699,74 @@ sqlVdbeRecordCompareMsgpack(const void *key1,
 	return key2->default_rc;
 }
 
-u32
-sqlVdbeMsgpackGet(const unsigned char *buf,	/* Buffer to deserialize from */
-		      Mem * pMem)		/* Memory cell to write value into */
+int
+vdbe_decode_msgpack_into_mem(const char *buf, struct Mem *mem, uint32_t *len)
 {
-	const char *zParse = (const char *)buf;
-	switch (mp_typeof(*zParse)) {
+	const char *start_buf = buf;
+	switch (mp_typeof(*buf)) {
 	case MP_ARRAY:
 	case MP_MAP:
 	case MP_EXT:
-	default:{
-			pMem->flags = 0;
-			return 0;
-		}
-	case MP_NIL:{
-			mp_decode_nil((const char **)&zParse);	/*  Still need to promote zParse.  */
-			pMem->flags = MEM_Null;
-			break;
-		}
-	case MP_BOOL:{
-			assert((unsigned char)*zParse == 0xc2
-			       || (unsigned char)*zParse == 0xc3);
-			pMem->u.i = (unsigned char)*zParse - 0xc2;
-			pMem->flags = MEM_Int;
-			break;
-		}
-	case MP_UINT:{
-			uint64_t v = mp_decode_uint(&zParse);
-			if (v > INT64_MAX) {
-				/*
-				 * If the value exceeds i64 range, convert to double (lossy).
-				 */
-				pMem->u.r = v;
-				pMem->flags = MEM_Real;
-			} else {
-				pMem->u.i = v;
-				pMem->flags = MEM_Int;
-			}
-			break;
-		}
-	case MP_INT:{
-			pMem->u.i = mp_decode_int(&zParse);
-			pMem->flags = MEM_Int;
-			break;
-		}
-	case MP_STR:{
-			/* XXX u32->int */
-			pMem->n = (int)mp_decode_strl((const char **)&zParse);
-			pMem->flags = MEM_Str | MEM_Ephem;
- install_blob:
-			pMem->z = (char *)zParse;
-			zParse += pMem->n;
-			break;
-		}
-	case MP_BIN:{
-			/* XXX u32->int */
-			pMem->n = (int)mp_decode_binl((const char **)&zParse);
-			pMem->flags = MEM_Blob | MEM_Ephem;
-			goto install_blob;
-		}
-	case MP_FLOAT:{
-			pMem->u.r = mp_decode_float(&zParse);
-			pMem->flags =
-			    sqlIsNaN(pMem->u.r) ? MEM_Null : MEM_Real;
-			break;
-		}
-	case MP_DOUBLE:{
-			pMem->u.r = mp_decode_double(&zParse);
-			pMem->flags =
-			    sqlIsNaN(pMem->u.r) ? MEM_Null : MEM_Real;
-			break;
-		}
+	default: {
+		mem->flags = 0;
+		break;
 	}
-	return (u32) (zParse - (const char *)buf);
+	case MP_NIL: {
+		mp_decode_nil(&buf);
+		mem->flags = MEM_Null;
+		break;
+	}
+	case MP_BOOL: {
+		assert((unsigned char)*buf == 0xc2 ||
+		       (unsigned char)*buf == 0xc3);
+		mem->u.i = (unsigned char)*buf - 0xc2;
+		mem->flags = MEM_Int;
+		break;
+	}
+	case MP_UINT: {
+		uint64_t v = mp_decode_uint(&buf);
+		if (v > INT64_MAX) {
+			diag_set(ClientError, ER_SQL_EXECUTE,
+				 "integer is overflowed");
+			return -1;
+		}
+		mem->u.i = v;
+		mem->flags = MEM_Int;
+		break;
+	}
+	case MP_INT: {
+		mem->u.i = mp_decode_int(&buf);
+		mem->flags = MEM_Int;
+		break;
+	}
+	case MP_STR: {
+		/* XXX u32->int */
+		mem->n = (int) mp_decode_strl(&buf);
+		mem->flags = MEM_Str | MEM_Ephem;
+install_blob:
+		mem->z = (char *)buf;
+		buf += mem->n;
+		break;
+	}
+	case MP_BIN: {
+		/* XXX u32->int */
+		mem->n = (int) mp_decode_binl(&buf);
+		mem->flags = MEM_Blob | MEM_Ephem;
+		goto install_blob;
+	}
+	case MP_FLOAT: {
+		mem->u.r = mp_decode_float(&buf);
+		mem->flags = sqlIsNaN(mem->u.r) ? MEM_Null : MEM_Real;
+		break;
+	}
+	case MP_DOUBLE: {
+		mem->u.r = mp_decode_double(&buf);
+		mem->flags = sqlIsNaN(mem->u.r) ? MEM_Null : MEM_Real;
+		break;
+	}
+	}
+	*len = (uint32_t)(buf - start_buf);
+	return 0;
 }
 
 void
@@ -3778,7 +3784,8 @@ sqlVdbeRecordUnpackMsgpack(struct key_def *key_def,	/* Information about the rec
 	while (n--) {
 		pMem->szMalloc = 0;
 		pMem->z = 0;
-		u32 sz = sqlVdbeMsgpackGet((u8 *) zParse, pMem);
+		uint32_t sz = 0;
+		vdbe_decode_msgpack_into_mem(zParse, pMem, &sz);
 		if (sz == 0) {
 			/* MsgPack array, map or ext. Treat as blob. */
 			pMem->z = (char *)zParse;

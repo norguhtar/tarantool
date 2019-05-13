@@ -731,12 +731,10 @@ test:do_test(
     "limit-10.4",
     function()
         local limit = 1.5
-        return {pcall(function()
-            return test:execsql("SELECT x FROM t1 WHERE x<10 LIMIT "..limit)
-        end)}
+        return test:catchsql("SELECT x FROM t1 WHERE x<10 LIMIT "..limit)
     end, {
         -- <limit-10.4>
-        0, "Only positive integers are allowed in the LIMIT clause"
+        1, "Only positive integers are allowed in the LIMIT clause"
         -- </limit-10.4>
     })
 
@@ -744,12 +742,10 @@ test:do_test(
     "limit-10.5",
     function()
         local limit = "'hello world'"
-        return {pcall(function()
-            return test:execsql("SELECT x FROM t1 WHERE x<10 LIMIT "..limit)
-        end)}
+        return test:catchsql("SELECT x FROM t1 WHERE x<10 LIMIT "..limit)
     end, {
         -- <limit-10.5>
-        0, "Only positive integers are allowed in the LIMIT clause"
+        1, "Only positive integers are allowed in the LIMIT clause"
         -- </limit-10.5>
     })
 
@@ -795,7 +791,7 @@ test:do_catchsql_test(
         SELECT * FROM t1 LIMIT x
     ]], {
         -- <limit-12.3>
-        1, "no such column: X"
+        1, "Can’t resolve field 'X'"
         -- </limit-12.3>
     })
 
@@ -805,7 +801,7 @@ test:do_catchsql_test(
         SELECT * FROM t1 LIMIT 1 OFFSET x
     ]], {
         -- <limit-12.4>
-        1, "no such column: X"
+        1, "Can’t resolve field 'X'"
         -- </limit-12.4>
     })
 

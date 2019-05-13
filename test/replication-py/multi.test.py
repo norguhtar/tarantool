@@ -34,7 +34,7 @@ for i in range(REPLICA_N - 1):
 # Make a list of servers
 sources = []
 for server in cluster:
-    sources.append(yaml.load(server.admin('box.cfg.listen', silent = True))[0])
+    sources.append(yaml.safe_load(server.admin('box.cfg.listen', silent = True))[0])
     server.id = server.get_param('id')
 
 print 'done'
@@ -55,7 +55,6 @@ for server in cluster:
                 fiber.sleep(0.01)
             end;""", server2.id)
         print 'server', server.id, "connected"
-    server.admin("box.info.vclock")
 
 print 'done'
 
@@ -84,13 +83,13 @@ print 'Synchronize'
 for server1 in cluster:
     for server2 in cluster:
         server1.wait_lsn(server2.id, server2.get_lsn(server2.id))
-    print 'server', server.id, 'done'
+    print 'server', server1.id, 'done'
 print 'done'
 print
 
 print 'Check data'
 for server in cluster:
-    cnt = yaml.load(server.admin("box.space.test:len()", silent = True))[0]
+    cnt = yaml.safe_load(server.admin("box.space.test:len()", silent = True))[0]
     print 'server', server.id, 'is', cnt == ROW_N and 'ok' or 'not ok'
 print 'Done'
 print

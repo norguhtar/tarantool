@@ -41,7 +41,7 @@
 #include "box/iproto.h"
 #include "box/wal.h"
 #include "box/replication.h"
-#include <info.h>
+#include "info/info.h"
 #include "box/gc.h"
 #include "box/engine.h"
 #include "box/vinyl.h"
@@ -123,6 +123,10 @@ lbox_pushrelay(lua_State *L, struct relay *relay)
 		lua_settable(L, -3);
 		lua_pushstring(L, "vclock");
 		lbox_pushvclock(L, relay_vclock(relay));
+		lua_settable(L, -3);
+		lua_pushstring(L, "idle");
+		lua_pushnumber(L, ev_monotonic_now(loop()) -
+			       relay_last_row_time(relay));
 		lua_settable(L, -3);
 		break;
 	case RELAY_STOPPED:

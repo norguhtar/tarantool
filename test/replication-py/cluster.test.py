@@ -9,7 +9,7 @@ from lib.tarantool_server import TarantoolServer
 ## Get cluster uuid
 cluster_uuid = ''
 try:
-    cluster_uuid = yaml.load(server.admin("box.space._schema:get('cluster')",
+    cluster_uuid = yaml.safe_load(server.admin("box.space._schema:get('cluster')",
         silent = True))[0][1]
     uuid.UUID('{' + cluster_uuid + '}')
     print 'ok - cluster uuid'
@@ -170,7 +170,7 @@ replica.admin('box.info.vclock[%d] == 1' % replica_id)
 print '-------------------------------------------------------------'
 print 'Connect master to replica'
 print '-------------------------------------------------------------'
-replication_source = yaml.load(replica.admin('box.cfg.listen', silent = True))[0]
+replication_source = yaml.safe_load(replica.admin('box.cfg.listen', silent = True))[0]
 sys.stdout.push_filter(replication_source, '<replication_source>')
 master.admin("box.cfg{ replication_source = '%s' }" % replication_source)
 master.wait_lsn(replica_id, replica.get_lsn(replica_id))
@@ -200,7 +200,7 @@ print '-------------------------------------------------------------'
 print 'Master must not crash then receives orphan rows from replica'
 print '-------------------------------------------------------------'
 
-replication_source = yaml.load(replica.admin('box.cfg.listen', silent = True))[0]
+replication_source = yaml.safe_load(replica.admin('box.cfg.listen', silent = True))[0]
 sys.stdout.push_filter(replication_source, '<replication>')
 master.admin("box.cfg{ replication = '%s' }" % replication_source)
 
@@ -239,6 +239,7 @@ replica.admin('box.info.vclock[%d] == 2' % replica_id)
 
 replica.stop()
 replica.cleanup()
+master.admin('box.space._cluster:delete{%d} ~= nil' % replica_id)
 
 print '-------------------------------------------------------------'
 print 'JOIN replica to read-only master'
@@ -288,5 +289,5 @@ print '-------------------------------------------------------------'
 
 # Cleanup
 sys.stdout.pop_filter()
-
 master.admin("box.schema.user.revoke('guest', 'replication')")
+master.admin('box.space._cluster:delete{2} ~= nil')

@@ -1,6 +1,6 @@
 #!/usr/bin/env tarantool
 test = require("sqltester")
-test:plan(71)
+test:plan(73)
 
 local test_prefix = "identifier_case-"
 
@@ -13,8 +13,10 @@ local data = {
     { 6,  [[ "Table1" ]], {0} },
     -- non ASCII characters case is not supported
     { 7,  [[ русский ]], {0} },
-    { 8,  [[ Русский ]], {0} },
-    { 9,  [[ "русский" ]], {"/already exists/"} },
+    { 8,  [[ "русский" ]], {0} },
+    { 9,  [[ Großschreibweise ]], {0} },
+    { 10,  [[ Русский ]], {"/already exists/"} },
+    { 11,  [[ Grossschreibweise ]], {"/already exists/"} },
 }
 
 for _, row in ipairs(data) do
@@ -35,7 +37,7 @@ data = {
     { 5, [[ "table1" ]], {5}},
     { 6, [[ "Table1" ]], {6}},
     { 7, [[ русский ]], {7}},
-    { 8, [[ Русский ]], {8}},
+    { 8, [[ "русский" ]], {8}},
 }
 
 for _, row in ipairs(data) do
@@ -66,7 +68,7 @@ test:do_test(
     function ()
         return test:drop_all_tables()
     end,
-    3)
+    4)
 
 data = {
     { 1,  [[ columnn ]], {0} },
@@ -75,7 +77,7 @@ data = {
     { 4,  [[ "COLUMNN" ]], {0} },
     { 5,  [[ "columnn" ]], {0} },
     { 6,  [[ "Columnn" ]], {0} },
-    { 7,  [[ "columNN" ]], {1, "/duplicate column name/"} }
+    { 7,  [[ "columNN" ]], {1, "Space field 'columNN' is duplicate"} }
 }
 
 for _, row in ipairs(data) do
@@ -179,7 +181,7 @@ for _, row in ipairs(data) do
     test:do_catchsql_test(
         test_prefix.."5.1."..row[1],
         string.format( [[
-                CREATE TRIGGER %s DELETE ON table1 BEGIN SELECT 1; END
+                CREATE TRIGGER %s DELETE ON table1 FOR EACH ROW BEGIN SELECT 1; END
                 ]], row[2]),
         row[3])
 end
@@ -238,7 +240,7 @@ test:do_catchsql_test(
 data = {
     { 1,  [[ 'a' < 'b' collate binary ]], {1, "Collation 'BINARY' does not exist"}},
     { 2,  [[ 'a' < 'b' collate "binary" ]], {0, {1}}},
-    { 3,  [[ 'a' < 'b' collate 'binary' ]], {1, [[near "'binary'": syntax error]]}},
+    { 3,  [[ 'a' < 'b' collate 'binary' ]], {1, [[Syntax error near ''binary'']]}},
     { 4,  [[ 'a' < 'b' collate "unicode" ]], {0, {1}}},
     { 5,  [[ 5 < 'b' collate "unicode" ]], {0, {1}}},
     { 6,  [[ 5 < 'b' collate unicode ]], {1,"Collation 'UNICODE' does not exist"}},

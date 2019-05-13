@@ -34,7 +34,7 @@
  * for generating VDBE code that evaluates expressions in sql.
  */
 #include "box/coll_id_cache.h"
-#include "coll.h"
+#include "coll/coll.h"
 #include "sqlInt.h"
 #include "tarantoolInt.h"
 #include "box/schema.h"
@@ -149,17 +149,21 @@ sqlExprAddCollateToken(Parse * pParse,	/* Parsing context */
 			   int dequote	/* True to dequote pCollName */
     )
 {
-	if (pCollName->n > 0) {
-		Expr *pNew =
-		    sqlExprAlloc(pParse->db, TK_COLLATE, pCollName,
-				     dequote);
-		if (pNew) {
-			pNew->pLeft = pExpr;
-			pNew->flags |= EP_Collate | EP_Skip;
-			pExpr = pNew;
-		}
+	if (pCollName->n == 0)
+		return pExpr;
+	struct Expr *new_expr;
+	struct sql *db = pParse->db;
+	if (dequote)
+		new_expr = sql_expr_new_dequoted(db, TK_COLLATE, pCollName);
+	else
+		new_expr = sql_expr_new(db, TK_COLLATE, pCollName);
+	if (new_expr == NULL) {
+		pParse->is_aborted = true;
+		return pExpr;
 	}
-	return pExpr;
+	new_expr->pLeft = pExpr;
+	new_expr->flags |= EP_Collate | EP_Skip;
+	return new_expr;
 }
 
 Expr *
@@ -192,12 +196,14 @@ sqlExprSkipCollate(Expr * pExpr)
 	return pExpr;
 }
 
-struct coll *
-sql_expr_coll(Parse *parse, Expr *p, bool *is_explicit_coll, uint32_t *coll_id)
+int
+sql_expr_coll(Parse *parse, Expr *p, bool *is_explicit_coll, uint32_t *coll_id,
+	      struct coll **coll)
 {
-	struct coll *coll = NULL;
+	assert(coll != NULL);
 	*is_explicit_coll = false;
 	*coll_id = COLL_NONE;
+	*coll = NULL;
 	while (p != NULL) {
 		int op = p->op;
 		if (op == TK_CAST || op == TK_UPLUS) {
@@ -206,20 +212,95 @@ sql_expr_coll(Parse *parse, Expr *p, bool *is_explicit_coll, uint32_t *coll_id)
 		}
 		if (op == TK_COLLATE ||
 		    (op == TK_REGISTER && p->op2 == TK_COLLATE)) {
-			coll = sql_get_coll_seq(parse, p->u.zToken, coll_id);
+			*coll = sql_get_coll_seq(parse, p->u.zToken, coll_id);
+			if (coll == NULL)
+				return -1;
 			*is_explicit_coll = true;
 			break;
 		}
 		if ((op == TK_AGG_COLUMN || op == TK_COLUMN ||
 		     op == TK_REGISTER || op == TK_TRIGGER) &&
 		    p->space_def != NULL) {
-			/* op==TK_REGISTER && p->pTab!=0 happens when pExpr was originally
-			 * a TK_COLUMN but was previously evaluated and cached in a register
+			/*
+			 * op==TK_REGISTER && p->space_def!=0
+			 * happens when pExpr was originally
+			 * a TK_COLUMN but was previously
+			 * evaluated and cached in a register.
 			 */
 			int j = p->iColumn;
 			if (j >= 0) {
-				coll = sql_column_collation(p->space_def, j,
-							    coll_id);
+				*coll = sql_column_collation(p->space_def, j,
+							     coll_id);
+			}
+			break;
+		}
+		if (op == TK_CONCAT) {
+			/*
+			 * Procedure below provides compatibility
+			 * checks declared in ANSI SQL 2013:
+			 * chapter 9.5 Result of data type
+			 * combinations.
+			 */
+			bool is_lhs_forced;
+			uint32_t lhs_coll_id;
+			if (sql_expr_coll(parse, p->pLeft, &is_lhs_forced,
+					  &lhs_coll_id, coll) != 0)
+				return -1;
+			bool is_rhs_forced;
+			uint32_t rhs_coll_id;
+			if (sql_expr_coll(parse, p->pRight, &is_rhs_forced,
+					  &rhs_coll_id, coll) != 0)
+				return -1;
+			if (is_lhs_forced && is_rhs_forced) {
+				if (lhs_coll_id != rhs_coll_id) {
+					/*
+					 * Don't set the same error
+					 * several times: this
+					 * function is recursive.
+					 */
+					if (!parse->is_aborted) {
+						diag_set(ClientError,
+							 ER_ILLEGAL_COLLATION_MIX);
+						parse->is_aborted = true;
+					}
+					return -1;
+				}
+			}
+			if (is_lhs_forced) {
+				*coll_id = lhs_coll_id;
+				*is_explicit_coll = true;
+				break;
+			}
+			if (is_rhs_forced) {
+				*coll_id = rhs_coll_id;
+				*is_explicit_coll = true;
+				break;
+			}
+			if (rhs_coll_id != lhs_coll_id)
+				break;
+			*coll_id = lhs_coll_id;
+			break;
+		}
+		if (op == TK_FUNCTION) {
+			uint32_t arg_count = p->x.pList == NULL ? 0 :
+					     p->x.pList->nExpr;
+			struct FuncDef *func = sqlFindFunction(parse->db,
+							       p->u.zToken,
+							       arg_count, 0);
+			if (func == NULL)
+				break;
+			if (func->is_coll_derived) {
+				/*
+				 * Now we use quite straightforward
+				 * approach assuming that resulting
+				 * collation is derived from first
+				 * argument. It is true at least for
+				 * built-in functions: trim, upper,
+				 * lower, replace, substr.
+				 */
+				assert(func->ret_type == FIELD_TYPE_STRING);
+				p = p->x.pList->a->pExpr;
+				continue;
 			}
 			break;
 		}
@@ -254,7 +335,7 @@ sql_expr_coll(Parse *parse, Expr *p, bool *is_explicit_coll, uint32_t *coll_id)
 			break;
 		}
 	}
-	return coll;
+	return 0;
 }
 
 enum field_type
@@ -336,27 +417,29 @@ illegal_collation_mix:
 	return -1;
 }
 
-struct coll *
+int
 sql_binary_compare_coll_seq(Parse *parser, Expr *left, Expr *right,
-			    uint32_t *coll_id)
+			    uint32_t *id)
 {
 	assert(left != NULL);
+	assert(id != NULL);
 	bool is_lhs_forced;
 	bool is_rhs_forced;
 	uint32_t lhs_coll_id;
 	uint32_t rhs_coll_id;
-	struct coll *lhs_coll = sql_expr_coll(parser, left, &is_lhs_forced,
-					      &lhs_coll_id);
-	struct coll *rhs_coll = sql_expr_coll(parser, right, &is_rhs_forced,
-					      &rhs_coll_id);
+	struct coll *unused;
+	if (sql_expr_coll(parser, left, &is_lhs_forced, &lhs_coll_id,
+			  &unused) != 0)
+		return -1;
+	if (sql_expr_coll(parser, right, &is_rhs_forced, &rhs_coll_id,
+			  &unused) != 0)
+		return -1;
 	if (collations_check_compatibility(lhs_coll_id, is_lhs_forced,
-					   rhs_coll_id, is_rhs_forced,
-					   coll_id) != 0) {
-		parser->rc = SQL_TARANTOOL_ERROR;
-		parser->nErr++;
-		return NULL;
+					   rhs_coll_id, is_rhs_forced, id) != 0) {
+		parser->is_aborted = true;
+		return -1;
 	}
-	return *coll_id == rhs_coll_id ? rhs_coll : lhs_coll;;
+	return 0;
 }
 
 /*
@@ -373,11 +456,12 @@ codeCompare(Parse * pParse,	/* The parsing (and code generating) context */
     )
 {
 	uint32_t id;
-	struct coll *p4 =
-		sql_binary_compare_coll_seq(pParse, pLeft, pRight, &id);
+	if (sql_binary_compare_coll_seq(pParse, pLeft, pRight, &id) != 0)
+		return -1;
+	struct coll *coll = coll_by_id(id)->coll;
 	int p5 = binaryCompareP5(pLeft, pRight, jumpIfNull);
 	int addr = sqlVdbeAddOp4(pParse->pVdbe, opcode, in2, dest, in1,
-				     (void *)p4, P4_COLLSEQ);
+				     (void *)coll, P4_COLLSEQ);
 	sqlVdbeChangeP5(pParse->pVdbe, (u8) p5);
 	return addr;
 }
@@ -587,10 +671,12 @@ codeVectorCompare(Parse * pParse,	/* Code generator context */
 	u8 op = pExpr->op;
 	int addrDone = sqlVdbeMakeLabel(v);
 
-	if (nLeft != sqlExprVectorSize(pRight)) {
-		sqlErrorMsg(pParse, "row value misused");
-		return;
-	}
+	/*
+	 * Situation when vectors have different dimensions is
+	 * filtred way before - during expr resolution:
+	 * see resolveExprStep().
+	 */
+	assert(nLeft == sqlExprVectorSize(pRight));
 	assert(pExpr->op == TK_EQ || pExpr->op == TK_NE
 	       || pExpr->op == TK_LT || pExpr->op == TK_GT
 	       || pExpr->op == TK_LE || pExpr->op == TK_GE);
@@ -666,19 +752,24 @@ codeVectorCompare(Parse * pParse,	/* Code generator context */
  * Check that argument nHeight is less than or equal to the maximum
  * expression depth allowed. If it is not, leave an error message in
  * pParse.
+ *
+ * @param pParse Parser context.
+ * @param zName Depth to check.
+ *
+ * @retval 0 on success.
+ * @retval -1 on error.
  */
 int
 sqlExprCheckHeight(Parse * pParse, int nHeight)
 {
-	int rc = SQL_OK;
 	int mxHeight = pParse->db->aLimit[SQL_LIMIT_EXPR_DEPTH];
 	if (nHeight > mxHeight) {
-		sqlErrorMsg(pParse,
-				"Expression tree is too large (maximum depth %d)",
-				mxHeight);
-		rc = SQL_ERROR;
+		diag_set(ClientError, ER_SQL_PARSER_LIMIT, "Number of nodes "\
+			 "in expression tree", nHeight, mxHeight);
+		pParse->is_aborted = true;
+		return -1;
 	}
-	return rc;
+	return 0;
 }
 
 /* The following three functions, heightOfExpr(), heightOfExprList()
@@ -762,7 +853,7 @@ exprSetHeight(Expr * p)
 void
 sqlExprSetHeightAndFlags(Parse * pParse, Expr * p)
 {
-	if (pParse->nErr)
+	if (pParse->is_aborted)
 		return;
 	exprSetHeight(p);
 	sqlExprCheckHeight(pParse, p->nHeight);
@@ -795,113 +886,115 @@ sqlExprSetHeightAndFlags(Parse * pParse, Expr * p)
 #define exprSetHeight(y)
 #endif				/* SQL_MAX_EXPR_DEPTH>0 */
 
-/*
- * This routine is the core allocator for Expr nodes.
- *
- * Construct a new expression node and return a pointer to it.  Memory
- * for this node and for the pToken argument is a single allocation
- * obtained from sqlDbMalloc().  The calling function
- * is responsible for making sure the node eventually gets freed.
- *
- * If dequote is true, then the token (if it exists) is dequoted.
- * If dequote is false, no dequoting is performed.  The deQuote
- * parameter is ignored if pToken is NULL or if the token does not
- * appear to be quoted.  If the quotes were of the form "..." (double-quotes)
- * then the EP_DblQuoted flag is set on the expression node.
- *
- * Special case:  If op==TK_INTEGER and pToken points to a string that
- * can be translated into a 32-bit integer, then the token is not
- * stored in u.zToken.  Instead, the integer values is written
- * into u.iValue and the EP_IntValue flag is set.  No extra storage
- * is allocated to hold the integer text and the dequote flag is ignored.
+/**
+ * Allocate a new empty expression object with reserved extra
+ * memory.
+ * @param db SQL context.
+ * @param op Expression value type.
+ * @param extra_size Extra size, needed to be allocated together
+ *        with the expression.
+ * @retval Not NULL Success. An empty expression.
+ * @retval NULL Error. A diag message is set.
  */
-Expr *
-sqlExprAlloc(sql * db,	/* Handle for sqlDbMallocRawNN() */
-		 int op,	/* Expression opcode */
-		 const Token * pToken,	/* Token argument.  Might be NULL */
-		 int dequote	/* True to dequote */
-    )
+static struct Expr *
+sql_expr_new_empty(struct sql *db, int op, int extra_size)
 {
-	Expr *pNew;
-	int nExtra = 0;
-	int iValue = 0;
-
-	assert(db != 0);
-	if (pToken) {
-		if (op != TK_INTEGER || pToken->z == 0
-		    || sqlGetInt32(pToken->z, &iValue) == 0) {
-			nExtra = pToken->n + 1;
-			assert(iValue >= 0);
-		}
+	struct Expr *e = sqlDbMallocRawNN(db, sizeof(*e) + extra_size);
+	if (e == NULL) {
+		diag_set(OutOfMemory, sizeof(*e), "sqlDbMallocRawNN", "e");
+		return NULL;
 	}
-	pNew = sqlDbMallocRawNN(db, sizeof(Expr) + nExtra);
-	if (pNew) {
-		memset(pNew, 0, sizeof(Expr));
-		pNew->op = (u8) op;
-		pNew->iAgg = -1;
-		if (pToken) {
-			if (nExtra == 0) {
-				pNew->flags |= EP_IntValue;
-				pNew->u.iValue = iValue;
-			} else {
-				pNew->u.zToken = (char *)&pNew[1];
-				assert(pToken->z != 0 || pToken->n == 0);
-				if (pToken->n)
-					memcpy(pNew->u.zToken, pToken->z,
-					       pToken->n);
-				pNew->u.zToken[pToken->n] = 0;
-				if (dequote){
-					if (pNew->u.zToken[0] == '"')
-						pNew->flags |= EP_DblQuoted;
-					if (pNew->op == TK_ID ||
-					    pNew->op == TK_COLLATE ||
-					    pNew->op == TK_FUNCTION){
-						sqlNormalizeName(pNew->u.zToken);
-					}else{
-						sqlDequote(pNew->u.zToken);
-					}
-				}
-			}
-		}
-#if SQL_MAX_EXPR_DEPTH>0
-		pNew->nHeight = 1;
+	memset(e, 0, sizeof(*e));
+	e->op = (u8)op;
+	e->iAgg = -1;
+#if SQL_MAX_EXPR_DEPTH > 0
+	e->nHeight = 1;
 #endif
-	}
-	return pNew;
+	return e;
 }
 
-/*
- * Allocate a new expression node from a zero-terminated token that has
- * already been dequoted.
+/**
+ * Try to convert a token of a specified type to integer.
+ * @param op Token type.
+ * @param token Token itself.
+ * @param[out] res Result integer.
+ * @retval 0 Success. @A res stores a result.
+ * @retval -1 Error. Can not be converted. No diag.
  */
-Expr *
-sqlExpr(sql * db,	/* Handle for sqlDbMallocZero() (may be null) */
-	    int op,		/* Expression opcode */
-	    const char *zToken	/* Token argument.  Might be NULL */
-    )
+static inline int
+sql_expr_token_to_int(int op, const struct Token *token, int *res)
 {
-	Token x;
-	x.z = zToken;
-	x.n = zToken ? sqlStrlen30(zToken) : 0;
-	return sqlExprAlloc(db, op, &x, 0);
+	if (op == TK_INTEGER && token->z != NULL &&
+	    sqlGetInt32(token->z, res) > 0)
+		return 0;
+	return -1;
 }
 
-/* Allocate a new expression and initialize it as integer.
- * @param db sql engine.
- * @param value Value to initialize by.
- *
- * @retval not NULL Allocated and initialized expr.
- * @retval     NULL Memory error.
- */
-Expr *
-sqlExprInteger(sql * db, int value)
+/** Create an expression of a constant integer. */
+static inline struct Expr *
+sql_expr_new_int(struct sql *db, int value)
 {
-	Expr *ret = sqlExpr(db, TK_INTEGER, NULL);
-	if (ret != NULL) {
-		ret->flags = EP_IntValue;
-		ret->u.iValue = value;
+	struct Expr *e = sql_expr_new_empty(db, TK_INTEGER, 0);
+	if (e != NULL) {
+		e->flags |= EP_IntValue;
+		e->u.iValue = value;
 	}
-	return ret;
+	return e;
+}
+
+struct Expr *
+sql_expr_new(struct sql *db, int op, const struct Token *token)
+{
+	int extra_sz = 0;
+	if (token != NULL) {
+		int val;
+		if (sql_expr_token_to_int(op, token, &val) == 0)
+			return sql_expr_new_int(db, val);
+		extra_sz = token->n + 1;
+	}
+	struct Expr *e = sql_expr_new_empty(db, op, extra_sz);
+	if (e == NULL || token == NULL)
+		return e;
+	e->u.zToken = (char *) &e[1];
+	assert(token->z != NULL || token->n == 0);
+	memcpy(e->u.zToken, token->z, token->n);
+	e->u.zToken[token->n] = '\0';
+	return e;
+}
+
+struct Expr *
+sql_expr_new_dequoted(struct sql *db, int op, const struct Token *token)
+{
+	int extra_size = 0, rc;
+	if (token != NULL) {
+		int val;
+		assert(token->z != NULL || token->n == 0);
+		if (sql_expr_token_to_int(op, token, &val) == 0)
+			return sql_expr_new_int(db, val);
+		extra_size = token->n + 1;
+	}
+	struct Expr *e = sql_expr_new_empty(db, op, extra_size);
+	if (e == NULL || token == NULL || token->n == 0)
+		return e;
+	e->u.zToken = (char *) &e[1];
+	if (token->z[0] == '"')
+		e->flags |= EP_DblQuoted;
+	if (op != TK_ID && op != TK_COLLATE && op != TK_FUNCTION) {
+		memcpy(e->u.zToken, token->z, token->n);
+		e->u.zToken[token->n] = '\0';
+		sqlDequote(e->u.zToken);
+	} else if ((rc = sql_normalize_name(e->u.zToken, extra_size, token->z,
+					    token->n)) > extra_size) {
+		extra_size = rc;
+		e = sqlDbReallocOrFree(db, e, sizeof(*e) + extra_size);
+		if (e == NULL)
+			return NULL;
+		e->u.zToken = (char *) &e[1];
+		if (sql_normalize_name(e->u.zToken, extra_size, token->z,
+				       token->n) > extra_size)
+			unreachable();
+	}
+	return e;
 }
 
 /*
@@ -946,9 +1039,14 @@ sqlPExpr(Parse * pParse,	/* Parsing context */
     )
 {
 	Expr *p;
-	if (op == TK_AND && pParse->nErr == 0) {
-		/* Take advantage of short-circuit false optimization for AND */
-		p = sqlExprAnd(pParse->db, pLeft, pRight);
+	if (op == TK_AND && !pParse->is_aborted) {
+		/*
+		 * Take advantage of short-circuit false
+		 * optimization for AND.
+		 */
+		p = sql_and_expr_new(pParse->db, pLeft, pRight);
+		if (p == NULL)
+			pParse->is_aborted = true;
 	} else {
 		p = sqlDbMallocRawNN(pParse->db, sizeof(Expr));
 		if (p) {
@@ -1017,30 +1115,22 @@ exprAlwaysFalse(Expr * p)
 	return v == 0;
 }
 
-/*
- * Join two expressions using an AND operator.  If either expression is
- * NULL, then just return the other expression.
- *
- * If one side or the other of the AND is known to be false, then instead
- * of returning an AND expression, just return a constant expression with
- * a value of false.
- */
-Expr *
-sqlExprAnd(sql * db, Expr * pLeft, Expr * pRight)
+struct Expr *
+sql_and_expr_new(struct sql *db, struct Expr *left_expr,
+		 struct Expr *right_expr)
 {
-	if (pLeft == 0) {
-		return pRight;
-	} else if (pRight == 0) {
-		return pLeft;
-	} else if (exprAlwaysFalse(pLeft) || exprAlwaysFalse(pRight)) {
-		sql_expr_delete(db, pLeft, false);
-		sql_expr_delete(db, pRight, false);
-		return sqlExprAlloc(db, TK_INTEGER, &sqlIntTokens[0],
-					0);
+	if (left_expr == NULL) {
+		return right_expr;
+	} else if (right_expr == NULL) {
+		return left_expr;
+	} else if (exprAlwaysFalse(left_expr) || exprAlwaysFalse(right_expr)) {
+		sql_expr_delete(db, left_expr, false);
+		sql_expr_delete(db, right_expr, false);
+		return sql_expr_new(db, TK_INTEGER, &sqlIntTokens[0]);
 	} else {
-		Expr *pNew = sqlExprAlloc(db, TK_AND, 0, 0);
-		sqlExprAttachSubtrees(db, pNew, pLeft, pRight);
-		return pNew;
+		struct Expr *new_expr = sql_expr_new_anon(db, TK_AND);
+		sqlExprAttachSubtrees(db, new_expr, left_expr, right_expr);
+		return new_expr;
 	}
 }
 
@@ -1051,18 +1141,18 @@ sqlExprAnd(sql * db, Expr * pLeft, Expr * pRight)
 Expr *
 sqlExprFunction(Parse * pParse, ExprList * pList, Token * pToken)
 {
-	Expr *pNew;
-	sql *db = pParse->db;
-	assert(pToken);
-	pNew = sqlExprAlloc(db, TK_FUNCTION, pToken, 1);
-	if (pNew == 0) {
-		sql_expr_list_delete(db, pList);	/* Avoid memory leak when malloc fails */
-		return 0;
+	struct sql *db = pParse->db;
+	assert(pToken != NULL);
+	struct Expr *new_expr = sql_expr_new_dequoted(db, TK_FUNCTION, pToken);
+	if (new_expr == NULL) {
+		sql_expr_list_delete(db, pList);
+		pParse->is_aborted = true;
+		return NULL;
 	}
-	pNew->x.pList = pList;
-	assert(!ExprHasProperty(pNew, EP_xIsSelect));
-	sqlExprSetHeightAndFlags(pParse, pNew);
-	return pNew;
+	new_expr->x.pList = pList;
+	assert(!ExprHasProperty(new_expr, EP_xIsSelect));
+	sqlExprSetHeightAndFlags(pParse, new_expr);
+	return new_expr;
 }
 
 /*
@@ -1116,10 +1206,17 @@ sqlExprAssignVarNumber(Parse * pParse, Expr * pExpr, u32 n)
 			testcase(i == 1);
 			testcase(i == SQL_BIND_PARAMETER_MAX - 1);
 			testcase(i == SQL_BIND_PARAMETER_MAX);
-			if (!is_ok || i < 1 || i > SQL_BIND_PARAMETER_MAX) {
-				sqlErrorMsg(pParse,
-						"variable number must be between $1 and $%d",
-						SQL_BIND_PARAMETER_MAX);
+			if (i < 1) {
+				diag_set(ClientError, ER_SQL_PARSER_GENERIC,
+					 "Index of binding slots must start "\
+					 "from 1");
+				pParse->is_aborted = true;
+				return;
+			}
+			if (!is_ok || i > SQL_BIND_PARAMETER_MAX) {
+				diag_set(ClientError, ER_SQL_BIND_PARAMETER_MAX,
+					 SQL_BIND_PARAMETER_MAX);
+				pParse->is_aborted = true;
 				return;
 			}
 			if (x > pParse->nVar) {
@@ -1147,7 +1244,9 @@ sqlExprAssignVarNumber(Parse * pParse, Expr * pExpr, u32 n)
 	}
 	pExpr->iColumn = x;
 	if (x > SQL_BIND_PARAMETER_MAX) {
-		sqlErrorMsg(pParse, "too many SQL variables");
+		diag_set(ClientError, ER_SQL_BIND_PARAMETER_MAX,
+			 SQL_BIND_PARAMETER_MAX);
+		pParse->is_aborted = true;
 	}
 }
 
@@ -1536,7 +1635,6 @@ sqlSrcListDup(sql * db, SrcList * p, int flags)
 	for (i = 0; i < p->nSrc; i++) {
 		struct SrcList_item *pNewItem = &pNew->a[i];
 		struct SrcList_item *pOldItem = &p->a[i];
-		Table *pTab;
 		pNewItem->zName = sqlDbStrDup(db, pOldItem->zName);
 		pNewItem->zAlias = sqlDbStrDup(db, pOldItem->zAlias);
 		pNewItem->fg = pOldItem->fg;
@@ -1552,10 +1650,7 @@ sqlSrcListDup(sql * db, SrcList * p, int flags)
 			pNewItem->u1.pFuncArg =
 			    sql_expr_list_dup(db, pOldItem->u1.pFuncArg, flags);
 		}
-		pTab = pNewItem->pTab = pOldItem->pTab;
-		if (pTab) {
-			pTab->nTabRef++;
-		}
+		pNewItem->space = pOldItem->space;
 		pNewItem->pSelect =
 		    sqlSelectDup(db, pOldItem->pSelect, flags);
 		pNewItem->pOn = sqlExprDup(db, pOldItem->pOn, flags);
@@ -1582,9 +1677,11 @@ sqlIdListDup(sql * db, IdList * p)
 		sqlDbFree(db, pNew);
 		return 0;
 	}
-	/* Note that because the size of the allocation for p->a[] is not
-	 * necessarily a power of two, sqlIdListAppend() may not be called
-	 * on the duplicate created by this function.
+	/*
+	 * Note that because the size of the allocation for p->a[]
+	 * is not necessarily a power of two, sql_id_list_append()
+	 * may not be called on the duplicate created by this
+	 * function.
 	 */
 	for (i = 0; i < p->nId; i++) {
 		struct IdList_item *pNewItem = &pNew->a[i];
@@ -1702,8 +1799,10 @@ sqlExprListAppendVector(Parse * pParse,	/* Parsing context */
 	 */
 	if (pExpr->op != TK_SELECT
 	    && pColumns->nId != (n = sqlExprVectorSize(pExpr))) {
-		sqlErrorMsg(pParse, "%d columns assigned %d values",
-				pColumns->nId, n);
+		const char *err = tt_sprintf("%d columns assigned %d values",
+					     pColumns->nId, n);
+		diag_set(ClientError, ER_SQL_PARSER_GENERIC, err);
+		pParse->is_aborted = true;
 		goto vector_append_error;
 	}
 
@@ -1754,6 +1853,25 @@ sqlExprListSetSortOrder(struct ExprList *p, enum sort_order sort_order)
 	p->a[p->nExpr - 1].sort_order = sort_order;
 }
 
+void
+sql_expr_check_sort_orders(struct Parse *parse,
+			   const struct ExprList *expr_list)
+{
+	if(expr_list == NULL)
+		return;
+	enum sort_order reference_order = expr_list->a[0].sort_order;
+	for (int i = 1; i < expr_list->nExpr; i++) {
+		assert(expr_list->a[i].sort_order != SORT_ORDER_UNDEF);
+		if (expr_list->a[i].sort_order != reference_order) {
+			diag_set(ClientError, ER_UNSUPPORTED,
+				 "ORDER BY with LIMIT",
+				 "different sorting orders");
+			parse->is_aborted = true;
+			return;
+		}
+	}
+}
+
 /*
  * Set the ExprList.a[].zName element of the most recently added item
  * on the expression list.
@@ -1769,19 +1887,22 @@ sqlExprListSetName(Parse * pParse,	/* Parsing context */
 		       int dequote	/* True to cause the name to be dequoted */
     )
 {
-	assert(pList != 0 || pParse->db->mallocFailed != 0);
-	if (pList) {
-		struct ExprList_item *pItem;
-		assert(pList->nExpr > 0);
-		pItem = &pList->a[pList->nExpr - 1];
-		assert(pItem->zName == 0);
-		pItem->zName = sqlDbStrNDup(pParse->db, pName->z, pName->n);
-		if (dequote)
-			sqlNormalizeName(pItem->zName);
-		/* n = 0 in case of select * */
-		if (pName->n != 0)
-			sqlCheckIdentifierName(pParse, pItem->zName);
+	struct sql *db = pParse->db;
+	assert(pList != NULL || db->mallocFailed != 0);
+	if (pList == NULL || pName->n == 0)
+		return;
+	assert(pList->nExpr > 0);
+	struct ExprList_item *item = &pList->a[pList->nExpr - 1];
+	assert(item->zName == NULL);
+	if (dequote) {
+		item->zName = sql_normalized_name_db_new(db, pName->z, pName->n);
+		if (item->zName == NULL)
+			pParse->is_aborted = true;
+	} else {
+		item->zName = sqlDbStrNDup(db, pName->z, pName->n);
 	}
+	if (item->zName != NULL)
+		sqlCheckIdentifierName(pParse, item->zName);
 }
 
 /*
@@ -1808,22 +1929,6 @@ sqlExprListSetSpan(Parse * pParse,	/* Parsing context */
 		pItem->zSpan = sqlDbStrNDup(db, (char *)pSpan->zStart,
 						(int)(pSpan->zEnd -
 						      pSpan->zStart));
-	}
-}
-
-/*
- * If the expression list pEList contains more than iLimit elements,
- * leave an error message in pParse.
- */
-void
-sqlExprListCheckLength(Parse * pParse,
-			   ExprList * pEList, const char *zObject)
-{
-	int mx = pParse->db->aLimit[SQL_LIMIT_COLUMN];
-	testcase(pEList && pEList->nExpr == mx);
-	testcase(pEList && pEList->nExpr == mx + 1);
-	if (pEList && pEList->nExpr > mx) {
-		sqlErrorMsg(pParse, "too many columns in %s", zObject);
 	}
 }
 
@@ -2146,7 +2251,6 @@ isCandidateForInOpt(Expr * pX)
 	Select *p;
 	SrcList *pSrc;
 	ExprList *pEList;
-	Table MAYBE_UNUSED *pTab;
 	int i;
 	if (!ExprHasProperty(pX, EP_xIsSelect))
 		return 0;	/* Not a subquery */
@@ -2174,10 +2278,9 @@ isCandidateForInOpt(Expr * pX)
 		return 0;	/* Single term in FROM clause */
 	if (pSrc->a[0].pSelect)
 		return 0;	/* FROM is not a subquery or view */
-	pTab = pSrc->a[0].pTab;
-	assert(pTab != 0);
+	assert(pSrc->a[0].space != NULL);
 	/* FROM clause is not a view */
-	assert(!pTab->def->opts.is_view);
+	assert(!pSrc->a[0].space->def->opts.is_view);
 	pEList = p->pEList;
 	assert(pEList != 0);
 	/* All SELECT results must be columns. */
@@ -2354,21 +2457,20 @@ sqlFindInIndex(Parse * pParse,	/* Parsing context */
 	 * satisfy the query.  This is preferable to generating a new
 	 * ephemeral table.
 	 */
-	if (pParse->nErr == 0 && (p = isCandidateForInOpt(pX)) != 0) {
+	if (!pParse->is_aborted && (p = isCandidateForInOpt(pX)) != 0) {
 		sql *db = pParse->db;	/* Database connection */
-		Table *pTab;	/* Table <table>. */
 		ExprList *pEList = p->pEList;
 		int nExpr = pEList->nExpr;
 
 		assert(p->pEList != 0);	/* Because of isCandidateForInOpt(p) */
 		assert(p->pEList->a[0].pExpr != 0);	/* Because of isCandidateForInOpt(p) */
 		assert(p->pSrc != 0);	/* Because of isCandidateForInOpt(p) */
-		pTab = p->pSrc->a[0].pTab;
 		assert(v);	/* sqlGetVdbe() has always been previously called */
 
 		bool type_is_suitable = true;
 		int i;
 
+		struct space *space = p->pSrc->a[0].space;
 		/* Check that the type that will be used to perform each
 		 * comparison is the same as the type of each column in table
 		 * on the RHS of the IN operator.  If it not, it is not possible to
@@ -2379,7 +2481,7 @@ sqlFindInIndex(Parse * pParse,	/* Parsing context */
 			int iCol = pEList->a[i].pExpr->iColumn;
 			/* RHS table */
 			assert(iCol >= 0);
-			enum field_type idx_type = pTab->def->fields[iCol].type;
+			enum field_type idx_type = space->def->fields[iCol].type;
 			enum field_type lhs_type = sql_expr_type(pLhs);
 			/*
 			 * Index search is possible only if types
@@ -2394,7 +2496,7 @@ sqlFindInIndex(Parse * pParse,	/* Parsing context */
 			 * Here we need real space since further
 			 * it is used in cursor opening routine.
 			 */
-			struct space *space = space_by_id(pTab->def->id);
+
 			/* Search for an existing index that will work for this IN operator */
 			for (uint32_t k = 0; k < space->index_count &&
 			     eType == 0; ++k) {
@@ -2430,19 +2532,15 @@ sqlFindInIndex(Parse * pParse,	/* Parsing context */
 					Expr *pLhs = sqlVectorFieldSubexpr(pX->pLeft, i);
 					Expr *pRhs = pEList->a[i].pExpr;
 					uint32_t id;
-					struct coll *pReq = sql_binary_compare_coll_seq
-						    (pParse, pLhs, pRhs, &id);
+					if (sql_binary_compare_coll_seq(pParse, pLhs, pRhs, &id) != 0)
+						break;
 					int j;
 
 					for (j = 0; j < nExpr; j++) {
 						if ((int) parts[j].fieldno !=
 						    pRhs->iColumn)
 							continue;
-
-						struct coll *idx_coll =
-							     parts[j].coll;
-						if (pReq != NULL &&
-						    pReq != idx_coll)
+						if (id != parts[j].coll_id)
 							continue;
 						break;
 					}
@@ -2590,41 +2688,6 @@ expr_in_type(Parse *pParse, Expr *pExpr)
 }
 
 /*
- * Load the Parse object passed as the first argument with an error
- * message of the form:
- *
- *   "sub-select returns N columns - expected M"
- */
-void
-sqlSubselectError(Parse * pParse, int nActual, int nExpect)
-{
-	const char *zFmt = "sub-select returns %d columns - expected %d";
-	sqlErrorMsg(pParse, zFmt, nActual, nExpect);
-}
-
-/*
- * Expression pExpr is a vector that has been used in a context where
- * it is not permitted. If pExpr is a sub-select vector, this routine
- * loads the Parse object with a message of the form:
- *
- *   "sub-select returns N columns - expected 1"
- *
- * Or, if it is a regular scalar vector:
- *
- *   "row value misused"
- */
-void
-sqlVectorErrorMsg(Parse * pParse, Expr * pExpr)
-{
-	if (pExpr->flags & EP_xIsSelect) {
-		sqlSubselectError(pParse, pExpr->x.pSelect->pEList->nExpr,
-				      1);
-	} else {
-		sqlErrorMsg(pParse, "row value misused");
-	}
-}
-
-/*
  * Generate code for scalar subqueries used as a subquery expression, EXISTS,
  * or IN operators.  Examples:
  *
@@ -2755,9 +2818,9 @@ sqlCodeSubselect(Parse * pParse,	/* Parsing context */
 						Expr *p =
 						    sqlVectorFieldSubexpr
 						    (pLeft, i);
-						sql_binary_compare_coll_seq(pParse, p,
-							pEList->a[i].pExpr,
-							&key_info->parts[i].coll_id);
+						if (sql_binary_compare_coll_seq(pParse, p, pEList->a[i].pExpr,
+										&key_info->parts[i].coll_id) != 0)
+							return 0;
 					}
 				}
 			} else if (ALWAYS(pExpr->x.pList != 0)) {
@@ -2776,8 +2839,11 @@ sqlCodeSubselect(Parse * pParse,	/* Parsing context */
 				enum field_type lhs_type =
 					sql_expr_type(pLeft);
 				bool unused;
-				sql_expr_coll(pParse, pExpr->pLeft,
-					      &unused, &key_info->parts[0].coll_id);
+				struct coll *unused_coll;
+				if (sql_expr_coll(pParse, pExpr->pLeft, &unused,
+						  &key_info->parts[0].coll_id,
+						  &unused_coll) != 0)
+					return 0;
 
 				/* Loop through each expression in <exprlist>. */
 				r1 = sqlGetTempReg(pParse);
@@ -2860,10 +2926,11 @@ sqlCodeSubselect(Parse * pParse,	/* Parsing context */
 			}
 			if (pSel->pLimit == NULL) {
 				pSel->pLimit =
-					sqlExprAlloc(pParse->db, TK_INTEGER,
-							 &sqlIntTokens[1],
-							 0);
-				if (pSel->pLimit != NULL) {
+					sql_expr_new(pParse->db, TK_INTEGER,
+						     &sqlIntTokens[1]);
+				if (pSel->pLimit == NULL) {
+					pParse->is_aborted = true;
+				} else {
 					ExprSetProperty(pSel->pLimit,
 							EP_System);
 				}
@@ -2902,15 +2969,23 @@ int
 sqlExprCheckIN(Parse * pParse, Expr * pIn)
 {
 	int nVector = sqlExprVectorSize(pIn->pLeft);
+	const char *err;
 	if ((pIn->flags & EP_xIsSelect)) {
 		if (nVector != pIn->x.pSelect->pEList->nExpr) {
-			sqlSubselectError(pParse,
-					      pIn->x.pSelect->pEList->nExpr,
-					      nVector);
+			err = "sub-select returns %d columns - expected %d";
+			int expr_count = pIn->x.pSelect->pEList->nExpr;
+			diag_set(ClientError, ER_SQL_PARSER_GENERIC,
+				 tt_sprintf(err, expr_count, nVector));
+			pParse->is_aborted = true;
 			return 1;
 		}
 	} else if (nVector != 1) {
-		sqlVectorErrorMsg(pParse, pIn->pLeft);
+		assert((pIn->pLeft->flags & EP_xIsSelect) != 0);
+		int expr_count = pIn->pLeft->x.pSelect->pEList->nExpr;
+		err = tt_sprintf("sub-select returns %d columns - expected 1",
+				 expr_count);
+		diag_set(ClientError, ER_SQL_PARSER_GENERIC, err);
+		pParse->is_aborted = true;
 		return 1;
 	}
 	return 0;
@@ -2990,7 +3065,7 @@ sqlExprCodeIN(Parse * pParse,	/* Parsing and code generating context */
 				   destIfFalse == destIfNull ? 0 : &rRhsHasNull,
 				   aiMap, 0);
 
-	assert(pParse->nErr || nVector == 1 || eType == IN_INDEX_EPH
+	assert(pParse->is_aborted || nVector == 1 || eType == IN_INDEX_EPH
 	       || eType == IN_INDEX_INDEX_ASC || eType == IN_INDEX_INDEX_DESC);
 #ifdef SQL_DEBUG
 	/* Confirm that aiMap[] contains nVector integer values between 0 and
@@ -3040,8 +3115,10 @@ sqlExprCodeIN(Parse * pParse,	/* Parsing and code generating context */
 		bool unused;
 		uint32_t id;
 		ExprList *pList = pExpr->x.pList;
-		struct coll *coll = sql_expr_coll(pParse, pExpr->pLeft,
-						   &unused, &id);
+		struct coll *coll;
+		if (sql_expr_coll(pParse, pExpr->pLeft, &unused, &id,
+				  &coll) != 0)
+			goto sqlExprCodeIN_finished;
 		int labelOk = sqlVdbeMakeLabel(v);
 		int r2, regToFree;
 		int regCkNull = 0;
@@ -3173,7 +3250,9 @@ sqlExprCodeIN(Parse * pParse,	/* Parsing and code generating context */
 		uint32_t id;
 		int r3 = sqlGetTempReg(pParse);
 		Expr *p = sqlVectorFieldSubexpr(pLeft, i);
-		struct coll *pColl = sql_expr_coll(pParse, p, &unused, &id);
+		struct coll *pColl;
+		if (sql_expr_coll(pParse, p, &unused, &id, &pColl) != 0)
+			goto sqlExprCodeIN_finished;
 		/* Tarantool: Replace i -> aiMap [i], since original order of columns
 		 * is preserved.
 		 */
@@ -3260,15 +3339,15 @@ expr_code_int(struct Parse *parse, struct Expr *expr, bool is_neg,
 		int c = sql_dec_or_hex_to_i64(z, &value);
 		if (c == 1 || (c == 2 && !is_neg) ||
 		    (is_neg && value == SMALLEST_INT64)) {
+			const char *sign = is_neg ? "-" : "";
 			if (sql_strnicmp(z, "0x", 2) == 0) {
-				sqlErrorMsg(parse,
-						"hex literal too big: %s%s",
-						is_neg ? "-" : "", z);
+				diag_set(ClientError, ER_HEX_LITERAL_MAX, sign,
+					 z, strlen(z) - 2, 16);
 			} else {
-				sqlErrorMsg(parse,
-						"oversized integer: %s%s",
-						is_neg ? "-" : "", z);
+				diag_set(ClientError, ER_INT_LITERAL_MAX, sign,
+					 z, INT64_MIN, INT64_MAX);
 			}
+			parse->is_aborted = true;
 		} else {
 			if (is_neg)
 				value = c == 2 ? SMALLEST_INT64 : -value;
@@ -3309,7 +3388,7 @@ sqlExprCacheStore(Parse * pParse, int iTab, int iCol, int iReg)
 	struct yColCache *p;
 
 	/* Unless an error has occurred, register numbers are always positive. */
-	assert(iReg > 0 || pParse->nErr || pParse->db->mallocFailed);
+	assert(iReg > 0 || pParse->is_aborted || pParse->db->mallocFailed);
 	assert(iCol >= -1 && iCol < 32768);	/* Finite column numbers */
 
 	/* The SQL_ColumnCache flag disables the column cache.  This is used
@@ -3678,20 +3757,17 @@ sqlExprCodeTarget(Parse * pParse, Expr * pExpr, int target)
 							pExpr->op2);
 		}
 	case TK_INTEGER:{
-			pExpr->type = FIELD_TYPE_INTEGER;
 			expr_code_int(pParse, pExpr, false, target);
 			return target;
 		}
 #ifndef SQL_OMIT_FLOATING_POINT
 	case TK_FLOAT:{
-			pExpr->type = FIELD_TYPE_INTEGER;
 			assert(!ExprHasProperty(pExpr, EP_IntValue));
 			codeReal(v, pExpr->u.zToken, 0, target);
 			return target;
 		}
 #endif
 	case TK_STRING:{
-			pExpr->type = FIELD_TYPE_STRING;
 			assert(!ExprHasProperty(pExpr, EP_IntValue));
 			sqlVdbeLoadString(v, target, pExpr->u.zToken);
 			return target;
@@ -3709,7 +3785,6 @@ sqlExprCodeTarget(Parse * pParse, Expr * pExpr, int target)
 			assert(pExpr->u.zToken[0] == 'x'
 			       || pExpr->u.zToken[0] == 'X');
 			assert(pExpr->u.zToken[1] == '\'');
-			pExpr->type = FIELD_TYPE_SCALAR;
 			z = &pExpr->u.zToken[2];
 			n = sqlStrlen30(z) - 1;
 			assert(z[n] == '\'');
@@ -3904,9 +3979,10 @@ sqlExprCodeTarget(Parse * pParse, Expr * pExpr, int target)
 			AggInfo *pInfo = pExpr->pAggInfo;
 			if (pInfo == 0) {
 				assert(!ExprHasProperty(pExpr, EP_IntValue));
-				sqlErrorMsg(pParse,
-						"misuse of aggregate: %s()",
-						pExpr->u.zToken);
+				const char *err = "misuse of aggregate: %s()";
+				diag_set(ClientError, ER_SQL_PARSER_GENERIC,
+					 tt_sprintf(err, pExpr->u.zToken));
+				pParse->is_aborted = true;
 			} else {
 				pExpr->type = pInfo->aFunc->pFunc->ret_type;
 				return pInfo->aFunc[pExpr->iAgg].iMem;
@@ -3940,20 +4016,10 @@ sqlExprCodeTarget(Parse * pParse, Expr * pExpr, int target)
 			}
 #endif
 			if (pDef == 0 || pDef->xFinalize != 0) {
-				sqlErrorMsg(pParse,
-						"unknown function: %s()", zId);
+				diag_set(ClientError, ER_NO_SUCH_FUNCTION,
+					 zId);
+				pParse->is_aborted = true;
 				break;
-			}
-
-			if (pDef->ret_type != FIELD_TYPE_SCALAR) {
-				pExpr->type = pDef->ret_type;
-			} else {
-				/*
-				 * Otherwise, use first arg as
-				 * expression type.
-				 */
-				if (pFarg && pFarg->nExpr > 0)
-					pExpr->type = pFarg->a[0].pExpr->type;
 			}
 			/* Attempt a direct implementation of the built-in COALESCE() and
 			 * IFNULL() functions.  This avoids unnecessary evaluation of
@@ -3997,14 +4063,48 @@ sqlExprCodeTarget(Parse * pParse, Expr * pExpr, int target)
 					testcase(i == 31);
 					constMask |= MASKBIT32(i);
 				}
-				if ((pDef->funcFlags & SQL_FUNC_NEEDCOLL) !=
-				    0 && coll == NULL) {
-					bool unused;
-					uint32_t id;
-					coll = sql_expr_coll(pParse,
-							     pFarg->a[i].pExpr,
-							     &unused, &id);
+			}
+			/*
+			 * Function arguments may have different
+			 * collations. The following code
+			 * checks if they are compatible and
+			 * finds the collation to be used. This
+			 * is done using ANSI rules from
+			 * collations_check_compatibility().
+			 */
+			if ((pDef->funcFlags & SQL_FUNC_NEEDCOLL) != 0) {
+				struct coll *unused = NULL;
+				uint32_t curr_id = COLL_NONE;
+				bool is_curr_forced = false;
+
+				uint32_t next_id = COLL_NONE;
+				bool is_next_forced = false;
+
+				if (sql_expr_coll(pParse, pFarg->a[0].pExpr,
+						  &is_curr_forced, &curr_id,
+						  &unused) != 0)
+					return 0;
+
+				for (int j = 1; j < nFarg; j++) {
+					if (sql_expr_coll(pParse,
+							  pFarg->a[j].pExpr,
+							  &is_next_forced,
+							  &next_id,
+							  &unused) != 0)
+						return 0;
+
+					if (collations_check_compatibility(
+						curr_id, is_curr_forced,
+						next_id, is_next_forced,
+						&curr_id) != 0) {
+						pParse->is_aborted = true;
+						return 0;
+					}
+					is_curr_forced = curr_id == next_id ?
+							 is_next_forced :
+							 is_curr_forced;
 				}
+				coll = coll_by_id(curr_id)->coll;
 			}
 			if (pFarg) {
 				if (constMask) {
@@ -4070,7 +4170,11 @@ sqlExprCodeTarget(Parse * pParse, Expr * pExpr, int target)
 			testcase(op == TK_SELECT);
 			if (op == TK_SELECT
 			    && (nCol = pExpr->x.pSelect->pEList->nExpr) != 1) {
-				sqlSubselectError(pParse, nCol, 1);
+				const char *err = "sub-select returns %d "\
+						  "columns - expected 1";
+				diag_set(ClientError, ER_SQL_PARSER_GENERIC,
+					 tt_sprintf(err, nCol));
+				pParse->is_aborted = true;
 			} else {
 				return sqlCodeSubselect(pParse, pExpr, 0);
 			}
@@ -4089,9 +4193,11 @@ sqlExprCodeTarget(Parse * pParse, Expr * pExpr, int target)
 						 sqlExprVectorSize(pExpr->
 								       pLeft))
 			    ) {
-				sqlErrorMsg(pParse,
-						"%d columns assigned %d values",
-						pExpr->iTable, n);
+				const char *err =
+					"%d columns assigned %d values";
+				diag_set(ClientError, ER_SQL_PARSER_GENERIC,
+					 tt_sprintf(err, pExpr->iTable, n));
+				pParse->is_aborted = true;
 			}
 			return pExpr->pLeft->iTable + pExpr->iColumn;
 		}
@@ -4190,7 +4296,9 @@ sqlExprCodeTarget(Parse * pParse, Expr * pExpr, int target)
 		}
 
 	case TK_VECTOR:{
-			sqlErrorMsg(pParse, "row value misused");
+			diag_set(ClientError, ER_SQL_PARSER_GENERIC,
+				 "row value misused");
+			pParse->is_aborted = true;
 			break;
 		}
 
@@ -4283,15 +4391,16 @@ sqlExprCodeTarget(Parse * pParse, Expr * pExpr, int target)
 			} else {
 				sqlVdbeAddOp2(v, OP_Null, 0, target);
 			}
-			assert(pParse->db->mallocFailed || pParse->nErr > 0
+			assert(pParse->db->mallocFailed || pParse->is_aborted
 			       || pParse->iCacheLevel == iCacheLevel);
 			sqlVdbeResolveLabel(v, endLabel);
 			break;
 		}
 	case TK_RAISE:
-		if (pParse->pTriggerTab == NULL) {
-			sqlErrorMsg(pParse, "RAISE() may only be used "
-					"within a trigger-program");
+		if (pParse->triggered_space == NULL) {
+			diag_set(ClientError, ER_SQL_PARSER_GENERIC, "RAISE() "\
+				 "may only be used within a trigger-program");
+			pParse->is_aborted = true;
 			return 0;
 		}
 		if (pExpr->on_conflict_action == ON_CONFLICT_ACTION_ABORT)

@@ -40,12 +40,10 @@
 #include "fiber_cond.h"
 #include "trigger.h"
 #include "trivia/util.h"
-#include "tt_uuid.h"
-#include "uri.h"
+#include "uuid/tt_uuid.h"
+#include "uri/uri.h"
 
 #include "xrow.h"
-
-struct xstream;
 
 enum { APPLIER_SOURCE_MAXLEN = 1024 }; /* enough to fit URI with passwords */
 
@@ -116,10 +114,6 @@ struct applier {
 	bool is_paused;
 	/** Condition variable signaled to resume the applier. */
 	struct fiber_cond resume_cond;
-	/** xstream to process rows during initial JOIN */
-	struct xstream *join_stream;
-	/** xstream to process rows during final JOIN and SUBSCRIBE */
-	struct xstream *subscribe_stream;
 };
 
 /**
@@ -152,8 +146,7 @@ applier_stop(struct applier *applier);
  * @error   throws OutOfMemory exception if out of memory.
  */
 struct applier *
-applier_new(const char *uri, struct xstream *join_stream,
-	    struct xstream *subscribe_stream);
+applier_new(const char *uri);
 
 /**
  * Destroy and delete a applier.
